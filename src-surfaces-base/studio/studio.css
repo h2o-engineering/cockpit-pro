@@ -4089,6 +4089,49 @@ body[data-route="reader"] :where(
   margin-right:0 !important;
 }
 
+/* Rich replay carries ChatGPT's nested turn shells, but Studio does not ship
+   the native utility CSS that makes those shells fill the message column.
+   Keep the shells anchored to the centered Renderer turn so user content can
+   align against the column edge instead of recursively shrink-wrapping. */
+body[data-route="reader"] .wbRichRoot :where(
+  .cgTurn--user,
+  .wbTurn--user,
+  [data-turn="user"]
+) > div,
+body[data-route="reader"] .wbRichRoot :where(
+  .cgTurn--user,
+  .wbTurn--user,
+  [data-turn="user"]
+) [data-conversation-screenshot-content]{
+  width:100% !important;
+  max-width:100% !important;
+  min-width:0 !important;
+}
+
+/* A native rich-replay user host is layout scaffolding, not the bubble.
+   Giving the host the whole centered column prevents the 70% user cap from
+   being applied once to the host and then again to its nested bubble. */
+body[data-route="reader"] .wbRichRoot :where(
+  .cgTurn--user,
+  .wbTurn--user,
+  [data-turn="user"]
+) [data-message-author-role="user"]:has(.user-message-bubble-color){
+  width:100% !important;
+  max-width:100% !important;
+  min-width:0 !important;
+  align-items:flex-end !important;
+}
+
+body[data-route="reader"] .wbRichRoot :where(
+  .cgTurn--user,
+  .wbTurn--user,
+  [data-turn="user"]
+) [data-message-author-role="user"]:has(.user-message-bubble-color) > div{
+  width:100% !important;
+  max-width:100% !important;
+  min-width:0 !important;
+}
+
 body[data-route="reader"] .cgMsg--user,
 body[data-route="reader"] .wbRichRoot .cgTurn--user :where([data-message-author-role="user"]):not(:has(.user-message-bubble-color)),
 body[data-route="reader"] .wbRichRoot .wbTurn--user :where([data-message-author-role="user"]):not(:has(.user-message-bubble-color)),
@@ -4096,7 +4139,10 @@ body[data-route="reader"] .wbRichRoot [data-turn="user"] :where([data-message-au
 body[data-route="reader"] .wbRichRoot .cgTurn--user :where(.user-message-bubble-color),
 body[data-route="reader"] .wbRichRoot .wbTurn--user :where(.user-message-bubble-color),
 body[data-route="reader"] .wbRichRoot [data-turn="user"] :where(.user-message-bubble-color),
-body[data-route="reader"] :where(.cgTurn--user, .wbTurn--user, [data-turn="user"]) :where([data-message-author-role="user"], .user-message-bubble-color){
+body[data-route="reader"] :where(.cgTurn--user, .wbTurn--user, [data-turn="user"]) :where(
+  [data-message-author-role="user"]:not(:has(.user-message-bubble-color)),
+  .user-message-bubble-color
+){
   width:fit-content !important;
   max-width:min(var(--wb-user-w), 44rem) !important;
   margin-left:auto !important;
