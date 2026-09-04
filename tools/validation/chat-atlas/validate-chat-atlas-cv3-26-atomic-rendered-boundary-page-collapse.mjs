@@ -1256,6 +1256,276 @@ await fixture('P03C C10 native-in-place projection cannot create double wrapper 
   equal(SOURCE.includes('reconcileTitleListNativeInPlaceProjection'), true, 'bounded native-in-place projection replaces adoption');
 });
 
+// ---------------------------------------------------------------------------
+// Stage 1 (Defect D) — current-ChatGPT-host native page-boundary identity.
+//
+// Measured host facts (Prompt 149) that the retired resolver violated:
+//   * data-testid="conversation-turn-N" is WINDOW-RELATIVE. N tracks the host's
+//     sliding render window, not canonical order, and is renumbered whenever
+//     history is prepended.
+//   * section data-turn-id carries the branch NODE id. It equals the product
+//     qId only for never-branched turns.
+//   * a logical turn is not fixed at exactly two native sections; consecutive
+//     assistant sections occur.
+// The boundary path must therefore resolve through the established
+// MountRegistry/message-id resolver, never through a canonical-order ordinal.
+// ---------------------------------------------------------------------------
+
+// The Stage-1 collapsed-boundary resolution path: the production readiness
+// function, the legacy diagnostic that duplicates it, and the shared native
+// start-surface adapter they both delegate to.
+function stage1BoundaryPathSource() {
+  return [
+    extractFunction(SOURCE, 'collapsedBoundaryNativeStartSurface'),
+    extractFunction(SOURCE, 'getCollapsedExactBoundaryReadiness'),
+    extractFunction(SOURCE, 'getLegacyCollapsedNativeBoundaryReadinessDiagnostic'),
+  ].join('\n');
+}
+
+// A native testId interpolation is only a Defect-D violation when it is derived
+// from CANONICAL identity (turnNo / order). Interpolations built from real DOM
+// slot positions (startOrdinal, nativeOrdinal) are host-derived and belong to
+// the separate retired native-slot diagnostic, not to this boundary contract.
+function canonicalOrderDerivedTestIds(source) {
+  return (String(source).match(/conversation-turn-\$\{[^`]*?\}/g) || [])
+    .filter((expr) => /turnNo|\border\b/.test(expr));
+}
+
+// Minimal host DOM sufficient for the real extracted identity resolver.
+function stage1Dom() {
+  const attrRe = /\[([a-zA-Z-]+)(?:(\^?=)"([^"]*)")?\]/g;
+  function matchesOne(node, sel) {
+    const s = sel.trim();
+    if (!s) return false;
+    const tagMatch = s.match(/^([a-zA-Z]+)/);
+    let rest = s;
+    if (tagMatch) {
+      if (String(node.tag).toLowerCase() !== tagMatch[1].toLowerCase()) return false;
+      rest = s.slice(tagMatch[1].length);
+    }
+    attrRe.lastIndex = 0;
+    let m;
+    let saw = false;
+    while ((m = attrRe.exec(rest))) {
+      saw = true;
+      const [, name, op, value] = m;
+      const actual = node.attrs[name];
+      if (actual == null) return false;
+      if (op === '=' && actual !== value) return false;
+      if (op === '^=' && !String(actual).startsWith(value)) return false;
+    }
+    return saw || !!tagMatch;
+  }
+  function matches(node, sel) {
+    return String(sel).split(',').some((part) => matchesOne(node, part));
+  }
+  class N {
+    constructor(tag, attrs = {}) {
+      this.tag = tag;
+      this.attrs = { ...attrs };
+      this.children = [];
+      this.parentElement = null;
+    }
+    append(child) { child.parentElement = this; this.children.push(child); return child; }
+    getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attrs, name) ? this.attrs[name] : null; }
+    setAttribute(name, value) { this.attrs[name] = String(value); }
+    get isConnected() {
+      let cur = this;
+      while (cur.parentElement) cur = cur.parentElement;
+      return cur === doc.body;
+    }
+    matches(sel) { return matches(this, sel); }
+    closest(sel) {
+      let cur = this;
+      while (cur) { if (matches(cur, sel)) return cur; cur = cur.parentElement; }
+      return null;
+    }
+    contains(other) {
+      let cur = other;
+      while (cur) { if (cur === this) return true; cur = cur.parentElement; }
+      return false;
+    }
+    walk(out = []) { out.push(this); for (const c of this.children) c.walk(out); return out; }
+    querySelectorAll(sel) { return this.walk([]).filter((n) => n !== this && matches(n, sel)); }
+    querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
+  }
+  const body = new N('body');
+  const doc = {
+    body,
+    querySelectorAll: (sel) => body.querySelectorAll(sel),
+    querySelector: (sel) => body.querySelector(sel),
+  };
+  return { doc, N };
+}
+
+// A current-host transcript: window-relative testids starting mid-thread,
+// branch-node data-turn-id distinct from the product qId, and a logical turn
+// rendered as one user section followed by TWO assistant sections.
+function stage1Host({ testIdBase = 7 } = {}) {
+  const { doc, N } = stage1Dom();
+  const flow = doc.body.append(new N('div', { 'data-h2o-flow': 'root' }));
+  const made = [];
+  const add = (offset, role, msgId, nodeId) => {
+    const wrapper = flow.append(new N('article', {}));
+    const section = wrapper.append(new N('section', {
+      'data-testid': `conversation-turn-${testIdBase + offset}`,
+      'data-turn': role,
+      'data-turn-id': nodeId,
+    }));
+    const msg = section.append(new N('div', {
+      'data-message-id': msgId,
+      'data-message-author-role': role,
+    }));
+    made.push({ wrapper, section, msg, msgId, nodeId, role });
+    return made[made.length - 1];
+  };
+  // canonical turn 26 — qId differs from branch node id (regenerated turn)
+  const q26 = add(0, 'user', 'qid-26-message', 'node-26-branch-b');
+  const a26 = add(1, 'assistant', 'aid-26-message', 'node-26-branch-b');
+  const a26b = add(2, 'assistant', 'aid-26b-message', 'node-26-branch-b2');
+  // canonical turn 27 — three native sections precede it, so the fixed
+  // two-sections-per-turn ordinal arithmetic cannot address it.
+  const q27 = add(3, 'user', 'qid-27-message', 'node-27-branch-a');
+  const a27 = add(4, 'assistant', 'aid-27-message', 'node-27-branch-a');
+  return { doc, flow, q26, a26, a26b, q27, a27, N };
+}
+
+function stage1Resolver(host, mounts = new Map()) {
+  const context = vm.createContext({
+    document: host.doc,
+    TOPW: { H2O: { obs: { mounts: { get: (id) => mounts.get(id) || null } } } },
+    W: {},
+    CSS: { escape: (v) => String(v) },
+  });
+  return vm.runInContext(`(() => {
+    const TURN_HOST_SEL = '[data-testid="conversation-turn"], [data-testid^="conversation-turn-"]';
+    ${extractFunction(SOURCE, 'renderedBoundaryDirectChildUnder')}
+    ${extractFunction(SOURCE, 'renderedBoundaryRoleFromCarrier')}
+    ${extractFunction(SOURCE, 'resolveRenderedTurnSurfaceByIdentity')}
+    return resolveRenderedTurnSurfaceByIdentity;
+  })()`, context);
+}
+
+await fixture('Stage1 D1 canonical-order native ordinal derivation is retired from the boundary path', () => {
+  const boundary = stage1BoundaryPathSource();
+  equal(SOURCE.includes('exactNativeStartSection'), false, 'duplicate ordinal resolver is absent from production');
+  equal(/\(\s*order\s*-\s*1\s*\)\s*\*\s*2/.test(boundary), false, 'no (order-1)*2 native ordinal arithmetic in the boundary path');
+  equal(/turnNo[^\n]*\)\s*-\s*1\s*\)\s*\*\s*2/.test(boundary), false, 'no turnNo-derived native ordinal arithmetic in the boundary path');
+  equal(canonicalOrderDerivedTestIds(boundary), [], 'no canonical-order derived conversation-turn testId in the boundary path');
+});
+
+await fixture('Stage1 D2 boundary path resolves through the established identity resolver', () => {
+  const adapter = extractFunction(SOURCE, 'collapsedBoundaryNativeStartSurface');
+  const production = extractFunction(SOURCE, 'getCollapsedExactBoundaryReadiness');
+  const legacy = extractFunction(SOURCE, 'getLegacyCollapsedNativeBoundaryReadinessDiagnostic');
+  // The shared adapter is the ONLY native-start mechanism, and it delegates to
+  // the established identity resolver rather than re-implementing lookup.
+  ok(
+    adapter.split('resolveRenderedTurnSurfaceByIdentity').length - 1 >= 1,
+    'the native start-surface adapter delegates to the identity resolver',
+  );
+  // Both collapsed-boundary lookups (start and next-page start) route through it.
+  ok(
+    production.split('collapsedBoundaryNativeStartSurface').length - 1 >= 2,
+    'production readiness resolves both boundaries through the adapter',
+  );
+  ok(
+    legacy.split('collapsedBoundaryNativeStartSurface').length - 1 >= 2,
+    'the duplicated legacy fallback resolves both boundaries through the adapter',
+  );
+  const boundary = stage1BoundaryPathSource();
+  equal(/data-turn-id="\$\{/.test(boundary), false, 'no qId===data-turn-id native selector in the boundary path');
+  equal(/\[data-turn="user"\]/.test(boundary), false, 'no fixed user-section role selector in the boundary path');
+});
+
+await fixture('Stage1 D3 identity resolver binds the exact current native surface on a current-host transcript', () => {
+  const host = stage1Host({ testIdBase: 7 });
+  const mounts = new Map([['qid-27-message', { el: host.q27.msg }]]);
+  const resolve = stage1Resolver(host, mounts);
+  const surface = resolve('qid-27-message', host.flow);
+  equal(surface.ok, true, 'current connected native surface resolves by message identity');
+  equal(surface.nativeTestHost, host.q27.section, 'the exact current native section is bound');
+  equal(surface.directFlowWrapper, host.q27.wrapper, 'the direct flow wrapper is the host-owned wrapper');
+  equal(surface.renderedRole, 'user', 'rendered role is read from the host, not assumed');
+  // The retired arithmetic would have addressed conversation-turn-53 for
+  // canonical order 27; the live surface is conversation-turn-10.
+  equal(surface.testId, 'conversation-turn-10', 'native testId is window-relative, not canonical order');
+  equal(host.q27.section.getAttribute('data-turn-id') !== 'qid-27-message', true, 'native data-turn-id is the branch node id, not the qId');
+});
+
+await fixture('Stage1 D4 testid renumbering and reassignment cannot move the bound surface', () => {
+  const host = stage1Host({ testIdBase: 7 });
+  const mounts = new Map([['qid-27-message', { el: host.q27.msg }]]);
+  const resolve = stage1Resolver(host, mounts);
+  const before = resolve('qid-27-message', host.flow);
+  equal(before.testId, 'conversation-turn-10', 'baseline window position');
+  // History prepend: the host renumbers every section; the same native turn
+  // now carries a different testid, and the old testid moves to another turn.
+  host.q26.section.setAttribute('data-testid', 'conversation-turn-10');
+  host.q27.section.setAttribute('data-testid', 'conversation-turn-16');
+  const after = resolve('qid-27-message', host.flow);
+  equal(after.ok, true, 'renumbering does not unbind the surface');
+  equal(after.nativeTestHost, host.q27.section, 'the same exact native turn stays bound after renumbering');
+  equal(after.testId, 'conversation-turn-16', 'the bound surface reports its new window position');
+  // The testid that USED to address turn 27 now belongs to turn 26. Identity
+  // binding keeps the two turns distinct regardless of which testid they wear.
+  const neighbour = resolve('qid-26-message', host.flow);
+  equal(neighbour.ok, true, 'the neighbouring turn resolves on its own message identity');
+  equal(neighbour.nativeTestHost, host.q26.section, 'the reassigned testid did not steal the neighbour binding');
+  equal(neighbour.testId, 'conversation-turn-10', 'the neighbour now wears the testid that previously addressed turn 27');
+  equal(neighbour.nativeTestHost === after.nativeTestHost, false, 'the two turns never collapse onto one surface');
+});
+
+await fixture('Stage1 D5 consecutive assistant sections and shells never create membership', () => {
+  const host = stage1Host({ testIdBase: 7 });
+  equal(host.a26.section.getAttribute('data-turn'), 'assistant', 'first assistant section');
+  equal(host.a26b.section.getAttribute('data-turn'), 'assistant', 'consecutive assistant section exists');
+  const resolve = stage1Resolver(host, new Map());
+  // Unhydrated shell: a native section with no message identity at all.
+  const shellWrapper = host.flow.append(new host.N('article', {}));
+  shellWrapper.append(new host.N('section', {
+    'data-testid': 'conversation-turn-12',
+    'data-turn': 'assistant',
+  }));
+  equal(resolve('', host.flow).ok, false, 'empty identity never resolves');
+  equal(resolve('qid-absent-message', host.flow).ok, false, 'unknown identity never resolves');
+  equal(resolve('', host.flow).reason, 'identity-unmounted', 'missing identity fails closed');
+});
+
+await fixture('Stage1 D6 stale, disconnected and ambiguous bindings fail closed', () => {
+  const host = stage1Host({ testIdBase: 7 });
+  // Disconnected predecessor still referenced by the registry.
+  const detached = host.q27.wrapper;
+  const idx = host.flow.children.indexOf(detached);
+  host.flow.children.splice(idx, 1);
+  detached.parentElement = null;
+  const staleMounts = new Map([['qid-27-message', { el: host.q27.msg }]]);
+  const resolve = stage1Resolver(host, staleMounts);
+  const stale = resolve('qid-27-message', host.flow);
+  equal(stale.ok, false, 'a disconnected predecessor is never reused');
+  equal(stale.reason, 'identity-unmounted', 'stale binding fails closed');
+  // Ambiguity: two connected carriers share one node-domain id.
+  const host2 = stage1Host({ testIdBase: 7 });
+  const resolve2 = stage1Resolver(host2, new Map());
+  const dup = resolve2('node-26-branch-b', host2.flow);
+  equal(dup.ok, false, 'duplicate node-id carriers do not resolve');
+  equal(dup.reason, 'identity-ambiguous', 'ambiguous identity fails closed');
+});
+
+await fixture('Stage1 V virtualization simultaneous-mount gate remains unrepaired by design', () => {
+  const boundary = stage1BoundaryPathSource();
+  ok(boundary.includes('native-start-not-mounted'), 'start boundary still requires a mounted native start');
+  ok(boundary.includes('next-page-native-start-not-mounted'), 'next-page boundary still requires its own mounted native start');
+  ok(boundary.includes('native-layout-boundary-unresolved'), 'both boundaries must share one resolved flow root');
+  // A ~25-turn page inside a 6-11 section host window can never mount both
+  // boundaries at once, so Stage 1 leaves long-thread collapse unavailable.
+  const host = stage1Host({ testIdBase: 7 });
+  const resolve = stage1Resolver(host, new Map([['qid-27-message', { el: host.q27.msg }]]));
+  equal(resolve('qid-27-message', host.flow).ok, true, 'the mounted boundary resolves');
+  equal(resolve('qid-52-message', host.flow).ok, false, 'the distant boundary is not mounted in the host window');
+  equal(resolve('qid-52-message', host.flow).reason, 'identity-unmounted', 'the distant boundary fails closed, not approximated');
+});
+
 const failed = fixtures.filter((entry) => !entry.ok);
 console.log(`Fixtures: ${fixtures.length - failed.length}/${fixtures.length}`);
 console.log(`Assertions: ${assertions}`);

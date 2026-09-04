@@ -4913,21 +4913,40 @@
     ]);
   }
 
-  function exactNativeStartSection(member = null) {
-    const order = Math.max(0, Number(member?.turnNo || 0) || 0);
+  /* Current-host native page-boundary identity.
+
+     The host renders `data-testid="conversation-turn-N"` WINDOW-RELATIVE: N
+     tracks the sliding render window and is renumbered whenever history is
+     prepended, so it can never address a canonical member. Section
+     `data-turn-id` carries the branch NODE id, which equals the product qId
+     only for never-branched turns. A logical turn is also not fixed at two
+     native sections. The retired resolver assumed all three, so it silently
+     failed to bind current surfaces.
+
+     Both collapsed-boundary lookups therefore delegate to the established
+     MountRegistry/message-id resolver and accept only the CURRENT connected
+     node; resolver outcomes (identity-unmounted, identity-ambiguous, stale or
+     disconnected bindings) are surfaced unchanged and never approximated. */
+  function collapsedBoundaryNativeStartSurface(member = null, flowRoot = null) {
     const qId = String(member?.questionId || '').trim();
-    if (!order || !qId) return null;
-    const testId = `conversation-turn-${String(((order - 1) * 2) + 1)}`;
-    let sections = [];
+    if (!qId) return { ok: false, reason: 'identity-unavailable', section: null, surface: null };
+    let surface = null;
     try {
-      const escId = (typeof CSS !== 'undefined' && CSS?.escape)
-        ? CSS.escape(qId)
-        : qId;
-      sections = Array.from(document.querySelectorAll(
-        `section[data-testid="${testId}"][data-turn="user"][data-turn-id="${escId}"]`
-      ));
-    } catch {}
-    return sections.length === 1 ? sections[0] : null;
+      surface = resolveRenderedTurnSurfaceByIdentity(qId, flowRoot || document.body);
+    } catch {
+      return { ok: false, reason: 'identity-unmounted', section: null, surface: null };
+    }
+    if (surface?.ok !== true) {
+      return {
+        ok: false,
+        reason: String(surface?.reason || 'identity-unmounted'),
+        section: null,
+        surface: null,
+      };
+    }
+    const section = surface.nativeTestHost?.isConnected === true ? surface.nativeTestHost : null;
+    if (!section) return { ok: false, reason: 'identity-unmounted', section: null, surface: null };
+    return { ok: true, reason: null, section, surface };
   }
 
   function frozenCollapsedBoundaryResult(raw = {}) {
@@ -5515,27 +5534,32 @@
     if (!nextPage) return fail('next-page-native-start-unavailable');
     const startMember = page.turnRecords[0] || null;
     const nextStartMember = nextPage.turnRecords[0] || null;
-    const startSection = exactNativeStartSection(startMember);
-    const nextStartSection = exactNativeStartSection(nextStartMember);
     const startIdentity = {
       order: Number(startMember?.turnNo || 0),
       qId: String(startMember?.questionId || ''),
-      testId: `conversation-turn-${String((((Number(startMember?.turnNo || 0) || 1) - 1) * 2) + 1)}`,
     };
     const nextStartIdentity = {
       order: Number(nextStartMember?.turnNo || 0),
       qId: String(nextStartMember?.questionId || ''),
-      testId: `conversation-turn-${String((((Number(nextStartMember?.turnNo || 0) || 1) - 1) * 2) + 1)}`,
     };
-    if (!startSection) return fail('native-start-not-mounted', { startIdentity, nextStartIdentity });
-    if (!nextStartSection) return fail('next-page-native-start-not-mounted', { startIdentity, nextStartIdentity });
-    const nativeStart = getTurnAnchorNode(startSection);
-    const nextPageNativeStart = getTurnAnchorNode(nextStartSection);
-    const flowRoot = nativeStart?.parentElement || null;
+    // Discovery pass: bind the start member's current native surface, then take
+    // the flow root from that surface and re-resolve BOTH boundaries against it
+    // so wrapper coherence is proved for the pair, not assumed from one side.
+    const startProbe = collapsedBoundaryNativeStartSurface(startMember);
+    if (!startProbe.ok) return fail('native-start-not-mounted', { startIdentity, nextStartIdentity });
+    const probedStart = getTurnAnchorNode(startProbe.section);
+    const flowRoot = probedStart?.parentElement || null;
+    if (!flowRoot) return fail('native-layout-boundary-unresolved', { startIdentity, nextStartIdentity });
+    const startResolved = collapsedBoundaryNativeStartSurface(startMember, flowRoot);
+    const nextStartResolved = collapsedBoundaryNativeStartSurface(nextStartMember, flowRoot);
+    if (!startResolved.ok) return fail('native-start-not-mounted', { startIdentity, nextStartIdentity });
+    if (!nextStartResolved.ok) return fail('next-page-native-start-not-mounted', { startIdentity, nextStartIdentity });
+    const nativeStart = getTurnAnchorNode(startResolved.section);
+    const nextPageNativeStart = getTurnAnchorNode(nextStartResolved.section);
     if (
       !nativeStart
       || !nextPageNativeStart
-      || !flowRoot
+      || nativeStart.parentElement !== flowRoot
       || nextPageNativeStart.parentElement !== flowRoot
     ) return fail('native-layout-boundary-unresolved', { startIdentity, nextStartIdentity });
     let ordered = false;
@@ -5685,27 +5709,32 @@
           if (!nextPage) return fail('next-page-native-start-unavailable');
           const startMember = page.turnRecords[0] || null;
           const nextStartMember = nextPage.turnRecords[0] || null;
-          const startSection = exactNativeStartSection(startMember);
-          const nextStartSection = exactNativeStartSection(nextStartMember);
           const startIdentity = {
             order: Number(startMember?.turnNo || 0),
             qId: String(startMember?.questionId || ''),
-            testId: `conversation-turn-${String((((Number(startMember?.turnNo || 0) || 1) - 1) * 2) + 1)}`,
           };
           const nextStartIdentity = {
             order: Number(nextStartMember?.turnNo || 0),
             qId: String(nextStartMember?.questionId || ''),
-            testId: `conversation-turn-${String((((Number(nextStartMember?.turnNo || 0) || 1) - 1) * 2) + 1)}`,
           };
-          if (!startSection) return fail('native-start-not-mounted', { startIdentity, nextStartIdentity });
-          if (!nextStartSection) return fail('next-page-native-start-not-mounted', { startIdentity, nextStartIdentity });
-          const nativeStart = getTurnAnchorNode(startSection);
-          const nextPageNativeStart = getTurnAnchorNode(nextStartSection);
-          const flowRoot = nativeStart?.parentElement || null;
+          // Discovery pass: bind the start member's current native surface, then take
+          // the flow root from that surface and re-resolve BOTH boundaries against it
+          // so wrapper coherence is proved for the pair, not assumed from one side.
+          const startProbe = collapsedBoundaryNativeStartSurface(startMember);
+          if (!startProbe.ok) return fail('native-start-not-mounted', { startIdentity, nextStartIdentity });
+          const probedStart = getTurnAnchorNode(startProbe.section);
+          const flowRoot = probedStart?.parentElement || null;
+          if (!flowRoot) return fail('native-layout-boundary-unresolved', { startIdentity, nextStartIdentity });
+          const startResolved = collapsedBoundaryNativeStartSurface(startMember, flowRoot);
+          const nextStartResolved = collapsedBoundaryNativeStartSurface(nextStartMember, flowRoot);
+          if (!startResolved.ok) return fail('native-start-not-mounted', { startIdentity, nextStartIdentity });
+          if (!nextStartResolved.ok) return fail('next-page-native-start-not-mounted', { startIdentity, nextStartIdentity });
+          const nativeStart = getTurnAnchorNode(startResolved.section);
+          const nextPageNativeStart = getTurnAnchorNode(nextStartResolved.section);
           if (
             !nativeStart
             || !nextPageNativeStart
-            || !flowRoot
+            || nativeStart.parentElement !== flowRoot
             || nextPageNativeStart.parentElement !== flowRoot
           ) return fail('native-layout-boundary-unresolved', { startIdentity, nextStartIdentity });
           let ordered = false;
