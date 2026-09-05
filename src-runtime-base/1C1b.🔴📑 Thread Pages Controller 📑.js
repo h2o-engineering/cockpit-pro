@@ -4759,9 +4759,24 @@
         return { ok: false, reason: 'candidate-identity-ambiguous', flowRoot, mounted: [], unmountedCount: 0 };
       }
       if (!surface.ok) {
-        // Unmounted is the expected windowed case. Every other refusal is a
-        // stale/disconnected/out-of-scope resolution and fails closed.
-        if (surface.reason === 'identity-unmounted') { unmountedCount += 1; continue; }
+        /* Ordinary presentation absence for the windowed mounted-subset model.
+
+           `identity-unmounted` is the obvious case. `flow-wrapper-unavailable`
+           is the same thing seen one step later: the identity carrier is still
+           mounted and unambiguous, but the host has re-parented it such that no
+           direct flow child can currently be derived beneath this root.
+           Measured live: that turned into a page-wide
+           candidate-flow-wrapper-unavailable and expanded a committed windowed
+           collapse whose canonical authority was entirely coherent.
+
+           This list is exhaustive and deliberately short. Every other refusal —
+           ambiguity, a surface/wrapper mismatch, a missing native turn host — is
+           a resolution the model cannot trust, and still fails the whole page
+           closed. */
+        if (
+          surface.reason === 'identity-unmounted'
+          || surface.reason === 'flow-wrapper-unavailable'
+        ) { unmountedCount += 1; continue; }
         return { ok: false, reason: `candidate-${String(surface.reason || 'unresolved')}`, flowRoot, mounted: [], unmountedCount: 0 };
       }
       const node = getTurnAnchorNode(surface.section);
@@ -5954,21 +5969,44 @@
     return released;
   }
 
-  function applyCollapsedNativeRange(plan = null) {
+  function applyCollapsedNativeRange(plan = null, mode = '') {
     const num = Math.max(1, Number(plan?.pageNum || 0) || 0);
-    /* Stage 2 Pass 3: when the plan carries a current mounted canonical subset
-       the execution unit is that subset — sparse by nature, and requiring no
-       whole-page flow root, no wrapper pair and no contiguous interval. Prior
-       attribute state is captured per candidate so rollback (model B) can
-       restore scalars onto re-resolved CURRENT nodes. The legacy contiguous
-       branch below is unchanged for the full-interval world. */
-    if (Array.isArray(plan?.mountedCandidates)) {
-      const subset = plan.mountedCandidates;
+    /* Execution mode is the CALLER'S operation, never an incidental field.
+
+       Measured live: a legacy full-interval plan legitimately carries BOTH a
+       six-wrapper obligation set and a three-member mounted subset, and
+       selecting the branch from `Array.isArray(plan.mountedCandidates)`
+       silently executed the subset over three of the six. The legacy caller
+       then compared that result against its own true obligation set and
+       correctly rolled back a success produced over the wrong domain — the
+       guard was right, the dispatch was not.
+
+       An unrecognised mode is refused rather than guessed. */
+    const branch = mode === 'legacy' || mode === 'windowed' ? mode : '';
+    if (!branch) {
+      return {
+        ok: false,
+        status: 'rendered-collapse-apply-mode-unspecified',
+        branch: '',
+        hidden: 0,
+        mutations: 0,
+        stamped: [],
+        restorable: [],
+      };
+    }
+    /* Windowed: the execution unit is the current mounted canonical subset —
+       sparse by nature, and requiring no whole-page flow root, no wrapper pair
+       and no contiguous interval. Prior attribute state is captured per
+       candidate so rollback (model B) can restore scalars onto re-resolved
+       CURRENT nodes. The legacy contiguous branch below is unchanged for the
+       full-interval world. */
+    if (branch === 'windowed') {
+      const subset = Array.isArray(plan?.mountedCandidates) ? plan.mountedCandidates : [];
       const restorable = [];
       for (const entry of subset) {
         const node = entry?.node || null;
         if (!node || node.isConnected !== true || pageCollapseRangeH2OOwned(node)) {
-          return { ok: false, status: 'rendered-collapse-subset-stale', hidden: 0, mutations: 0, stamped: [], restorable: [] };
+          return { ok: false, status: 'rendered-collapse-subset-stale', branch, hidden: 0, mutations: 0, stamped: [], restorable: [] };
         }
       }
       const stamped = [];
@@ -5992,6 +6030,7 @@
           return {
             ok: false,
             status: 'rendered-collapse-stamp-failed',
+            branch,
             reason,
             hidden: stamped.length,
             mutations: stamped.length,
@@ -6000,7 +6039,7 @@
           };
         }
       }
-      return { ok: true, status: 'collapsed', hidden: subset.length, mutations: stamped.length, stamped, restorable };
+      return { ok: true, status: 'collapsed', branch, hidden: subset.length, mutations: stamped.length, stamped, restorable };
     }
     const root = plan?.flowRoot || null;
     const candidates = Array.isArray(plan?.hostWrappers) ? plan.hostWrappers : [];
@@ -6015,6 +6054,7 @@
       return {
         ok: false,
         status: 'rendered-collapse-plan-invalid',
+        branch,
         hidden: 0,
         mutations: 0,
         stamped: [],
@@ -6030,6 +6070,7 @@
         return {
           ok: false,
           status: 'rendered-collapse-plan-stale',
+          branch,
           hidden: 0,
           mutations: 0,
           stamped: [],
@@ -6040,6 +6081,7 @@
         return {
           ok: false,
           status: 'rendered-collapse-stamp-conflict',
+          branch,
           hidden: 0,
           mutations: 0,
           stamped: [],
@@ -6057,6 +6099,7 @@
       return {
         ok: false,
         status: 'rendered-collapse-stamp-failed',
+        branch,
         hidden: stamped.length,
         mutations: stamped.length,
         stamped,
@@ -6065,6 +6108,7 @@
     return {
       ok: true,
       status: 'collapsed',
+      branch,
       hidden: candidates.length,
       mutations: stamped.length,
       stamped,
@@ -7039,11 +7083,11 @@
       atomicRenderedBoundaryPlan: true,
       pageNum: num,
       mountedCandidates: snapshot.mounted,
-    });
+    }, 'windowed');
     if (metrics) {
       metrics.wrappersStamped = (applied.stamped || []).length;
       // Exactly the comparands of the guard on the next line.
-      metrics.applyBranch = 'windowed';
+      metrics.applyBranch = String(applied.branch || '');
       metrics.appliedOk = applied.ok === true;
       metrics.appliedHidden = Math.max(0, Number(applied.hidden || 0) || 0);
       metrics.appliedMutations = Math.max(0, Number(applied.mutations || 0) || 0);
@@ -7175,11 +7219,11 @@
           metrics.firstWriteReached = true;
           metrics.syntheticListsInserted += 1;
         }
-        const stamped = applyCollapsedNativeRange(plan);
+        const stamped = applyCollapsedNativeRange(plan, 'legacy');
         if (metrics) {
           metrics.wrappersStamped = (stamped.stamped || []).length;
           // Exactly the comparands of the guard on the next line.
-          metrics.applyBranch = 'legacy';
+          metrics.applyBranch = String(stamped.branch || '');
           metrics.appliedOk = stamped.ok === true;
           metrics.appliedHidden = Math.max(0, Number(stamped.hidden || 0) || 0);
           metrics.appliedMutations = Math.max(0, Number(stamped.mutations || 0) || 0);
@@ -7392,7 +7436,7 @@
         atomicRenderedBoundaryPlan: true,
         pageNum: transaction.pageNum,
         mountedCandidates: pending,
-      });
+      }, 'windowed');
       if (!applied.ok) {
         const rolled = rollbackWindowedCollapseCandidates(transaction.pageNum, applied.restorable || []);
         return {

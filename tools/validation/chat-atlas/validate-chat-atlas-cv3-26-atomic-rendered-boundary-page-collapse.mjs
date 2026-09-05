@@ -454,6 +454,9 @@ function createTransactionHarness(options = {}) {
     'pageCollapseEpochCoherent',
     'rollbackWindowedCollapseCandidates',
     'commitWindowedPageCollapse',
+    'frozenCollapsedBoundaryResult',
+    'recordCollapsedBoundaryDiagnostic',
+    'explicitCollapseFeedbackSource',
     'frozenAtomicPageCollapseDiagnostic',
     'recordAtomicPageCollapseAttempt',
     'getAtomicPageCollapseTransactionDiagnostic',
@@ -461,6 +464,7 @@ function createTransactionHarness(options = {}) {
     'executeAtomicPageCollapseTransaction',
     'syncSyntheticTitleList',
     'expandAllAtomicPageCollapses',
+    'renderedBoundaryDirectChildUnder',
   ];
   const correctionFallbacks = Object.freeze({
     titleListCanonicalMaterializationTerminal:
@@ -2287,7 +2291,7 @@ await fixture('Stage2 T3-M mid-commit stamping failure rolls back every mutated 
     atomicRenderedBoundaryPlan: true,
     pageNum: 1,
     mountedCandidates: [good, hostile],
-  });
+  }, 'windowed');
   equal(applied.ok, false, 'the stamping pass fails');
   equal(applied.status, 'rendered-collapse-stamp-failed', 'precise failure status');
   equal(hiddenAttr(good.node), '1', 'the first candidate was mutated before the failure');
@@ -3267,7 +3271,7 @@ await fixture('Live B a mid-subset stamp failure stays fail-closed and names its
     surface('q-a', 1), surface('q-a2', 1), surface('q-b', 2),
     surface('q-b2', 2, true), surface('q-c', 3), surface('q-c2', 3),
   ];
-  const applied = t.api.stamp({ atomicRenderedBoundaryPlan: true, pageNum: 1, mountedCandidates: six });
+  const applied = t.api.stamp({ atomicRenderedBoundaryPlan: true, pageNum: 1, mountedCandidates: six }, 'windowed');
   equal(applied.ok, false, 'the stamping pass fails');
   equal(applied.status, 'rendered-collapse-stamp-failed', 'precise failure status is unchanged');
   equal(applied.hidden, 3, 'exactly the three writes that landed are reported');
@@ -3306,7 +3310,7 @@ await fixture('Live B six successful writes give hidden six and do not roll back
     surface('q-a', 1), surface('q-a2', 1), surface('q-b', 2),
     surface('q-b2', 2), surface('q-c', 3), surface('q-c2', 3),
   ];
-  const applied = t.api.stamp({ atomicRenderedBoundaryPlan: true, pageNum: 1, mountedCandidates: six });
+  const applied = t.api.stamp({ atomicRenderedBoundaryPlan: true, pageNum: 1, mountedCandidates: six }, 'windowed');
   equal(applied.ok, true, 'all six writes succeed');
   equal(applied.hidden, 6, 'hidden counts all six current surfaces, not three members');
   equal(applied.stamped.length, 6, 'all six are stamped');
@@ -3590,7 +3594,7 @@ await fixture('Obs A3 a genuine incomplete apply still rolls back and records ex
     surface('q-a', 1), surface('q-a2', 1), surface('q-b', 2),
     surface('q-b2', 2, true), surface('q-c', 3), surface('q-c2', 3),
   ];
-  const applied = t.api.stamp({ atomicRenderedBoundaryPlan: true, pageNum: 1, mountedCandidates: six });
+  const applied = t.api.stamp({ atomicRenderedBoundaryPlan: true, pageNum: 1, mountedCandidates: six }, 'windowed');
   equal(applied.ok, false, 'the apply fails closed');
   equal(applied.hidden, 3, 'three writes landed');
   equal(applied.stamped.length, 3, 'and three are handed back');
@@ -3611,6 +3615,134 @@ await fixture('Obs D1 the diagnostic returns the newest attempt deterministicall
   equal(b.attemptId, x.api.diagnostic().attemptId, 'retrieval is stable between reads');
   equal(b.pageNum, 1, 'and reports the page it belongs to');
   ok(!!first && !!second, 'both attempts executed');
+});
+
+// --------------------------------------------------------------------------
+// BEHAVIORAL CORRECTION — the two defects the live capture proved.
+//
+// P1: an identity carrier can stay mounted and unambiguous while no direct flow
+//     child can be derived beneath the current root. Stage-1 reports that
+//     precisely as flow-wrapper-unavailable; the windowed enumerator turned it
+//     into a page-wide refusal and the committed transaction was expanded.
+// P2: a legacy plan legitimately carries BOTH a six-wrapper obligation set and
+//     a three-member mounted subset. Branching on field presence ran the subset
+//     over three of six, and the legacy guard correctly rejected a success
+//     produced over the wrong domain.
+// --------------------------------------------------------------------------
+
+// The proven live churn: the member's wrapper leaves the page's flow root while
+// its identity carrier stays mounted, so no direct flow child can be derived.
+function p218DetachFromFlow(scope, node) {
+  // The carrier stays mounted and discoverable - it is still in the flow's
+  // child list and still connected - but it is re-parented under an
+  // intermediate the flow root does not own, so no direct flow child can be
+  // derived for it. That is precisely the live condition.
+  const limbo = scope.h.document.createElement('DIV');
+  limbo.isConnected = true;
+  limbo.parentElement = null;
+  node.parentElement = limbo;
+  node.isConnected = true;
+  return limbo;
+}
+
+await fixture('P1 flow-wrapper churn is ordinary absence, not a page-wide refusal', () => {
+  const c = pass4rCommitted({ coldEnd: true, middleCount: 6, missingEnd: true });
+  equal(c.result.ok, true, 'the windowed transaction commits');
+  const member = c.api.subset(c.api.model().pages[0]).mounted[0];
+  equal(p4rHidden(member.node), '1', 'its current member is stamped');
+  equal(c.api.validateCommitted(c.transaction).ok, true, 'and the page validates');
+
+  p218DetachFromFlow(c, member.node);
+  // Stage-1 reports the exact live reason, unchanged.
+  const surface = c.api.identity(member.questionId, c.h.flow);
+  equal(surface.ok, false, 'the identity no longer resolves to a flow wrapper');
+  equal(surface.reason, 'flow-wrapper-unavailable', 'with the exact proven live reason');
+
+  // Canonical authority is untouched, so the committed transaction must live.
+  const verdict = c.api.validateCommitted(c.transaction);
+  equal(verdict.ok, true,
+    `flow-wrapper churn does not invalidate the page (reason ${JSON.stringify(verdict.reason)})`);
+  const results = c.api.reconcileAll('presentation-updated');
+  equal(c.api.state.atomicPageCollapseTransactions.size, 1, 'the transaction survives reconciliation');
+  equal(results.some((row) => String(row.status || '').includes('expand')), false, 'nothing was expanded');
+});
+
+await fixture('P1 the relaxation is narrow: every other resolver refusal fails closed', () => {
+  // identity-ambiguous
+  const ambiguous = pass4rCommitted({ coldEnd: true, middleCount: 6, missingEnd: true });
+  const target = ambiguous.api.subset(ambiguous.api.model().pages[0]).mounted[0];
+  const duplicate = ambiguous.h.document.createElement('SECTION');
+  duplicate.setAttribute('data-turn-id', target.questionId);
+  duplicate.setAttribute('data-turn', 'user');
+  duplicate.setAttribute('data-testid', 'conversation-turn-95');
+  ambiguous.h.flow.appendChild(duplicate);
+  equal(ambiguous.api.validateCommitted(ambiguous.transaction).reason, 'candidate-identity-ambiguous',
+    'ambiguous current identity still fails closed');
+
+  // The tolerated set is exactly two reasons; every other Stage-1 refusal
+  // still produces the page-wide candidate-* failure.
+  const resolver = extractFunction(SOURCE, 'resolveCurrentMountedPageMembers');
+  for (const tolerated of ['identity-unmounted', 'flow-wrapper-unavailable']) {
+    ok(resolver.includes(tolerated), `${tolerated} is tolerated as ordinary absence`);
+  }
+  for (const strict of ['identity-ambiguous', 'surface-wrapper-mismatch', 'native-test-host-unavailable']) {
+    equal(new RegExp(`=== '${strict}'[^\\n]*unmountedCount`).test(resolver), false,
+      `${strict} is never folded into ordinary absence`);
+  }
+  ok(/candidate-\$\{String\(surface\.reason/.test(resolver),
+    'every other refusal still returns the page-wide candidate-* failure');
+  ok(resolver.includes("reason: 'candidate-flow-scope-invalid'"),
+    'flow-scope-invalid remains its own fail-closed branch');
+
+  // A current mounted member missing the committed marker is still invalid.
+  const unmarked = pass4rCommitted({ coldEnd: true, middleCount: 6, missingEnd: true });
+  unmarked.api.subset(unmarked.api.model().pages[0]).mounted[0]
+    .node.removeAttribute('data-cgxui-chat-page-native-hidden');
+  equal(unmarked.api.validateCommitted(unmarked.transaction).reason, 'transaction-commit-incomplete',
+    'a missing committed marker still fails closed');
+
+  // Canonical drift, with the wrapper churn present, still invalidates.
+  for (const [label, drift] of [
+    ['routeKey', { routeKey: '/c/other-route' }],
+    ['generation', { generation: 9 }],
+    ['effectiveFingerprint', { canonicalFingerprint: 'djb2:other-effective' }],
+    ['count', { count: 31 }],
+  ]) {
+    const c = pass4rCommitted({ coldEnd: true, middleCount: 6, missingEnd: true });
+    p218DetachFromFlow(c, c.api.subset(c.api.model().pages[0]).mounted[0].node);
+    Object.assign(c.h.status, drift);
+    equal(c.api.validateCommitted(c.transaction).ok, false, `${label} drift still fails closed`);
+  }
+  const graph = pass4rCommitted({ coldEnd: true, middleCount: 6, missingEnd: true });
+  p218DetachFromFlow(graph, graph.api.subset(graph.api.model().pages[0]).mounted[0].node);
+  graph.h.graphScope.fingerprint = 'djb2:other-graph';
+  equal(graph.api.validateCommitted(graph.transaction).ok, false, 'graphFingerprint drift still fails closed');
+});
+
+await fixture('P2 a mixed legacy plan applies over its own six-wrapper obligation set', () => {
+  const x = createTransactionHarness();
+  // Exactly the live shape: a legacy full-interval plan carrying BOTH a
+  // six-wrapper obligation set and a three-member mounted subset.
+  x.control.planTransform = (plan) => {
+    const six = plan.hostWrappers.slice(0, 6);
+    return {
+      ...plan,
+      hostWrappers: six,
+      mountedCandidates: six.slice(0, 3).map((node, index) => ({
+        questionId: `q-mixed-${index}`,
+        turnNo: index + 1,
+        node,
+      })),
+    };
+  };
+  const result = x.api.execute(1, 'validator', { chatId: x.plan.chatId });
+  const d = x.api.diagnostic();
+  equal(d.applyBranch, 'legacy', 'the legacy caller executes the legacy branch');
+  equal(d.comparisonExpectedCount, 6, 'against its own six-wrapper obligation set');
+  equal(d.appliedHidden, 6, 'and satisfies all six obligations');
+  equal(d.appliedOk, true, 'so the apply succeeds');
+  equal(d.rollbackPerformed, false, 'with no false rollback');
+  equal(String(result.status || ''), 'collapsed', 'and the collapse commits');
 });
 
 const failed = fixtures.filter((entry) => !entry.ok);
