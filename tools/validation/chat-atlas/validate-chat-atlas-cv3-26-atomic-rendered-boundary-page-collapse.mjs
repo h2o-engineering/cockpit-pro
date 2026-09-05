@@ -302,6 +302,8 @@ function createTransactionHarness(options = {}) {
     nextCapability: plan.nextCapability,
     activationReady: options.activationReady !== false,
     beforeFinalValidation: null,
+    // Default off: with no transform every existing fixture sees the same plan.
+    planTransform: null,
     navigationGeneration: 0,
     navigationStatus: Object.freeze({
       status: 'idle',
@@ -447,6 +449,16 @@ function createTransactionHarness(options = {}) {
     'expandPageWithRenderedBoundaries',
     'reconcileActiveWindowedCollapse',
     'reconcileAtomicPageCollapseTransactions',
+    'collapsedBoundaryStatusIdentity',
+    'pageCollapseOperationEpoch',
+    'pageCollapseEpochCoherent',
+    'rollbackWindowedCollapseCandidates',
+    'commitWindowedPageCollapse',
+    'frozenAtomicPageCollapseDiagnostic',
+    'recordAtomicPageCollapseAttempt',
+    'getAtomicPageCollapseTransactionDiagnostic',
+    'atomicPageCollapseFailureStage',
+    'executeAtomicPageCollapseTransaction',
     'syncSyntheticTitleList',
     'expandAllAtomicPageCollapses',
   ];
@@ -483,6 +495,23 @@ function createTransactionHarness(options = {}) {
       ATTR_TITLE_LIST_FLOW_HIDDEN,
     ];
     const MEMBER_RELEASE_SEL = MEMBER_RELEASE_MARKERS.map((attr) => '[' + attr + ']').join(',');
+    // The canonical status reader the operation epoch consults. Control-driven,
+    // like every other authority in this harness.
+    const TITLE_LIST_EFFECTIVE_METHOD = Object.freeze({
+      STATUS: 'getEffectivePresentationStatus',
+      INDEX: 'getEffectivePresentationIndex',
+      BY_QID: 'getEffectiveTurnRecordByQId',
+      BY_AID: 'getEffectiveTurnRecordByAId',
+    });
+    const TURN_RUNTIME = () => ({
+      getEffectivePresentationStatus: () => ({
+        chatId: injectedControl.authority.chatId,
+        routeKey: injectedControl.authority.routeKey,
+        generation: injectedControl.authority.generation,
+        canonicalFingerprint: injectedControl.authority.effectiveFingerprint,
+        source: 'canonical',
+      }),
+    });
     const resolveChatId = () => 'chat-stage-2c2';
     const collapsedNativeRangeKey = (chatId, pageNum) => String(chatId) + '::' + String(pageNum);
     const titleListStackRegistryKey = (pageNum, chatId) => String(chatId) + '::' + String(pageNum);
@@ -637,7 +666,9 @@ function createTransactionHarness(options = {}) {
           activationReady: injectedControl.activationReady === true,
         }),
         plan: injectedControl.activationReady === true
-          ? { ...injectedPlan, titleRows: injectedControl.model.pages[0].turnRecords }
+          ? (typeof injectedControl.planTransform === 'function'
+            ? injectedControl.planTransform({ ...injectedPlan, titleRows: injectedControl.model.pages[0].turnRecords })
+            : { ...injectedPlan, titleRows: injectedControl.model.pages[0].turnRecords })
           : null,
       };
     };
@@ -678,6 +709,8 @@ function createTransactionHarness(options = {}) {
     };
     return Object.freeze({
       collapse: collapsePageWithRenderedBoundaries,
+      execute: executeAtomicPageCollapseTransaction,
+      diagnostic: getAtomicPageCollapseTransactionDiagnostic,
       expand: expandPageWithRenderedBoundaries,
       reconcile: reconcileAtomicPageCollapseTransactions,
       sync: syncSyntheticTitleList,
@@ -3139,6 +3172,139 @@ await fixture('Stage2 B13 success consumption retains nothing and schedules noth
     equal(pattern.test(body), false, `no ${String(pattern)} in the success consumer`);
   }
   equal((SOURCE.match(/P03B/g) || []).length, 0, 'P03B usage remains zero');
+});
+
+// --------------------------------------------------------------------------
+// LIVE CORRECTION — defects found by the dedicated 28-turn fixture.
+//
+// A: the metrics line dereferences plan.hostWrappers.length before the Stage-2
+//    windowed branch that explicitly permits the field to be missing. The real
+//    windowed plan literal omits it entirely, so collapse threw before it could
+//    ever reach the branch written to handle it.
+// B: the all-or-nothing stamp guard is correct and stays correct. What was lost
+//    is the reason: the catch discarded the thrown error, leaving only an opaque
+//    transient-failure to diagnose the live page-2 stall with.
+// --------------------------------------------------------------------------
+
+// The real windowed plan shape: stage2WindowedPlan true and NO hostWrappers
+// property at all. Absent and [] are different things here, and the difference
+// is exactly what threw.
+function liveWindowedPlanHarness({ emptyArray = false, mounted = null } = {}) {
+  const x = createTransactionHarness();
+  x.control.planTransform = (plan) => {
+    const windowed = { ...plan, stage2WindowedPlan: true };
+    if (emptyArray) windowed.hostWrappers = [];
+    else delete windowed.hostWrappers;
+    if (mounted) windowed.mountedCandidates = mounted(x);
+    return windowed;
+  };
+  return x;
+}
+
+await fixture('Live A a windowed plan without hostWrappers never throws while recording metrics', () => {
+  const x = liveWindowedPlanHarness();
+  const result = x.api.execute(1, 'validator', { chatId: x.plan.chatId });
+  ok(!!result && typeof result.status === 'string', 'collapse execution returns a decision instead of throwing');
+  equal(String(result.status).includes('TypeError'), false, 'and not a thrown-shaped status');
+  // The windowed branch is now reachable. This world has a current mounted
+  // subset, so it takes the ordinary windowed transaction semantics.
+  equal(result.status, 'collapsed', 'the windowed branch is reached and commits');
+  const diagnostic = x.api.diagnostic();
+  equal(diagnostic.available, true, 'an attempt diagnostic was recorded');
+  equal(diagnostic.wrappersPlanned, 0, 'a missing hostWrappers field records zero planned wrappers');
+  const transaction = x.S.atomicPageCollapseTransactions.values().next().value || null;
+  ok(!!transaction, 'the collapse is committed');
+  equal(transaction.version, 3, 'through the accepted version-3 shape');
+  equal(pass4rHostNodes(transaction, x.flow.constructor, PASS5A_H2O_PROJECTION_KEYS).length, 0,
+    'zero native retention');
+
+  // The empty-current-subset outcome (collapsed-no-native-work /
+  // no-current-mounted-members) is frozen by Stage2 T3-B and unchanged here;
+  // this fixture owns only the metrics read that used to precede the branch.
+});
+
+await fixture('Live A an empty hostWrappers array remains valid and distinct from absent', () => {
+  const absent = liveWindowedPlanHarness();
+  const empty = liveWindowedPlanHarness({ emptyArray: true });
+  const a = absent.api.execute(1, 'validator', { chatId: absent.plan.chatId });
+  const b = empty.api.execute(1, 'validator', { chatId: empty.plan.chatId });
+  equal(a.status, b.status, 'absent and empty reach the same windowed outcome');
+  equal(absent.api.diagnostic().wrappersPlanned, 0, 'absent records zero');
+  equal(empty.api.diagnostic().wrappersPlanned, 0, 'empty records zero');
+  // The distinction is explicit: only one of the two carries the property.
+  const absentPlan = absent.control.planTransform({ ...absent.rawPlan });
+  const emptyPlan = empty.control.planTransform({ ...empty.rawPlan });
+  equal(Object.prototype.hasOwnProperty.call(absentPlan, 'hostWrappers'), false, 'the absent case has no hostWrappers property');
+  equal(Object.prototype.hasOwnProperty.call(emptyPlan, 'hostWrappers'), true, 'the empty case has the property');
+  equal(emptyPlan.hostWrappers.length, 0, 'and it is an empty array');
+});
+
+await fixture('Live B a mid-subset stamp failure stays fail-closed and names its real reason', () => {
+  const t = stage2Transaction({ coldEnd: false, middleCount: 6 });
+  const real = t.api.subset(t.api.model().pages[0]).mounted[0];
+  // Three canonical members presenting six current surfaces; the fourth write
+  // throws. Every surface passes the pre-apply connected / non-H2O checks.
+  const surface = (questionId, turnNo, hostile = false) => ({
+    questionId,
+    turnNo,
+    node: {
+      isConnected: true,
+      getAttribute: () => null,
+      hasAttribute: () => false,
+      setAttribute: () => { if (hostile) throw new Error('host refused the attribute write'); },
+      removeAttribute: () => {},
+      className: 'host-turn-slot',
+    },
+  });
+  const six = [
+    surface('q-a', 1), surface('q-a2', 1), surface('q-b', 2),
+    surface('q-b2', 2, true), surface('q-c', 3), surface('q-c2', 3),
+  ];
+  const applied = t.api.stamp({ atomicRenderedBoundaryPlan: true, pageNum: 1, mountedCandidates: six });
+  equal(applied.ok, false, 'the stamping pass fails');
+  equal(applied.status, 'rendered-collapse-stamp-failed', 'precise failure status is unchanged');
+  equal(applied.hidden, 3, 'exactly the three writes that landed are reported');
+  equal(applied.stamped.length, 3, 'and handed back for rollback');
+  ok(/host refused the attribute write/.test(String(applied.reason || '')),
+    `the real thrown reason survives the catch (got ${JSON.stringify(applied.reason)})`);
+  // The all-or-nothing guard itself is untouched.
+  const commit = extractFunction(SOURCE, 'commitWindowedPageCollapse');
+  ok(/applied\.hidden !== snapshot\.mounted\.length/.test(commit),
+    'the all-or-nothing guard is unchanged');
+  // Rollback cleans every applied mutation and nothing is committed.
+  const rolled = t.api.rollback(1, applied.restorable);
+  equal(rolled.restored + rolled.residue.length, applied.restorable.length, 'every applied mutation is accounted for');
+  equal(t.api.state.atomicPageCollapseTransactions.size, 0, 'no collapse transaction is committed');
+  equal(hiddenAttr(real.node), null, 'zero residual hidden state on the live surface');
+});
+
+await fixture('Live B six successful writes give hidden six and do not roll back', () => {
+  const t = stage2Transaction({ coldEnd: false, middleCount: 6 });
+  const surface = (questionId, turnNo) => {
+    let value = null;
+    return {
+      questionId,
+      turnNo,
+      node: {
+        isConnected: true,
+        getAttribute: () => value,
+        hasAttribute: () => value != null,
+        setAttribute: (name, next) => { value = String(next); },
+        removeAttribute: () => { value = null; },
+        className: 'host-turn-slot',
+      },
+    };
+  };
+  const six = [
+    surface('q-a', 1), surface('q-a2', 1), surface('q-b', 2),
+    surface('q-b2', 2), surface('q-c', 3), surface('q-c2', 3),
+  ];
+  const applied = t.api.stamp({ atomicRenderedBoundaryPlan: true, pageNum: 1, mountedCandidates: six });
+  equal(applied.ok, true, 'all six writes succeed');
+  equal(applied.hidden, 6, 'hidden counts all six current surfaces, not three members');
+  equal(applied.stamped.length, 6, 'all six are stamped');
+  equal(applied.reason == null, true, 'a successful pass carries no failure reason');
+  equal(six.every((entry) => entry.node.getAttribute() === '1'), true, 'every surface carries the page stamp');
 });
 
 const failed = fixtures.filter((entry) => !entry.ok);

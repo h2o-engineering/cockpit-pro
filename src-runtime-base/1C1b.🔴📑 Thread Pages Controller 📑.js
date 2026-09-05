@@ -5979,10 +5979,25 @@
           if (String(priorValue || '') !== String(num)) node.setAttribute(ATTR_CHAT_PAGE_NATIVE_HIDDEN, String(num));
           restorable.push({ questionId: entry.questionId, turnNo: entry.turnNo, priorValue: priorValue == null ? null : String(priorValue) });
           stamped.push(node);
-        } catch {
-          // All-or-nothing within the subset: hand back everything already
-          // mutated so the caller can roll every one of them back.
-          return { ok: false, status: 'rendered-collapse-stamp-failed', hidden: stamped.length, mutations: stamped.length, stamped, restorable };
+        } catch (error) {
+          /* All-or-nothing within the subset: hand back everything already
+             mutated so the caller can roll every one of them back.
+
+             The guard is right and stays exactly as it is; what was missing is
+             WHY. Discarding the exception here left a live stall reporting
+             nothing but a generic transient failure, so the thrown reason is
+             carried out as a bounded scalar — no exception object, no node,
+             nothing persisted — beside the unchanged status. */
+          const reason = String(error?.message || error || 'stamp-write-failed').slice(0, 200);
+          return {
+            ok: false,
+            status: 'rendered-collapse-stamp-failed',
+            reason,
+            hidden: stamped.length,
+            mutations: stamped.length,
+            stamped,
+            restorable,
+          };
         }
       }
       return { ok: true, status: 'collapsed', hidden: subset.length, mutations: stamped.length, stamped, restorable };
@@ -7018,7 +7033,9 @@
       return {
         ok: false,
         status: 'atomic-collapse-rolled-back',
-        reason: String(applied.status || 'atomic-collapse-failed'),
+        // The captured cause when there is one, so the recorded attempt's
+        // internalReason names the real failure instead of the stage alone.
+        reason: String(applied.reason || applied.status || 'atomic-collapse-failed'),
         mutations: rolled.restored,
         residue: rolled.residue,
       };
@@ -7067,7 +7084,12 @@
       }
       if (metrics) {
         metrics.rangePlansBuilt += 1;
-        metrics.wrappersPlanned = plan.hostWrappers.length;
+        /* A Stage-2 windowed plan legitimately carries no hostWrappers field at
+           all — the branch below is written for exactly that shape — so this
+           line must not be the thing that decides whether collapse runs.
+           Measured live: recording metrics threw before the windowed branch it
+           was standing in front of could ever be reached. */
+        metrics.wrappersPlanned = Array.isArray(plan.hostWrappers) ? plan.hostWrappers.length : 0;
       }
       plan.atomicRenderedBoundaryPlan = true;
       /* Stage 2 Pass 3 intake: a plan without a proven legacy contiguous
