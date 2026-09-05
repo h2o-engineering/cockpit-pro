@@ -6076,8 +6076,19 @@
           stamped: [],
         };
       }
+      /* A candidate already carrying THIS page's marker is not a conflict — it
+         is an obligation already satisfied, which the write loop below has
+         always understood (`if (marker === String(num)) continue`). Rejecting
+         it here contradicted that skip and broke the designed recovery:
+         unbind may clear the ephemeral transaction map while the durable
+         collapse intent and the markers this page itself wrote both survive,
+         and the replay owner's re-entry then refused the page's own work.
+
+         A marker belonging to ANOTHER page stays a hard conflict. It is never
+         cleared, overwritten or appropriated, and it fails the whole apply
+         closed with zero writes. */
       const existing = String(node.getAttribute?.(ATTR_CHAT_PAGE_NATIVE_HIDDEN) || '');
-      if (existing) {
+      if (existing && existing !== String(num)) {
         return {
           ok: false,
           status: 'rendered-collapse-stamp-conflict',

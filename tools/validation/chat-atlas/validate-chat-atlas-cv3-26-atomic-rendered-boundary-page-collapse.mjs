@@ -716,6 +716,7 @@ function createTransactionHarness(options = {}) {
       execute: executeAtomicPageCollapseTransaction,
       diagnostic: getAtomicPageCollapseTransactionDiagnostic,
       validate: validateCommittedAtomicPageCollapse,
+      stamp: applyCollapsedNativeRange,
       expand: expandPageWithRenderedBoundaries,
       reconcile: reconcileAtomicPageCollapseTransactions,
       sync: syncSyntheticTitleList,
@@ -3743,6 +3744,109 @@ await fixture('P2 a mixed legacy plan applies over its own six-wrapper obligatio
   equal(d.appliedOk, true, 'so the apply succeeds');
   equal(d.rollbackPerformed, false, 'with no false rollback');
   equal(String(result.status || ''), 'collapsed', 'and the collapse commits');
+});
+
+// --------------------------------------------------------------------------
+// RE-ENTRY IDEMPOTENCE — the legacy pre-scan rejected the page's OWN markers.
+//
+// Collapse intent is durable; the transaction map is ephemeral projection
+// bookkeeping that unbind may legitimately clear while the intent and the
+// already-written native markers survive. Re-entry through the designed replay
+// owner then re-ran the legacy apply, whose pre-scan refused every candidate
+// carrying this very page's marker - even though the write loop immediately
+// below already treats that as an obligation already satisfied.
+// --------------------------------------------------------------------------
+
+const P223_MARKER = 'data-cgxui-chat-page-native-hidden';
+
+// A legacy full-interval plan over a chosen slice of the real obligation set.
+function p223LegacyPlan(x, count = 6) {
+  return {
+    ...x.rawPlan,
+    atomicRenderedBoundaryPlan: true,
+    hostWrappers: x.rawPlan.hostWrappers.slice(0, count),
+  };
+}
+function p223Premark(nodes, value) {
+  for (const node of nodes) node.setAttribute(P223_MARKER, String(value));
+}
+
+await fixture('R1 lifecycle: intent and same-page markers survive transaction teardown', () => {
+  const x = createTransactionHarness();
+  equal(String(x.api.execute(1, 'validator', { chatId: x.plan.chatId }).status || ''), 'collapsed',
+    'the legacy page-1 collapse commits');
+  const marked = x.rawPlan.hostWrappers.filter((node) => node.getAttribute(P223_MARKER) === '1');
+  equal(marked.length, x.rawPlan.hostWrappers.length, 'every obligation carries the page-1 marker');
+  equal(x.S.atomicPageCollapseTransactions.size, 1, 'and a transaction exists');
+
+  // The teardown unbind performs: the ephemeral projection bookkeeping is
+  // cleared while the durable intent and the written markers stay.
+  x.S.atomicPageCollapseTransactions.clear();
+  // Unbind also takes the ephemeral H2O projection down with the bookkeeping.
+  for (const synth of titleLists(x)) { try { synth.remove(); } catch {} }
+  equal(x.S.atomicPageCollapseTransactions.size, 0, 'the transaction map is cleared');
+  equal(titleLists(x).length, 0, 'the ephemeral projection is gone');
+  equal(x.S.collapsedPagesByChat.size >= 1, true, 'durable collapse intent survives');
+  equal(x.rawPlan.hostWrappers.every((node) => node.getAttribute(P223_MARKER) === '1'), true,
+    'the same-page native markers survive');
+
+  // Governed re-entry: the replay owner re-runs the collapse over its own
+  // surviving markers.
+  const replayed = x.api.execute(1, 'intent-replay:reconcile', { chatId: x.plan.chatId });
+  const d = x.api.diagnostic();
+
+  equal(d.applyBranch, 'legacy', 'the legacy branch runs on re-entry');
+  equal(d.appliedOk, true, 'the re-entry apply succeeds over its own markers');
+  equal(d.appliedHidden, x.rawPlan.hostWrappers.length, 'all obligations are satisfied');
+  equal(d.appliedMutations, 0, 'and none needed rewriting');
+  equal(d.rollbackPerformed, false, 'nothing is rolled back');
+  equal(String(replayed.status || ''), 'collapsed', 'a coherent transaction is re-established');
+  equal(x.S.atomicPageCollapseTransactions.size, 1, 'the transaction is back');
+});
+
+await fixture('R2 legacy: a fully pre-marked same-page set succeeds with zero new writes', () => {
+  const x = createTransactionHarness();
+  const plan = p223LegacyPlan(x, 6);
+  p223Premark(plan.hostWrappers, 1);
+  const applied = x.api.stamp(plan, 'legacy');
+  equal(applied.branch, 'legacy', 'the legacy branch executed');
+  equal(applied.ok, true, 'every obligation is already satisfied');
+  equal(applied.hidden, 6, 'all six obligations are hidden');
+  equal(applied.mutations, 0, 'with zero new writes');
+  equal(applied.stamped.length, 0, 'and nothing newly stamped');
+  equal(plan.hostWrappers.every((node) => node.getAttribute(P223_MARKER) === '1'), true,
+    'no same-page marker was rewritten to re-own it');
+});
+
+await fixture('R3 legacy: a partially pre-marked same-page set writes only what is missing', () => {
+  const x = createTransactionHarness();
+  const plan = p223LegacyPlan(x, 6);
+  p223Premark(plan.hostWrappers.slice(0, 3), 1);
+  const applied = x.api.stamp(plan, 'legacy');
+  equal(applied.branch, 'legacy', 'the legacy branch executed');
+  equal(applied.ok, true, 'the apply succeeds');
+  equal(applied.hidden, 6, 'all six obligations are hidden');
+  equal(applied.mutations, 3, 'only the three unmarked needed a write');
+  equal(applied.stamped.length, 3, 'and only those three are stamped');
+  equal(plan.hostWrappers.every((node) => node.getAttribute(P223_MARKER) === '1'), true,
+    'the whole obligation set now carries this page marker');
+});
+
+await fixture('R4 legacy: a foreign-page marker remains a hard conflict', () => {
+  const x = createTransactionHarness();
+  const plan = p223LegacyPlan(x, 6);
+  // One candidate belongs to another page. It is never cleared, overwritten or
+  // appropriated, and it fails the whole apply closed.
+  p223Premark(plan.hostWrappers.slice(2, 3), 2);
+  const applied = x.api.stamp(plan, 'legacy');
+  equal(applied.ok, false, 'a foreign marker fails closed');
+  equal(applied.status, 'rendered-collapse-stamp-conflict', 'with the precise conflict status');
+  equal(applied.hidden, 0, 'zero obligations are claimed');
+  equal(applied.mutations, 0, 'zero writes happen');
+  equal(applied.stamped.length, 0, 'and nothing is stamped');
+  equal(plan.hostWrappers[2].getAttribute(P223_MARKER), '2', 'the foreign marker is untouched');
+  equal(plan.hostWrappers.filter((node) => node.getAttribute(P223_MARKER) === '1').length, 0,
+    'and no candidate was appropriated for this page');
 });
 
 const failed = fixtures.filter((entry) => !entry.ok);
