@@ -7040,7 +7040,16 @@
       pageNum: num,
       mountedCandidates: snapshot.mounted,
     });
-    if (metrics) metrics.wrappersStamped = (applied.stamped || []).length;
+    if (metrics) {
+      metrics.wrappersStamped = (applied.stamped || []).length;
+      // Exactly the comparands of the guard on the next line.
+      metrics.applyBranch = 'windowed';
+      metrics.appliedOk = applied.ok === true;
+      metrics.appliedHidden = Math.max(0, Number(applied.hidden || 0) || 0);
+      metrics.appliedMutations = Math.max(0, Number(applied.mutations || 0) || 0);
+      metrics.appliedStampedCount = (applied.stamped || []).length;
+      metrics.comparisonExpectedCount = snapshot.mounted.length;
+    }
     if (!applied.ok || applied.hidden !== snapshot.mounted.length) {
       const rolled = rollbackWindowedCollapseCandidates(num, applied.restorable || []);
       S.atomicPageCollapseTransactions.delete(key);
@@ -7167,7 +7176,16 @@
           metrics.syntheticListsInserted += 1;
         }
         const stamped = applyCollapsedNativeRange(plan);
-        if (metrics) metrics.wrappersStamped = (stamped.stamped || []).length;
+        if (metrics) {
+          metrics.wrappersStamped = (stamped.stamped || []).length;
+          // Exactly the comparands of the guard on the next line.
+          metrics.applyBranch = 'legacy';
+          metrics.appliedOk = stamped.ok === true;
+          metrics.appliedHidden = Math.max(0, Number(stamped.hidden || 0) || 0);
+          metrics.appliedMutations = Math.max(0, Number(stamped.mutations || 0) || 0);
+          metrics.appliedStampedCount = (stamped.stamped || []).length;
+          metrics.comparisonExpectedCount = plan.hostWrappers.length;
+        }
         if (!stamped.ok || stamped.hidden !== plan.hostWrappers.length) {
           return rollbackAtomicPageCollapse(transaction, viewportAnchor, stamped.status);
         }
@@ -7417,10 +7435,20 @@
         results.push({ ok: true, status: 'current', pageNum: transaction.pageNum });
         continue;
       }
-      results.push(expandPageWithRenderedBoundaries(transaction.pageNum, {
+      /* Observability only. The decisive validation reason is computed right
+         here and was then discarded from every returned surface, so a live
+         capture could tell that a page had been expanded but not which clause
+         decided it. The expansion call, its source and its behaviour are
+         unchanged; the reason simply travels with the entry the pass returns,
+         exactly as the pending branch above already does. */
+      const expanded = expandPageWithRenderedBoundaries(transaction.pageNum, {
         chatId: transaction.chatId,
         source: `${reason}:${current.reason}`,
-      }));
+      });
+      results.push({
+        ...expanded,
+        reason: current.reason == null ? null : String(current.reason).slice(0, 200),
+      });
     }
     for (const replayed of replayDeferredPageCollapseIntent(reason)) results.push(replayed);
     return results;
@@ -7546,6 +7574,19 @@
       firstWriteReached: raw.firstWriteReached === true,
       wrappersPlanned: Math.max(0, Number(raw.wrappersPlanned || 0) || 0),
       wrappersStamped: Math.max(0, Number(raw.wrappersStamped || 0) || 0),
+      /* Apply comparands. `wrappersStamped` alone reads as a partial result
+         because it counts only NEW writes: an obligation that already carries
+         the marker is satisfied without one. These record what the
+         all-or-nothing guard actually compared, so a reported rollback names
+         the branch and the two numbers that produced it. `applyBranch` is
+         empty when no apply ran, which is what distinguishes that from a
+         failed one. Primitive scalars only. */
+      applyBranch: String(raw.applyBranch || ''),
+      appliedOk: raw.appliedOk === true,
+      appliedHidden: Math.max(0, Number(raw.appliedHidden || 0) || 0),
+      appliedMutations: Math.max(0, Number(raw.appliedMutations || 0) || 0),
+      appliedStampedCount: Math.max(0, Number(raw.appliedStampedCount || 0) || 0),
+      comparisonExpectedCount: Math.max(0, Number(raw.comparisonExpectedCount || 0) || 0),
       titleRowsPrepared: Math.max(0, Number(raw.titleRowsPrepared || 0) || 0),
       syntheticListsInserted: Math.max(0, Number(raw.syntheticListsInserted || 0) || 0),
       rollbackPerformed: raw.rollbackPerformed === true,

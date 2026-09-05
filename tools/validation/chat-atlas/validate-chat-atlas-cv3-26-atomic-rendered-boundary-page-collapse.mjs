@@ -711,6 +711,7 @@ function createTransactionHarness(options = {}) {
       collapse: collapsePageWithRenderedBoundaries,
       execute: executeAtomicPageCollapseTransaction,
       diagnostic: getAtomicPageCollapseTransactionDiagnostic,
+      validate: validateCommittedAtomicPageCollapse,
       expand: expandPageWithRenderedBoundaries,
       reconcile: reconcileAtomicPageCollapseTransactions,
       sync: syncSyntheticTitleList,
@@ -3424,6 +3425,192 @@ await fixture('Live W5 ambiguity and a missing marker still fail closed', () => 
   const missing = unmarked.api.validateCommitted(unmarked.transaction);
   equal(missing.ok, false, 'a current mounted member without the marker is still invalid');
   equal(missing.reason, 'transaction-commit-incomplete', 'reported as commit-incomplete');
+});
+
+// --------------------------------------------------------------------------
+// OBSERVABILITY — the product computes the decisive scalars and then discards
+// them from every returned surface, so a live capture cannot tell which
+// validation clause fired or which apply branch produced a reported rollback.
+// Nothing about the decisions themselves changes here.
+// --------------------------------------------------------------------------
+
+// Force a specific validation clause without touching validation itself.
+function obsWindowed() {
+  return pass4rCommitted({ coldEnd: true, middleCount: 6, missingEnd: true });
+}
+
+await fixture('Obs V1 an expansion entry carries the exact validation reason', () => {
+  // Canonical drift is a real, enumerated invalidation.
+  const c = obsWindowed();
+  Object.assign(c.h.status, { routeKey: '/c/other-route' });
+  const before = c.api.validateCommitted(c.transaction);
+  equal(before.ok, false, 'validation refuses the drifted transaction');
+  equal(before.reason, 'atomic-plan-scope-stale', 'and names the clause that fired');
+  const results = c.api.reconcileAll('presentation-updated');
+  const entry = results.find((row) => String(row.status || '').includes('expand')
+    || row.pageNum === c.transaction.pageNum) || null;
+  ok(!!entry, 'the reconcile pass returns an entry for the page');
+  equal(entry.reason, before.reason,
+    `the expansion entry exposes the exact validation reason (got ${JSON.stringify(entry.reason)})`);
+});
+
+await fixture('Obs V2 every enumerated validation reason is distinguishable', () => {
+  const seen = new Map();
+  // transaction-missing
+  const missing = obsWindowed();
+  seen.set('transaction-missing', missing.api.validateCommitted(null).reason);
+  // atomic-plan-scope-stale
+  const stale = obsWindowed();
+  Object.assign(stale.h.status, { generation: 9 });
+  seen.set('atomic-plan-scope-stale', stale.api.validateCommitted(stale.transaction).reason);
+  // candidate-identity-ambiguous (a candidate-* unresolved reason)
+  const ambiguous = obsWindowed();
+  const member = ambiguous.api.subset(ambiguous.api.model().pages[0]).mounted[0];
+  const duplicate = ambiguous.h.document.createElement('SECTION');
+  duplicate.setAttribute('data-turn-id', member.questionId);
+  duplicate.setAttribute('data-turn', 'user');
+  duplicate.setAttribute('data-testid', 'conversation-turn-93');
+  ambiguous.h.flow.appendChild(duplicate);
+  seen.set('candidate-identity-ambiguous', ambiguous.api.validateCommitted(ambiguous.transaction).reason);
+  // transaction-commit-incomplete
+  const unmarked = obsWindowed();
+  unmarked.api.subset(unmarked.api.model().pages[0]).mounted[0]
+    .node.removeAttribute('data-cgxui-chat-page-native-hidden');
+  seen.set('transaction-commit-incomplete', unmarked.api.validateCommitted(unmarked.transaction).reason);
+  for (const [expected, actual] of seen) {
+    equal(actual, expected, `${expected} is produced verbatim`);
+  }
+  equal(new Set(seen.values()).size, seen.size, 'no two clauses collapse into one status');
+  // And each reaches the returned expansion entry unchanged.
+  const drifted = obsWindowed();
+  Object.assign(drifted.h.status, { canonicalFingerprint: 'djb2:other-effective' });
+  const entry = drifted.api.reconcileAll('presentation-updated')
+    .find((row) => row.pageNum === drifted.transaction.pageNum) || null;
+  equal(entry?.reason, 'atomic-plan-scope-stale', 'the reason survives into the returned entry');
+});
+
+await fixture('Obs V3 the open-target reason is distinguishable live', () => {
+  const x = createTransactionHarness();
+  equal(collapse(x).ok, true, 'page collapse committed');
+  const transaction = x.S.atomicPageCollapseTransactions.values().next().value;
+  const member = transaction.titleRows[0];
+  x.answer1.wrapper.remove();
+  equal(x.api.open(transaction, member).status, 'pending', 'an exact target is pending');
+  const verdict = x.api.validate(transaction);
+  equal(verdict.ok, false, 'the pending open makes the page not-current');
+  equal(verdict.reason, 'canonical-mount-incomplete', 'with the title-list open-target reason');
+  const entry = x.api.reconcile('presentation-updated')
+    .find((row) => row.pageNum === transaction.pageNum) || null;
+  ok(!!entry, 'the reconcile pass returns an entry');
+  equal(entry.reason, verdict.reason, 'and it carries the exact open-target reason');
+});
+
+await fixture('Obs A1 legacy success records six obligations satisfied by three new writes', () => {
+  const x = createTransactionHarness();
+  // Three of the six obligations acquire the correct marker between the
+  // pre-scan and the write loop - the host re-applying our own attribute
+  // mid-pass. The write loop then legitimately skips them.
+  x.control.planTransform = (plan) => {
+    const six = plan.hostWrappers.slice(0, 6);
+    for (const node of six.slice(0, 3)) {
+      let scanned = false;
+      const read = node.getAttribute.bind(node);
+      node.getAttribute = (name) => {
+        if (name !== 'data-cgxui-chat-page-native-hidden') return read(name);
+        if (!scanned) { scanned = true; return null; }
+        return '1';
+      };
+    }
+    return { ...plan, hostWrappers: six };
+  };
+  const result = x.api.execute(1, 'validator', { chatId: x.plan.chatId });
+  const d = x.api.diagnostic();
+  equal(d.applyBranch, 'legacy', 'the actual execution branch is recorded');
+  equal(d.appliedOk, true, 'the apply succeeded');
+  equal(d.appliedHidden, 6, 'all six obligations are hidden');
+  equal(d.appliedMutations, 3, 'only three needed a new write');
+  equal(d.appliedStampedCount, 3, 'so only three were stamped');
+  equal(d.comparisonExpectedCount, 6, 'the guard compared against six obligations');
+  equal(d.rollbackPerformed, false, 'three new writes is not a partial success');
+  equal(String(result.status || ''), 'collapsed', 'and the collapse succeeded');
+});
+
+await fixture('Obs A2 windowed success records the mounted-subset obligation count', () => {
+  const t = stage2Transaction({ coldEnd: true, middleCount: 6, missingEnd: true });
+  const plan = t.plan();
+  const expected = plan.mountedCandidates.length;
+  ok(expected > 0, 'this world has a current mounted subset to apply against');
+  const metrics = {};
+  const result = t.api.commit({
+    num: 1, id: 'chat-stage-2c0', key: t.api.key('chat-stage-2c0', 1),
+    plan, epochBefore: t.api.epoch(1), metrics,
+  });
+  equal(result.ok, true, 'the windowed commit succeeds');
+  equal(metrics.applyBranch, 'windowed', 'the actual execution branch is recorded');
+  equal(metrics.appliedOk, true, 'the apply succeeded');
+  equal(metrics.comparisonExpectedCount, expected,
+    'the guard compared against the mounted-subset obligation count');
+  equal(metrics.appliedHidden, expected, 'and every obligation was hidden');
+  equal(metrics.appliedStampedCount, metrics.appliedMutations, 'stamped and mutations agree here');
+});
+
+await fixture('Obs A2b a windowed collapse with no apply records an empty branch', () => {
+  // An empty current subset commits logically without ever calling apply, and
+  // that is what distinguishes "no apply ran" from "an apply failed".
+  const x = createTransactionHarness();
+  x.control.planTransform = (plan) => {
+    const windowed = { ...plan, stage2WindowedPlan: true };
+    delete windowed.hostWrappers;
+    return windowed;
+  };
+  equal(String(x.api.execute(1, 'validator', { chatId: x.plan.chatId }).status || ''), 'collapsed',
+    'the windowed intake succeeds');
+  const d = x.api.diagnostic();
+  equal(d.applyBranch, '', 'no apply ran, so no branch is claimed');
+  equal(d.appliedOk, false, 'and no apply success is asserted');
+  equal(d.comparisonExpectedCount, 0, 'with no obligation count to compare');
+  equal(d.rollbackPerformed, false, 'nothing was rolled back');
+});
+
+await fixture('Obs A3 a genuine incomplete apply still rolls back and records exact comparands', () => {
+  const t = stage2Transaction({ coldEnd: false, middleCount: 6 });
+  const surface = (questionId, turnNo, hostile = false) => ({
+    questionId,
+    turnNo,
+    node: {
+      isConnected: true,
+      getAttribute: () => null,
+      hasAttribute: () => false,
+      setAttribute: () => { if (hostile) throw new Error('host refused the attribute write'); },
+      removeAttribute: () => {},
+      className: 'host-turn-slot',
+    },
+  });
+  const six = [
+    surface('q-a', 1), surface('q-a2', 1), surface('q-b', 2),
+    surface('q-b2', 2, true), surface('q-c', 3), surface('q-c2', 3),
+  ];
+  const applied = t.api.stamp({ atomicRenderedBoundaryPlan: true, pageNum: 1, mountedCandidates: six });
+  equal(applied.ok, false, 'the apply fails closed');
+  equal(applied.hidden, 3, 'three writes landed');
+  equal(applied.stamped.length, 3, 'and three are handed back');
+  ok(/host refused the attribute write/.test(String(applied.reason || '')), 'the real reason is preserved');
+  const rolled = t.api.rollback(1, applied.restorable);
+  equal(rolled.restored + rolled.residue.length, applied.restorable.length, 'every applied mutation is accounted for');
+  equal(t.api.state.atomicPageCollapseTransactions.size, 0, 'nothing is committed');
+});
+
+await fixture('Obs D1 the diagnostic returns the newest attempt deterministically', () => {
+  const x = createTransactionHarness();
+  const first = x.api.execute(1, 'validator', { chatId: x.plan.chatId });
+  const a = x.api.diagnostic();
+  ok(a.attemptId >= 1, 'the first attempt carries a sequence id');
+  const second = x.api.execute(1, 'validator', { chatId: x.plan.chatId });
+  const b = x.api.diagnostic();
+  ok(b.attemptId > a.attemptId, 'a later attempt has a strictly greater id');
+  equal(b.attemptId, x.api.diagnostic().attemptId, 'retrieval is stable between reads');
+  equal(b.pageNum, 1, 'and reports the page it belongs to');
+  ok(!!first && !!second, 'both attempts executed');
 });
 
 const failed = fixtures.filter((entry) => !entry.ok);
