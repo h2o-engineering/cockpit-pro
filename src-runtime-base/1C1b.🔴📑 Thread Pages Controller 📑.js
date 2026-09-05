@@ -6798,11 +6798,26 @@
     if (!canonical.ok) return canonical;
     const snapshot = currentCollapsedPageMembers(transaction);
     if (!snapshot.ok) return { ok: false, reason: String(snapshot.reason || 'candidate-unresolved') };
-    // Derived independently from the page's own divider, with the
-    // member-discovered root as the windowed fallback. A flow root that is not
-    // live is not host churn: the surface this collapse describes is gone.
+    /* Derived independently from the page's own divider, with the
+       member-discovered root as the windowed fallback.
+
+       A windowed collapse is LOGICAL state. Its own commit path already
+       succeeds with nothing currently mounted — collapsed-no-native-work /
+       no-current-mounted-members — so requiring a live native root here made
+       validation contradict the commit that produced the transaction, and
+       ordinary host virtualization expanded a collapse the user still owned.
+       Canonical authority is the first-order truth and has already been
+       checked above; a missing root is presentation absence, exactly like a
+       missing member. Every current member that IS mounted is still held to
+       the marker invariant below.
+
+       The legacy full-interval world keeps the stricter rule: it owns a
+       synthetic title list that has to live somewhere, so a root it cannot
+       find really is invalid for it. */
     const derivedRoot = collapsedPageFlowRootByIdentity(transaction.pageNum) || snapshot.flowRoot || null;
-    if (derivedRoot?.isConnected !== true) return { ok: false, reason: 'flow-root-unavailable' };
+    if (derivedRoot?.isConnected !== true && transaction.titleListContainer) {
+      return { ok: false, reason: 'flow-root-unavailable' };
+    }
     // The one permitted indirect title-list dependency: a member deliberately
     // opened in place is legitimately visible and must not read as incomplete.
     // Skipped entirely when no open state exists, which is the same answer.

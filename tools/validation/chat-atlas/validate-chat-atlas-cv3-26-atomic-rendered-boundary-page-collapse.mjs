@@ -1703,6 +1703,7 @@ const STAGE2_CAPABILITY_SYMBOLS = [
   'titleListCurrentProjectionNodes', 'titleListCurrentProjectedCount',
   'currentCollapsedPageIntent', 'currentCollapsedPageMembers',
   'reconcileActiveWindowedCollapse', 'clearStaleWindowedCollapseStamps',
+  'reconcileAtomicPageCollapseTransactions',
   'expandWindowedPageCollapse', 'expandPageWithRenderedBoundaries',
   'releaseAtomicPageCollapseState',
   'pageCollapseOperationEpoch', 'pageCollapseEpochCoherent',
@@ -1750,6 +1751,9 @@ function stage2World(options = {}) {
     clearTitleListNativeInPlaceProjection: '() => ({ ok: true, mutations: 0 })',
     reconcileTitleListNativeInPlaceProjection: '() => ({ ok: true, mutations: 0 })',
     reconcilePendingTitleListMaterialization: '() => null',
+    // Deferred-intent replay is a separate owner with its own frozen coverage;
+    // it is not part of the reconcile decision under test here.
+    replayDeferredPageCollapseIntent: '() => []',
     releaseTitleStackBars: '() => 0',
     titleListStackRegistryKey: '(n, id) => `${id}::${n}`',
     titleListOpenStateKey: '(n, id) => `${id}::${n}`',
@@ -1807,6 +1811,8 @@ function stage2World(options = {}) {
         ? validateCommittedAtomicPageCollapse : null,
       reconcileActive: typeof reconcileActiveWindowedCollapse === 'function'
         ? reconcileActiveWindowedCollapse : null,
+      reconcileAll: typeof reconcileAtomicPageCollapseTransactions === 'function'
+        ? reconcileAtomicPageCollapseTransactions : null,
       clearStale: typeof clearStaleWindowedCollapseStamps === 'function'
         ? clearStaleWindowedCollapseStamps : null,
       expand: typeof expandWindowedPageCollapse === 'function'
@@ -3305,6 +3311,119 @@ await fixture('Live B six successful writes give hidden six and do not roll back
   equal(applied.stamped.length, 6, 'all six are stamped');
   equal(applied.reason == null, true, 'a successful pass carries no failure reason');
   equal(six.every((entry) => entry.node.getAttribute() === '1'), true, 'every surface carries the page stamp');
+});
+
+// --------------------------------------------------------------------------
+// WINDOWED SUSTAIN — a committed windowed collapse is LOGICAL state.
+//
+// The commit path already accepts a page with nothing currently mounted
+// (collapsed-no-native-work / no-current-mounted-members). Validation demanding
+// a live native root therefore disagreed with the commit that produced it, and
+// ordinary host virtualization expanded a collapse the user still owned.
+// Canonical authority stays the first-order truth: every drift below still
+// invalidates.
+// --------------------------------------------------------------------------
+
+// Ordinary host presentation churn: the page's flow root (and with it the
+// divider) stops being live. No canonical identity-defining field changes.
+function windowedRootLoss(scope) {
+  scope.h.flow.isConnected = false;
+}
+
+await fixture('Live W1 a committed windowed collapse survives losing its live flow root', () => {
+  const c = pass4rCommitted({ coldEnd: true, middleCount: 6, missingEnd: true });
+  equal(c.result.ok, true, 'the windowed transaction commits');
+  equal(c.api.validateCommitted(c.transaction).ok, true, 'valid while the root is live');
+  windowedRootLoss(c);
+  const verdict = c.api.validateCommitted(c.transaction);
+  equal(verdict.ok, true, `root absence alone is ordinary presentation churn (reason ${JSON.stringify(verdict.reason)})`);
+  equal(verdict.reason, null, 'and reports no invalidation reason');
+  equal(c.api.state.atomicPageCollapseTransactions.size, 1, 'the transaction is still committed');
+});
+
+await fixture('Live W2 reconcile does not expand a windowed collapse for root absence alone', () => {
+  const c = pass4rCommitted({ coldEnd: true, middleCount: 6, missingEnd: true });
+  windowedRootLoss(c);
+  ok(!!c.api.reconcileAll, 'the reconcile owner is available');
+  const results = c.api.reconcileAll('host-virtualization');
+  equal(c.api.state.atomicPageCollapseTransactions.size, 1, 'the committed collapse is retained');
+  equal(results.some((entry) => String(entry.status || '').includes('expand')), false,
+    'no expansion was performed');
+});
+
+await fixture('Live W3 zero, partial and replacement presentation all remain valid', () => {
+  // A. zero current mounted members, root gone.
+  const zero = pass4rCommitted({ coldEnd: true, middleCount: 6, missingEnd: true });
+  const only = zero.api.subset(zero.api.model().pages[0]).mounted[0];
+  const idx = zero.h.flow.children.indexOf(only.node);
+  zero.h.flow.children.splice(idx, 1);
+  only.node.parentElement = null;
+  only.node.isConnected = false;
+  windowedRootLoss(zero);
+  equal(zero.api.validateCommitted(zero.transaction).ok, true, 'zero current members with no root stays valid');
+  // This is the same truth the commit path already tells.
+  const bare = pass4rCommitted({ coldEnd: true, middleCount: 6, missingStart: true });
+  equal(bare.result.status, 'collapsed-no-native-work', 'commit accepts a zero-native windowed page');
+  equal(bare.result.reason, 'no-current-mounted-members', 'with that exact frozen reason');
+  equal(bare.api.validateCommitted(bare.transaction).ok, true, 'and validation agrees with it');
+
+  // B. partial current subset, root live again.
+  const partial = pass4rCommitted({ coldEnd: false, middleCount: 6 });
+  equal(partial.api.validateCommitted(partial.transaction).ok, true, 'a partial mounted subset is valid');
+
+  // C. current replacement presentation.
+  const replaced = pass4rCommitted({ coldEnd: true, middleCount: 6, missingEnd: true });
+  const original = replaced.api.subset(replaced.api.model().pages[0]).mounted[0];
+  const replacement = replaced.h.document.createElement('SECTION');
+  replacement.setAttribute('data-turn-id', original.questionId);
+  replacement.setAttribute('data-turn', 'user');
+  replacement.setAttribute('data-testid', 'conversation-turn-88');
+  const at = replaced.h.flow.children.indexOf(original.node);
+  replaced.h.flow.children.splice(at, 1);
+  original.node.parentElement = null;
+  original.node.isConnected = false;
+  replaced.h.flow.appendChild(replacement);
+  replaced.api.reconcileActive('replacement');
+  equal(replaced.api.validateCommitted(replaced.transaction).ok, true, 'a current replacement is valid');
+  equal(p4rHidden(replacement), '1', 'and carries the collapse marker');
+});
+
+await fixture('Live W4 canonical drift still invalidates a rootless windowed collapse', () => {
+  for (const [label, drift] of [
+    ['routeKey', { routeKey: '/c/other-route' }],
+    ['generation', { generation: 9 }],
+    ['effectiveFingerprint', { canonicalFingerprint: 'djb2:other-effective' }],
+    ['count', { count: 31 }],
+  ]) {
+    const c = pass4rCommitted({ coldEnd: true, middleCount: 6, missingEnd: true });
+    windowedRootLoss(c);
+    Object.assign(c.h.status, drift);
+    equal(c.api.validateCommitted(c.transaction).ok, false, `${label} drift still fails closed without a root`);
+  }
+  const graph = pass4rCommitted({ coldEnd: true, middleCount: 6, missingEnd: true });
+  windowedRootLoss(graph);
+  graph.h.graphScope.fingerprint = 'djb2:other-graph';
+  equal(graph.api.validateCommitted(graph.transaction).ok, false, 'graphFingerprint drift still fails closed');
+});
+
+await fixture('Live W5 ambiguity and a missing marker still fail closed', () => {
+  const ambiguous = pass4rCommitted({ coldEnd: true, middleCount: 6, missingEnd: true });
+  const member = ambiguous.api.subset(ambiguous.api.model().pages[0]).mounted[0];
+  const duplicate = ambiguous.h.document.createElement('SECTION');
+  duplicate.setAttribute('data-turn-id', member.questionId);
+  duplicate.setAttribute('data-turn', 'user');
+  duplicate.setAttribute('data-testid', 'conversation-turn-91');
+  ambiguous.h.flow.appendChild(duplicate);
+  const verdict = ambiguous.api.validateCommitted(ambiguous.transaction);
+  equal(verdict.ok, false, 'ambiguous current identity fails closed');
+  equal(verdict.reason, 'candidate-identity-ambiguous', 'with the precise reason');
+
+  const unmarked = pass4rCommitted({ coldEnd: true, middleCount: 6, missingEnd: true });
+  const mounted = unmarked.api.subset(unmarked.api.model().pages[0]).mounted[0];
+  mounted.node.removeAttribute('data-cgxui-chat-page-native-hidden');
+  const missing = unmarked.api.validateCommitted(unmarked.transaction);
+  equal(missing.ok, false, 'a current mounted member without the marker is still invalid');
+  equal(missing.reason, 'transaction-commit-incomplete', 'reported as commit-incomplete');
 });
 
 const failed = fixtures.filter((entry) => !entry.ok);
