@@ -316,6 +316,66 @@ check('[INVARIANT] .h2ochat referenced only by writer/diagnostics/inspector/impo
   }
 });
 
+check('[INVARIANT] archive-path recovery reads are bound to TRUSTED package state, not to the package', () => {
+  /* The defect this pins: a package read after its trusted verification could
+   * supply the very digest/length/encoding used to validate it, and could
+   * choose the weaker read regime by claiming a different schemaVersion. Both
+   * governed consumers now take those expectations from the trusted
+   * archive-integrity occupant instead.
+   *
+   * Scanned on COMMENT-STRIPPED source: the modules' own prose describes the
+   * manifest they no longer trust, so a raw substring scan would report the
+   * comment that promises the opposite. */
+  const RESTORE_REL_LOCAL = 'src-surfaces-base/studio/ingestion/saved-chat-archive-restore.studio.js';
+  for (const rel of [IMPORTER_REL, RESTORE_REL_LOCAL]) {
+    const code = stripComments(readRepo(rel));
+    const who = rel.split('/').pop();
+
+    /* 1. The archive path performs no manifest read at all, so no descriptor or
+     *    regime decision can be derived from one. */
+    for (const banned of ['readPackageManifestJson', "readPackageTextFile(packagePath, 'manifest.json')"]) {
+      assert.ok(!code.includes(banned), `${who}: archive path still reads the package manifest: ${banned}`);
+    }
+    /* 2. The regime is chosen by the TRUSTED construction family, never by a
+     *    package-supplied schemaVersion or descriptor presence. */
+    assert.ok(code.includes('anchors.family === FAMILY_V3'),
+      `${who}: the read regime is not selected from the trusted construction family`);
+    assert.ok(!/m\.schemaVersion === 3/.test(code) || rel === IMPORTER_REL,
+      `${who}: a package-supplied schemaVersion still selects the read regime`);
+    /* 3. Trusted member anchors are required, and the v3 descriptor is built
+     *    solely from them. */
+    for (const required of ['trustedOccupantFor', 'trustedStateMatches', 'trustedMemberAnchors',
+      'trustedSnapshotDescriptor', 'readBoundPackageSnapshotJson']) {
+      assert.ok(code.includes(required), `${who}: missing trusted-binding seam ${required}`);
+    }
+    assert.ok(code.includes('descriptor: trustedSnapshotDescriptor(anchors)'),
+      `${who}: the v3 descriptor is not built solely from trusted anchors`);
+    /* 4. v1/v2 compare the bounded reader's own returned measurements. */
+    assert.ok(code.includes('read.physicalSha256') && code.includes('read.physicalByteLength'),
+      `${who}: the v1/v2 read is not compared against the trusted physical measurements`);
+    /* 5. Fail-closed, never a downgrade: an incomplete anchor set returns null
+     *    rather than falling through to the weaker path. */
+    assert.ok(/if \(!anchors\) return null;/.test(code),
+      `${who}: partial trusted anchors do not fail closed`);
+    /* 6. Neither module recomputes a digest of its own. */
+    for (const banned of ['createHash', 'subtle.digest', 'sha256PrefixedBytes(']) {
+      assert.ok(!code.includes(banned), `${who}: a second hash authority appeared: ${banned}`);
+    }
+  }
+
+  /* The PORTABLE path is a different shape and stays untouched: it verifies one
+   * in-memory contained entry set and then reads its manifest and snapshot from
+   * that same set, so it has no second-read window. Its manifest use is
+   * legitimate and must not be banned by the archive-path rule above. */
+  const importerCode = stripComments(readRepo(IMPORTER_REL));
+  assert.ok(importerCode.includes('readPackageSnapshotJsonFromBytes'),
+    'the portable in-memory read seam was removed');
+  assert.ok(importerCode.includes('loadPortableCandidate'),
+    'the portable candidate path was removed');
+  assert.ok(/sourceKind\) === 'archive-package'/.test(importerCode),
+    'the importer no longer distinguishes the archive path from the portable path');
+});
+
 check('[INVARIANT] Chrome runtime (mv3 reader) has no package/CAS body or SQLite authority', () => {
   for (const banned of [PACKAGE_EXT, 'archive/packages', 'archive/assets', 'plugin:sql|',
     'writeSavedChatPackageV1', MATERIALIZE_API]) {
