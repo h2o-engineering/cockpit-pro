@@ -117,6 +117,15 @@ const EXPORTER_ENTRY_NAMES = ['archiveExporter', 'dryRunExportPackage', 'exportV
 // so bare `archiveRestore` does not collide with unrelated sync-lane identifiers like
 // archiveRestoreInstalled.)
 const RESTORE_ENTRY_NAMES = ['H2O.Studio.archiveRestore', 'dryRunRestorePackage', 'restoreVerifiedPackage'];
+/* T05: the restore entry points gain exactly one admitted caller, the Recovery
+ * Center, on the same terms as the importer entry points above — an exact path
+ * set with a pinned size, plus a symbol pin on what that caller may name.
+ * Relink stays module-only. */
+const RESTORE_ENTRY_CALLERS = new Set([RESTORE_REL, RECOVERY_CENTER_REL]);
+const RECOVERY_CENTER_RESTORE_SYMBOLS = new Set([
+  'dryRunRestorePackage',
+  'restoreVerifiedPackage',
+]);
 // Planned K.4 relink entry points. They may exist ONLY in the future relink module.
 // Tombstone override/undelete remains deferred everywhere.
 const RELINK_ENTRY_NAMES = ['H2O.Studio.archiveRelink', 'dryRunRelinkPackage', 'relinkVerifiedPackage'];
@@ -300,19 +309,45 @@ check('[INVARIANT] .h2ochat referenced only by writer/diagnostics/inspector/impo
   assert.equal(RECOVERY_CENTER_IMPORTER_SYMBOLS.size, 3, 'the admitted Recovery Center symbol set changed size');
   // The planned K restore/relink entry points may live ONLY in their dedicated
   // modules. This keeps importer/exporter/restore roles separated.
+  const observedRestoreCallers = [];
   for (const abs of walkJs(path.join(REPO_ROOT, STUDIO_DIR_REL))) {
     const rel = path.relative(REPO_ROOT, abs);
     const code = stripComments(fs.readFileSync(abs, 'utf8'));
-    if (rel !== RESTORE_REL) {
-      for (const name of RESTORE_ENTRY_NAMES) {
-        assert.ok(!code.includes(name), 'restore entry point leaked outside the restore module: ' + name + ' in ' + rel);
+    const restoreNames = RESTORE_ENTRY_NAMES.filter((name) => code.includes(name));
+    if (restoreNames.length) observedRestoreCallers.push(rel);
+    if (!RESTORE_ENTRY_CALLERS.has(rel)) {
+      for (const name of restoreNames) {
+        assert.ok(false, 'restore entry point leaked outside the admitted callers: ' + name + ' in ' + rel);
       }
     }
+    /* Relink is unchanged: it may live ONLY in the relink module. Tombstone
+     * override/undelete remains deferred everywhere. */
     if (rel !== RELINK_REL) {
       for (const name of RELINK_ENTRY_NAMES) {
         assert.ok(!code.includes(name), 'relink entry point leaked outside the relink module: ' + name + ' in ' + rel);
       }
     }
+  }
+  /* The restore-caller allowlist is EXACTLY two paths and both must participate. */
+  assert.equal(RESTORE_ENTRY_CALLERS.size, 2, 'the admitted restore-caller set changed size');
+  assert.ok(RESTORE_ENTRY_CALLERS.has(RESTORE_REL), 'the restore module itself must remain admitted');
+  assert.ok(RESTORE_ENTRY_CALLERS.has(RECOVERY_CENTER_REL), 'the Recovery Center must be the only other admitted caller');
+  assert.equal(RESTORE_ENTRY_CALLERS.has(RELINK_REL), false, 'the relink module must never be an admitted restore caller');
+  assert.deepEqual(observedRestoreCallers.slice().sort(), [RESTORE_REL, RECOVERY_CENTER_REL].slice().sort(),
+    'observed restore-entry callers differ from the admitted set: ' + observedRestoreCallers.join(', '));
+  /* And it may name ONLY the two governed T05 entry points. */
+  const rcRestoreSymbols = new Set(
+    (rcCode.match(/archiveRestore\s*\)?\s*\.\s*([A-Za-z0-9_$]+)/g) || [])
+      .map((m) => m.split('.').pop().trim()),
+  );
+  assert.ok(rcRestoreSymbols.size > 0, 'the Recovery Center names no restore symbol — the pin would pass vacuously');
+  for (const sym of rcRestoreSymbols) {
+    assert.ok(RECOVERY_CENTER_RESTORE_SYMBOLS.has(sym),
+      'Recovery Center names a non-admitted restore symbol: archiveRestore.' + sym);
+  }
+  assert.equal(RECOVERY_CENTER_RESTORE_SYMBOLS.size, 2, 'the admitted Recovery Center restore symbol set changed size');
+  for (const sym of RECOVERY_CENTER_RESTORE_SYMBOLS) {
+    assert.ok(rcRestoreSymbols.has(sym), 'an admitted restore symbol is not actually used: ' + sym);
   }
 });
 

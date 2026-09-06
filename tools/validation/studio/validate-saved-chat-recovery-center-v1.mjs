@@ -330,7 +330,8 @@ function coverageB(over) {
 
 function harness(overrides) {
   const o = overrides || {};
-  const calls = { integrity: 0, coverage: 0, inspect: 0, coverageChats: [], inspectPaths: [], dryRun: [], execute: [] };
+  const calls = { integrity: 0, coverage: 0, inspect: 0, coverageChats: [], inspectPaths: [], dryRun: [], execute: [],
+    restoreDryRun: [], restoreExecute: [] };
   const document = domStub();
   const { api, ingestion, buildTurns, extractText } = loadUi(document);
   const stub = codecStub(Object.assign({}, o.codecOptions || {}, o.disk ? { disk: o.disk } : {}));
@@ -378,6 +379,24 @@ function harness(overrides) {
       if (o.executeFails) return Promise.reject(new Error('import threw'));
       return Promise.resolve(o.executeResult || { ok: true, status: 'imported', decision: 'import-ready',
         packagePath: input.packagePath, recovered: { chatId: 'recovered_abc' }, reason: '' });
+    },
+    /* T05: the governed restore seams, stubbed on exactly the shape the real
+     * restore module returns — including `ok: true` for already-present, which
+     * is what makes the "success is read from the status" proof meaningful. */
+    dryRunRestore: (input) => {
+      calls.restoreDryRun.push(input);
+      if (o.restoreDryRunFails) return Promise.reject(new Error('restore dry-run threw'));
+      if (o.restoreDryRunDeferred) return o.restoreDryRunDeferred.promise;
+      return Promise.resolve(o.restoreDryRunResult || { ok: true, decision: 'restore-ready', status: 'restore-ready',
+        packagePath: input.packagePath, mode: 'restore-original-ids', mutated: false, reason: '' });
+    },
+    executeRestore: (input) => {
+      calls.restoreExecute.push(input);
+      if (o.restoreExecuteFails) return Promise.reject(new Error('restore threw'));
+      if (o.restoreExecuteDeferred) return o.restoreExecuteDeferred.promise;
+      return Promise.resolve(o.restoreExecuteResult || { ok: true, status: 'restored', decision: 'restore-ready',
+        packagePath: input.packagePath, mode: 'restore-original-ids',
+        restored: { chatId: 'chat_a', snapshotId: 's1', turnCount: 4 }, reason: '' });
     },
   }, o.options || {}));
   return { api, ingestion, document, container, card, calls, buildTurns, extractText };
@@ -672,16 +691,21 @@ check('9c. no recovery, import, restore, relink or confirmation control exists',
    * would forbid that reuse and push this surface into re-implementing the
    * mapping, so the ban targets the mutation ENTRY POINTS instead, and the
    * next check pins the namespace to that single pure symbol. */
-  /* T04 wires Recover-as-New through the governed importer, so its two entry
-   * points are no longer banned here — they are pinned instead, by the symbol
-   * check below and by the caller allowlist in the recovery-import-export
-   * invariant. Everything else stays banned, including the ZIP entry points, the
-   * whole restore/relink family, and every native confirmation dialog. */
+  /* T04 wires Recover-as-New through the governed importer and T05 wires
+   * Restore-Original-Identity through the governed restore module, so those four
+   * entry points are no longer banned here — they are pinned instead, by the two
+   * symbol checks below and by the caller allowlists in the restore/relink and
+   * recovery-import-export invariants. Everything else stays banned: the ZIP
+   * entry points, the ENTIRE relink family, every restore-current / overwrite /
+   * force / override variant, and every native confirmation dialog. */
   for (const token of [
-    'confirm(', 'archiveExporter', 'archiveRestore', 'archiveRelink',
+    'confirm(', 'archiveExporter', 'archiveRelink',
     'importVerifiedZip', 'dryRunImportZip',
-    'restoreVerifiedPackage', 'relinkVerifiedPackage', 'dryRunRestorePackage',
+    'relinkVerifiedPackage', 'dryRunRelinkPackage',
     'importPackage', 'restorePackage', 'restore-current', 'overwrite-existing',
+    'forceRestore', 'force-restore', 'overrideRestore', 'override-restore',
+    'tombstoneOverride', 'unDelete', 'undeleteChat',
+    'restoreCurrent', 'overwriteExisting', 'mergeInto', 'relinkTo',
   ]) {
     assert.ok(!uiCode.includes(token), `an out-of-boundary control leaked in: ${token}`);
   }
@@ -703,24 +727,71 @@ check('9c-pin. the importer namespace is pinned to exactly three admitted symbol
   }
 });
 
+check('9c-pin-restore. the restore namespace is pinned to exactly two admitted symbols', () => {
+  /* T05 composes exactly the governed dry-run and the governed execution. A
+   * third symbol would be new reach into the restore module whatever it is
+   * named — a relink helper, an internal SQL helper, a direct writer, a
+   * restore-current or overwrite variant — so the set is pinned by size as well
+   * as by membership, and both members must actually be used. */
+  const ADMITTED = new Set(['dryRunRestorePackage', 'restoreVerifiedPackage']);
+  const refs = uiCode.match(/archiveRestore\s*\)?\s*\.\s*([A-Za-z0-9_$]+)/g) || [];
+  const symbols = new Set(refs.map((r) => r.split('.').pop().trim()));
+  assert.equal(ADMITTED.size, 2, 'the admitted restore symbol set changed size');
+  assert.ok(symbols.size > 0, 'no restore symbol is referenced at all — the pin would pass vacuously');
+  for (const sym of ADMITTED) {
+    assert.ok(uiCode.includes(sym), `an admitted restore symbol is not actually used: ${sym}`);
+  }
+  for (const sym of symbols) {
+    assert.ok(ADMITTED.has(sym), `a non-admitted restore symbol is referenced: archiveRestore.${sym}`);
+  }
+});
+
 await checkAsync('9d. only Refresh and version-selection controls are rendered', async () => {
   const h = harness();
   await h.card.load();
   await h.card.selectChat('chat_a');
   const actions = nodesWithAttr(h.container, 'data-h2o-action').map((n) => n.attributes['data-h2o-action']);
   assert.ok(actions.length > 1, 'no controls rendered at all — the check would pass vacuously');
-  /* Exactly the T02 refresh, the T02/T03 version selector, and the two T04
-   * steps. No T05 action, and no disabled placeholder for one. */
+  /* Exactly the T02 refresh, the T02/T03 version selector, the two T04 steps and
+   * the two T05 steps. Nothing else, and no disabled placeholder for anything
+   * else. */
   const allowed = new Set([
     'recovery-center-refresh',
     'recovery-center-select-version',
     'recovery-center-prepare-recover-as-new',
     'recovery-center-recover-as-new',
+    'recovery-center-prepare-restore-original',
+    'recovery-center-restore-original',
   ]);
   for (const a of actions) assert.ok(allowed.has(a), `an unexpected control is present: ${a}`);
-  for (const banned of ['recovery-center-restore-original', 'recovery-center-relink', 'recovery-center-restore-current']) {
-    assert.ok(!uiCode.includes(banned), `a T05 control leaked in: ${banned}`);
+  assert.equal(allowed.size, 6, 'the rendered-action allowlist changed size');
+  /* Destructive or out-of-boundary alternatives remain absent from the SOURCE,
+   * so not even a disabled placeholder can exist. */
+  for (const banned of [
+    'recovery-center-relink', 'recovery-center-restore-current',
+    'recovery-center-overwrite', 'recovery-center-overwrite-existing',
+    'recovery-center-force-restore', 'recovery-center-override-restore',
+    'recovery-center-tombstone-override', 'recovery-center-un-delete',
+    'recovery-center-merge-into', 'recovery-center-force', 'recovery-center-override',
+  ]) {
+    assert.ok(!uiCode.includes(banned), `an out-of-boundary control leaked in: ${banned}`);
   }
+});
+
+await checkAsync('9d-t05. both T05 controls are rendered only after a preview, and never before', async () => {
+  /* The prepare control must exist once a version is readable, and the
+   * confirming control must not — that pairing is what makes the allowlist above
+   * non-vacuous for T05. */
+  const h = harness();
+  await h.card.load();
+  await h.card.selectChat('chat_a');
+  assert.equal(nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-prepare-restore-original').length, 0,
+    'the T05 prepare control exists before any version was previewed');
+  await previewed(h);
+  assert.equal(nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-prepare-restore-original').length, 1,
+    'the T05 prepare control is missing after a readable preview');
+  assert.equal(nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-restore-original').length, 0,
+    'the T05 mutation control exists before any approval');
 });
 
 /* ── G01 topology: one governed mutation request, nothing beneath it ────── */
@@ -736,13 +807,27 @@ check('9e. the ONLY mutation-capable call is the governed importer execution', (
   ]) {
     assert.ok(!uiCode.includes(token), `a direct mutation primitive leaked in: ${token}`);
   }
-  /* Exactly one execution entry point, and it is the governed importer's. */
+  /* Exactly two execution entry points, and both are governed: the importer's
+   * and the restore module's. Nothing is reached around or beneath them. */
   const execRefs = (uiCode.match(/importVerifiedPackage/g) || []).length;
   assert.ok(execRefs >= 1, 'the governed importer execution is not wired');
   assert.ok(uiCode.includes('dryRunImportPackage'), 'the governed non-mutating dry-run is not wired');
-  /* The execution call site passes only the address and the importer's mode. */
+  assert.ok(uiCode.includes('restoreVerifiedPackage'), 'the governed restore execution is not wired');
+  assert.ok(uiCode.includes('dryRunRestorePackage'), 'the governed non-mutating restore dry-run is not wired');
+  /* The execution call sites pass only the address, the module's own mode, and —
+   * for restore — the module's own confirmation. */
   assert.ok(/executeImport\(\{ packagePath: path, mode: IMPORT_MODE \}\)/.test(uiCode),
-    'the execution call does not use the minimal { packagePath, mode } contract');
+    'the import execution call does not use the minimal { packagePath, mode } contract');
+  assert.ok(/executeRestore\(\{ packagePath: path, mode: RESTORE_MODE, confirm: true \}\)/.test(uiCode),
+    'the restore execution call does not use the minimal { packagePath, mode, confirm } contract');
+  /* The restore mode is the restore module's own, stated as a literal constant
+   * so no other mode can be requested. */
+  assert.ok(/var RESTORE_MODE = 'restore-original-ids';/.test(uiCode),
+    'the restore mode is not pinned to the restore module\'s own value');
+  /* Success is read from the STATUS, never from `ok` — the restore module
+   * reports ok === true for already-present too. */
+  assert.ok(!/restored\.ok === true/.test(uiCode) && !/restoreResult\.ok/.test(uiCode),
+    'the restore outcome is read from ok rather than from the authoritative status');
   assert.ok(/dryRunImport\(\{ packagePath: path \}\)/.test(uiCode),
     'the dry-run call does not use the minimal { packagePath } contract');
 });
@@ -1610,6 +1695,521 @@ await checkAsync('49. archived content cannot create or trigger a recovery contr
   assert.equal(controls.length, 0, 'archived content produced a mutation control');
   assert.equal(h.calls.dryRun.length, 0, 'archived content triggered a dry-run');
   assert.equal(h.calls.execute.length, 0, 'archived content triggered an import');
+});
+
+/* ── T05 — Restore Original Identity ──────────────────────────────────────────
+ * The second — and last — mutation this surface can request, and it owns none
+ * of it. Absent-only restore under the package's ORIGINAL chatId and
+ * snapshotId is decided entirely by the governed restore module: conflicts,
+ * tombstones, digest comparability, the trusted content binding, the
+ * transaction and every refusal. What must be proved here is that the surface
+ * asks for exactly one thing, asks for it only on deliberate operator intent,
+ * and can never spend one version's approval — or one operation's approval —
+ * on another. */
+
+/* The surface's own success wording, read from the module rather than copied
+ * here, so the "a no-write outcome was not labelled as a restore" assertions
+ * cannot drift apart from the copy they are testing. */
+const uiTextRestoreSuccess = loadUi(domStub()).api.TEXT.restoreSuccess;
+assert.ok(typeof uiTextRestoreSuccess === 'string' && uiTextRestoreSuccess.length > 0,
+  'the surface publishes no restore success wording to test against');
+
+await checkAsync('50. selection and preview alone request no restore', async () => {
+  const h = harness();
+  await h.card.load();
+  await h.card.selectChat('chat_a');
+  assert.equal(h.calls.restoreDryRun.length, 0, 'listing a chat ran a restore dry-run');
+  assert.equal(h.calls.restoreExecute.length, 0, 'listing a chat restored');
+  const s2 = await previewed(h);
+  assert.equal(s2.previewPhase, 'ready', 'fixture no longer previews');
+  assert.equal(h.calls.restoreDryRun.length, 0, 'a successful preview ran a restore dry-run on its own');
+  assert.equal(h.calls.restoreExecute.length, 0, 'a successful preview restored on its own');
+  assert.equal(s2.restorePhase, 'idle');
+});
+
+await checkAsync('51. mount, refresh and remount never request a restore', async () => {
+  const document = domStub();
+  const loaded = loadUi(document);
+  const parent = document.createElement('div');
+  const health = document.createElement('div');
+  parent.appendChild(health);
+  const seen = { dryRun: 0, execute: 0 };
+  const opts = {
+    capable: true, autoLoad: true,
+    readIntegrity: () => Promise.resolve(envelope()),
+    partitionOccupants,
+    describeCoverage: () => Promise.resolve(coverageA()),
+    dryRunRestore: () => { seen.dryRun += 1; return Promise.resolve({ decision: 'restore-ready' }); },
+    executeRestore: () => { seen.execute += 1; return Promise.resolve({ ok: true, status: 'restored' }); },
+  };
+  loaded.api.mountRecoveryCenterCard(health, opts);
+  loaded.api.mountRecoveryCenterCard(health, opts);
+  const card = loaded.api.mountRecoveryCenterCard(health, opts);
+  await card.load();
+  assert.equal(seen.dryRun, 0, 'mount/remount/refresh ran a restore dry-run');
+  assert.equal(seen.execute, 0, 'mount/remount/refresh restored');
+});
+
+await checkAsync('52. the first T05 step runs exactly one restore dry-run and restores nothing', async () => {
+  const h = harness();
+  await previewed(h);
+  await h.card.prepareRestoreOriginalIdentity();
+  assert.equal(h.calls.restoreDryRun.length, 1, `expected 1 restore dry-run, saw ${h.calls.restoreDryRun.length}`);
+  assert.deepEqual(Object.keys(h.calls.restoreDryRun[0]).sort(), ['packagePath'],
+    'the restore dry-run received more than the package address');
+  assert.equal(h.calls.restoreDryRun[0].packagePath, 'archive/packages/chat_a.g1.h2ochat');
+  assert.equal(h.calls.restoreExecute.length, 0, 'the first step restored');
+  assert.equal(h.calls.execute.length, 0, 'the first T05 step reached the importer');
+  assert.equal(h.card.getState().restorePhase, 'ready-to-confirm');
+});
+
+await checkAsync('53. a restore-ready verdict offers the second step and still restores nothing', async () => {
+  const h = harness();
+  await previewed(h);
+  await h.card.prepareRestoreOriginalIdentity();
+  const confirmBtns = nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-restore-original');
+  assert.equal(confirmBtns.length, 1, 'the confirming control is not offered after a restore-ready verdict');
+  assert.equal(h.calls.restoreExecute.length, 0, 'offering the control already restored');
+  assert.ok(allText(h.container).includes('restore-ready'), "the restore module's own verdict is not shown");
+});
+
+await checkAsync('54. the second T05 step requests exactly one restore, carrying no authority', async () => {
+  const h = harness();
+  await previewed(h);
+  await h.card.prepareRestoreOriginalIdentity();
+  await h.card.restoreOriginalIdentity();
+  assert.equal(h.calls.restoreExecute.length, 1, `expected 1 restore, saw ${h.calls.restoreExecute.length}`);
+  const sent = h.calls.restoreExecute[0];
+  assert.deepEqual(Object.keys(sent).sort(), ['confirm', 'mode', 'packagePath'],
+    'the execution carried fields beyond the address, mode and confirmation: ' + Object.keys(sent).join(', '));
+  assert.equal(sent.packagePath, 'archive/packages/chat_a.g1.h2ochat', 'the selected trusted row was not the target');
+  assert.equal(sent.mode, 'restore-original-ids', "the restore module's own mode was not used");
+  assert.equal(sent.confirm, true, 'the backend confirmation gate was not satisfied explicitly');
+  for (const forbidden of ['dryRun', 'decision', 'restoreReady', 'eligible', 'eligibility', 'contentHash',
+    'snapshotId', 'chatId', 'identity', 'digest', 'provenance', 'preview', 'previewState',
+    'conflict', 'conflictResult', 'tombstone', 'tombstoned', 'anchors', 'trustedAnchors', 'sql', 'writePlan']) {
+    assert.ok(!(forbidden in sent), `caller-supplied authority reached the restore module: ${forbidden}`);
+  }
+  assert.equal(h.calls.execute.length, 0, 'a T05 confirmation reached the importer');
+  assert.equal(h.card.getState().restorePhase, 'success');
+});
+
+await checkAsync('55. an already-present dry-run offers no mutation and is not shown as a restore', async () => {
+  const h = harness({ restoreDryRunResult: { ok: true, decision: 'already-present', status: 'already-present', reason: 'original snapshot already present' } });
+  await previewed(h);
+  await h.card.prepareRestoreOriginalIdentity();
+  const s2 = h.card.getState();
+  assert.equal(s2.restorePhase, 'no-write', `expected no-write, got ${s2.restorePhase}`);
+  assert.equal(nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-restore-original').length, 0,
+    'a mutation control was offered for an already-present verdict');
+  const text = allText(h.container);
+  assert.ok(text.includes('already-present'), 'the verdict was not shown honestly');
+  assert.ok(!text.includes(uiTextRestoreSuccess), 'an already-present verdict was labelled as a restore');
+  await h.card.restoreOriginalIdentity();
+  assert.equal(h.calls.restoreExecute.length, 0, 'a restore followed an already-present verdict');
+});
+
+await checkAsync('56. every authoritative refusal blocks the mutation entirely', async () => {
+  for (const decision of ['conflict-chat-id', 'conflict-snapshot-id', 'tombstoned', 'rejected',
+    'corrupted', 'unsupported-version', 'read-error']) {
+    const h = harness({ restoreDryRunResult: { ok: false, decision, status: decision, reason: 'r' } });
+    await previewed(h);
+    await h.card.prepareRestoreOriginalIdentity();
+    const s2 = h.card.getState();
+    assert.equal(s2.restorePhase, 'refused', `${decision}: expected refused, got ${s2.restorePhase}`);
+    assert.equal(s2.restoreForPath, '', `${decision}: a refusal still pinned an approval`);
+    assert.equal(nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-restore-original').length, 0,
+      `${decision}: a mutation control was offered`);
+    await h.card.restoreOriginalIdentity();
+    assert.equal(h.calls.restoreExecute.length, 0, `${decision}: a restore happened anyway`);
+    assert.ok(allText(h.container).includes(decision), `${decision}: the verdict was not shown honestly`);
+  }
+});
+
+await checkAsync('57. a restore dry-run error restores nothing and offers nothing', async () => {
+  const h = harness({ restoreDryRunFails: true });
+  await previewed(h);
+  await h.card.prepareRestoreOriginalIdentity();
+  assert.equal(h.card.getState().restorePhase, 'error');
+  assert.equal(nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-restore-original').length, 0);
+  await h.card.restoreOriginalIdentity();
+  assert.equal(h.calls.restoreExecute.length, 0, 'a restore followed a failed dry-run');
+});
+
+await checkAsync('58. changing version invalidates a prepared T05 approval', async () => {
+  const h = harness();
+  await previewed(h, 'archive/packages/chat_a.g1.h2ochat');
+  await h.card.prepareRestoreOriginalIdentity();
+  assert.equal(h.card.getState().restorePhase, 'ready-to-confirm');
+  await h.card.selectVersion('archive/packages/chat_a.g2.h2ochat');
+  const s2 = h.card.getState();
+  assert.notEqual(s2.restorePhase, 'ready-to-confirm', 'an approval survived a version change');
+  assert.equal(s2.restoreForPath, '', 'the approval stayed bound to a path');
+  assert.equal(nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-restore-original').length, 0);
+  await h.card.restoreOriginalIdentity();
+  assert.equal(h.calls.restoreExecute.length, 0, 'a stale approval was spent on another version');
+});
+
+await checkAsync('59. changing chat invalidates a prepared T05 approval', async () => {
+  const h = harness();
+  await previewed(h);
+  await h.card.prepareRestoreOriginalIdentity();
+  await h.card.selectChat('chat_b');
+  assert.equal(h.card.getState().restorePhase, 'idle', 'an approval survived a chat change');
+  await h.card.restoreOriginalIdentity();
+  assert.equal(h.calls.restoreExecute.length, 0, 'a restore followed a chat change');
+});
+
+await checkAsync('60. refresh invalidates a prepared T05 approval', async () => {
+  let env = envelope();
+  const h = harness({ options: { readIntegrity: () => Promise.resolve(env) } });
+  await previewed(h);
+  await h.card.prepareRestoreOriginalIdentity();
+  assert.equal(h.card.getState().restorePhase, 'ready-to-confirm');
+  env = envelope({ occupants: [OCC.bLegacy] });   // the chat disappears
+  await h.card.load();
+  assert.equal(h.card.getState().restorePhase, 'idle', 'an approval survived a refresh that dropped its chat');
+  await h.card.restoreOriginalIdentity();
+  assert.equal(h.calls.restoreExecute.length, 0, 'a restore followed a refresh');
+});
+
+await checkAsync('61. remounting the card invalidates a prepared T05 approval', async () => {
+  const document = domStub();
+  const loaded = loadUi(document);
+  const parent = document.createElement('div');
+  const health = document.createElement('div');
+  parent.appendChild(health);
+  const seen = { execute: 0 };
+  const opts = {
+    capable: true, autoLoad: false,
+    readIntegrity: () => Promise.resolve(envelope()),
+    partitionOccupants,
+    describeCoverage: () => Promise.resolve(coverageA()),
+    dryRunRestore: () => Promise.resolve({ ok: true, decision: 'restore-ready', status: 'restore-ready' }),
+    executeRestore: () => { seen.execute += 1; return Promise.resolve({ ok: true, status: 'restored' }); },
+  };
+  const first = loaded.api.mountRecoveryCenterCard(health, opts);
+  await first.load();
+  await first.selectChat('chat_a');
+  await first.selectVersion('archive/packages/chat_a.g1.h2ochat');
+  await first.prepareRestoreOriginalIdentity();
+  const second = loaded.api.mountRecoveryCenterCard(health, opts);
+  assert.notEqual(second, first, 'remount did not produce a new card instance');
+  assert.equal(second.getState().restorePhase, 'idle', 'a remounted card carried a prepared approval');
+  await second.restoreOriginalIdentity();
+  assert.equal(seen.execute, 0, 'a remounted card spent an approval prepared before the remount');
+});
+
+await checkAsync('62. a late restore dry-run for an abandoned version cannot arm a newer one', async () => {
+  const slow = deferred();
+  const h = harness({ restoreDryRunDeferred: slow });
+  await previewed(h, 'archive/packages/chat_a.g1.h2ochat');
+  const abandoned = h.card.prepareRestoreOriginalIdentity();
+  assert.equal(h.card.getState().restorePhase, 'preflighting');
+  await h.card.selectVersion('archive/packages/chat_a.g2.h2ochat');
+  slow.resolve({ ok: true, decision: 'restore-ready', status: 'restore-ready' });
+  await abandoned;
+  for (let i = 0; i < 12; i += 1) await Promise.resolve();
+  const s2 = h.card.getState();
+  assert.notEqual(s2.restorePhase, 'ready-to-confirm',
+    'a late restore dry-run for an abandoned version armed the newly selected one');
+  assert.equal(nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-restore-original').length, 0);
+  await h.card.restoreOriginalIdentity();
+  assert.equal(h.calls.restoreExecute.length, 0, 'the late verdict enabled a restore');
+});
+
+await checkAsync('63. returning to the same version does not resurrect a spent or abandoned approval', async () => {
+  const A = 'archive/packages/chat_a.g1.h2ochat';
+  const B = 'archive/packages/chat_a.g2.h2ochat';
+  const h = harness();
+  await previewed(h, A);
+  await h.card.prepareRestoreOriginalIdentity();
+  assert.equal(h.card.getState().restoreForPath, A);
+  await h.card.selectVersion(B);
+  await h.card.selectVersion(A);
+  const s2 = h.card.getState();
+  assert.equal(s2.restorePhase, 'idle', 'returning to the same version resurrected an approval');
+  assert.equal(s2.restoreForPath, '', 'the old path pin came back');
+  assert.equal(nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-restore-original').length, 0);
+  await h.card.restoreOriginalIdentity();
+  assert.equal(h.calls.restoreExecute.length, 0, 'the resurrected approval was spendable');
+});
+
+await checkAsync('64. an unreadable preview can never reach restore', async () => {
+  for (const [label, opts] of [
+    ['refused', { inspectFor: (packagePath) => Promise.resolve({ ok: false, status: 'hash-mismatch', packagePath, identity: {}, checks: {}, blockers: [] }) }],
+    ['stale', { inspectFor: (packagePath) => Promise.resolve({ ok: true, status: 'verified', packagePath, identity: { contentHash: 'sha256-' + HASH_OLD }, checks: {}, blockers: [] }) }],
+    ['error', { codecOptions: { verifiedFails: true } }],
+    ['unbindable', { envelope: envelope({ occupants: [(() => { const o = { ...OCC.aCur }; delete o.snapshotPhysicalSha256; return o; })(), OCC.aMid, OCC.aOld, OCC.aBad, OCC.bLegacy] }) }],
+  ]) {
+    const h = harness(opts);
+    const s2 = await previewed(h);
+    assert.notEqual(s2.previewPhase, 'ready', `${label}: fixture no longer models an unreadable preview`);
+    assert.equal(nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-prepare-restore-original').length, 0,
+      `${label}: the restore step was offered for an unreadable preview`);
+    await h.card.prepareRestoreOriginalIdentity();
+    assert.equal(h.calls.restoreDryRun.length, 0, `${label}: a restore dry-run ran for an unreadable preview`);
+    await h.card.restoreOriginalIdentity();
+    assert.equal(h.calls.restoreExecute.length, 0, `${label}: a restore ran for an unreadable preview`);
+  }
+});
+
+await checkAsync('65. rapid repeated confirmation issues exactly ONE restore', async () => {
+  const h = harness();
+  await previewed(h);
+  await h.card.prepareRestoreOriginalIdentity();
+  /* Dispatched synchronously, with no await between them: the approval must be
+   * consumed before the first await or the second dispatch would also see it. */
+  const bursts = [
+    h.card.restoreOriginalIdentity(), h.card.restoreOriginalIdentity(), h.card.restoreOriginalIdentity(),
+    h.card.restoreOriginalIdentity(), h.card.restoreOriginalIdentity(),
+  ];
+  await Promise.all(bursts);
+  assert.equal(h.calls.restoreExecute.length, 1,
+    `five synchronous confirmations issued ${h.calls.restoreExecute.length} restores`);
+});
+
+await checkAsync('66. an authoritative restore refusal is shown, with no retry or fallback', async () => {
+  for (const status of ['conflict', 'tombstoned', 'rejected', 'write-error']) {
+    const h = harness({ restoreExecuteResult: { ok: false, status, decision: 'restore-ready', reason: 'refused by the restore module', restored: null } });
+    await previewed(h);
+    await h.card.prepareRestoreOriginalIdentity();
+    await h.card.restoreOriginalIdentity();
+    assert.equal(h.calls.restoreExecute.length, 1, `${status}: the refusal was retried`);
+    const s2 = h.card.getState();
+    assert.equal(s2.restorePhase, 'refused', `${status}: a refusal was not reported as one`);
+    assert.equal(s2.restoreForPath, '', `${status}: the approval survived the refusal`);
+    assert.ok(allText(h.container).includes(status), `${status}: the refusal was not shown honestly`);
+    assert.equal(h.calls.execute.length, 0, `${status}: a refused restore fell back to the importer`);
+    /* And it cannot be re-fired without a fresh preparation. */
+    await h.card.restoreOriginalIdentity();
+    assert.equal(h.calls.restoreExecute.length, 1, `${status}: a refused approval was spendable again`);
+  }
+});
+
+await checkAsync('67. a restore error is shown, with no retry or fallback', async () => {
+  const h = harness({ restoreExecuteFails: true });
+  await previewed(h);
+  await h.card.prepareRestoreOriginalIdentity();
+  await h.card.restoreOriginalIdentity();
+  assert.equal(h.calls.restoreExecute.length, 1, 'the error was retried');
+  assert.equal(h.card.getState().restorePhase, 'error');
+  assert.equal(h.calls.execute.length, 0, 'a failed restore fell back to the importer');
+});
+
+await checkAsync('68. a successful restore is reported from the restore result only, and the approval is spent', async () => {
+  const h = harness({ restoreExecuteResult: { ok: true, status: 'restored', decision: 'restore-ready',
+    mode: 'restore-original-ids', restored: { chatId: 'chat_orig', snapshotId: 'snap_orig', turnCount: 7 }, reason: '' } });
+  await previewed(h);
+  await h.card.prepareRestoreOriginalIdentity();
+  await h.card.restoreOriginalIdentity();
+  const s2 = h.card.getState();
+  assert.equal(s2.restorePhase, 'success');
+  const text = allText(h.container);
+  for (const shown of ['restored', 'chat_orig', 'snap_orig', '7']) {
+    assert.ok(text.includes(shown), `the restore module's own result was not reported: ${shown}`);
+  }
+  assert.equal(s2.restoreForPath, '', 'the approval was not spent');
+  await h.card.restoreOriginalIdentity();
+  assert.equal(h.calls.restoreExecute.length, 1, 'the spent approval requested a second restore');
+});
+
+await checkAsync('69. an already-present EXECUTION is reported as no-write, never as a restore', async () => {
+  /* The restore module reports ok === true for already-present. Reading success
+   * from `ok` would label a no-write outcome as a restore that happened. */
+  const h = harness({ restoreExecuteResult: { ok: true, status: 'already-present', decision: 'restore-ready',
+    restored: { chatId: 'chat_a', snapshotId: 's1', turnCount: 0 }, reason: 'original snapshot already present; no write performed' } });
+  await previewed(h);
+  await h.card.prepareRestoreOriginalIdentity();
+  await h.card.restoreOriginalIdentity();
+  const s2 = h.card.getState();
+  assert.equal(s2.restorePhase, 'no-write', `expected no-write, got ${s2.restorePhase}`);
+  const text = allText(h.container);
+  assert.ok(text.includes('already-present'), 'the no-write outcome was not shown honestly');
+  assert.ok(!text.includes(uiTextRestoreSuccess), 'a no-write outcome was labelled as a restore');
+});
+
+await checkAsync('70. T04 and T05 remain two separate operations, never one generic call', async () => {
+  const h = harness();
+  await previewed(h);
+  await h.card.prepareRecoverAsNew();
+  await h.card.recoverAsNew();
+  assert.equal(h.calls.execute.length, 1, 'the T04 flow no longer works');
+  assert.equal(h.calls.restoreExecute.length, 0, 'a T04 confirmation reached the restore module');
+  const h2 = harness();
+  await previewed(h2);
+  await h2.card.prepareRestoreOriginalIdentity();
+  await h2.card.restoreOriginalIdentity();
+  assert.equal(h2.calls.restoreExecute.length, 1, 'the T05 flow does not work');
+  assert.equal(h2.calls.execute.length, 0, 'a T05 confirmation reached the importer');
+  /* Distinct modes and distinct call shapes — not one parameterised mutation. */
+  assert.equal(h.calls.execute[0].mode, 'import-as-new');
+  assert.equal(h2.calls.restoreExecute[0].mode, 'restore-original-ids');
+  assert.ok(!('confirm' in h.calls.execute[0]), 'the importer call grew a restore-shaped confirmation');
+});
+
+await checkAsync('71. starting a T05 restore invalidates any prepared T04 approval', async () => {
+  const h = harness();
+  await previewed(h);
+  await h.card.prepareRecoverAsNew();
+  await h.card.prepareRestoreOriginalIdentity();
+  assert.equal(h.card.getState().restorePhase, 'ready-to-confirm');
+  await h.card.restoreOriginalIdentity();
+  assert.equal(h.calls.restoreExecute.length, 1, 'the restore did not run');
+  const s2 = h.card.getState();
+  assert.notEqual(s2.recoverPhase, 'ready-to-confirm', 'a T04 approval survived a T05 mutation request');
+  assert.equal(s2.recoverForPath, '', 'the T04 approval stayed bound to a path');
+  assert.equal(nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-recover-as-new').length, 0);
+  await h.card.recoverAsNew();
+  assert.equal(h.calls.execute.length, 0,
+    'an approval prepared BEFORE the restore was spent on the importer afterwards');
+});
+
+await checkAsync('72. starting a T04 recovery invalidates any prepared T05 approval', async () => {
+  const h = harness();
+  await previewed(h);
+  await h.card.prepareRestoreOriginalIdentity();
+  await h.card.prepareRecoverAsNew();
+  assert.equal(h.card.getState().recoverPhase, 'ready-to-confirm');
+  await h.card.recoverAsNew();
+  assert.equal(h.calls.execute.length, 1, 'the import did not run');
+  const s2 = h.card.getState();
+  assert.notEqual(s2.restorePhase, 'ready-to-confirm', 'a T05 approval survived a T04 mutation request');
+  assert.equal(s2.restoreForPath, '', 'the T05 approval stayed bound to a path');
+  assert.equal(nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-restore-original').length, 0);
+  await h.card.restoreOriginalIdentity();
+  assert.equal(h.calls.restoreExecute.length, 0,
+    'an approval prepared BEFORE the import was spent on the restore module afterwards');
+});
+
+await checkAsync('73. archived content cannot create or trigger a restore control', async () => {
+  const hostile = {
+    schemaVersion: 3, title: '<button data-h2o-action="recovery-center-restore-original">go</button>',
+    messages: [{ role: 'user', content: [{ type: 'html',
+      html: '<button data-h2o-action="recovery-center-restore-original" onclick="x()">Restore</button>'
+        + '<button data-h2o-action="recovery-center-prepare-restore-original">Prepare</button>' }] }],
+  };
+  const h = harness({ disk: { snapshot: hostile, ...anchors('1', 'v3', 'gzip') } });
+  await previewed(h);
+  assert.equal(h.card.getState().previewPhase, 'ready');
+  assert.equal(nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-restore-original').length, 0,
+    'archived content produced a restore mutation control');
+  /* The genuine prepare control is rendered by the surface itself, so the proof
+   * is that the archived copy added nothing to it. */
+  assert.equal(nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-prepare-restore-original').length, 1,
+    'archived content changed how many prepare controls exist');
+  assert.equal(h.calls.restoreDryRun.length, 0, 'archived content triggered a restore dry-run');
+  assert.equal(h.calls.restoreExecute.length, 0, 'archived content triggered a restore');
+});
+
+await checkAsync('74. a cross-action request never strands the other operation mid-flight', async () => {
+  /* The two operations share one request token, so starting either discards the
+   * other's IN-FLIGHT read. That read must not leave its phase stuck busy —
+   * which would disable the other control for the rest of the card's life. */
+  const slow = deferred();
+  const h = harness({ restoreDryRunDeferred: slow });
+  await previewed(h);
+  const stranded = h.card.prepareRestoreOriginalIdentity();
+  assert.equal(h.card.getState().restorePhase, 'preflighting');
+  await h.card.prepareRecoverAsNew();
+  assert.equal(h.card.getState().recoverPhase, 'ready-to-confirm', 'the T04 request did not settle');
+  slow.resolve({ ok: true, decision: 'restore-ready', status: 'restore-ready' });
+  await stranded;
+  for (let i = 0; i < 12; i += 1) await Promise.resolve();
+  const s2 = h.card.getState();
+  assert.ok(!['preflighting', 'executing'].includes(s2.restorePhase),
+    `the stranded T05 request is stuck in ${s2.restorePhase}`);
+  assert.notEqual(s2.restorePhase, 'ready-to-confirm', 'a stranded late verdict armed the T05 control');
+  await h.card.restoreOriginalIdentity();
+  assert.equal(h.calls.restoreExecute.length, 0, 'the stranded verdict enabled a restore');
+  /* And the T05 prepare control is usable again, not permanently disabled. */
+  const prepares = nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-prepare-restore-original');
+  assert.equal(prepares.length, 1, 'the T05 prepare control disappeared');
+  assert.equal(prepares[0].disabled, false, 'the T05 prepare control is permanently disabled');
+});
+
+await checkAsync('75. a SETTLED approval survives the other operation being prepared', async () => {
+  /* This is what makes checks 71 and 72 real: if preparing one operation already
+   * discarded the other's settled approval, the execution-time invalidation
+   * those checks target could never be observed. */
+  const h = harness();
+  await previewed(h);
+  await h.card.prepareRecoverAsNew();
+  assert.equal(h.card.getState().recoverPhase, 'ready-to-confirm');
+  await h.card.prepareRestoreOriginalIdentity();
+  const s2 = h.card.getState();
+  assert.equal(s2.recoverPhase, 'ready-to-confirm', 'preparing T05 discarded a settled T04 approval');
+  assert.equal(s2.restorePhase, 'ready-to-confirm', 'the T05 approval did not settle');
+  assert.equal(nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-recover-as-new').length, 1);
+  assert.equal(nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-restore-original').length, 1);
+  assert.equal(h.calls.execute.length, 0, 'preparing armed an import');
+  assert.equal(h.calls.restoreExecute.length, 0, 'preparing armed a restore');
+});
+
+await checkAsync('76. a late restore RESULT for an abandoned version never renders as the newly selected one', async () => {
+  /* The dry-run half of this is check 62. This is the execution half: a restore
+   * that was confirmed for A and answers after the operator moved to B must not
+   * paint A's outcome — success or refusal — under B. */
+  const slow = deferred();
+  const h = harness({ restoreExecuteDeferred: slow });
+  await previewed(h, 'archive/packages/chat_a.g1.h2ochat');
+  await h.card.prepareRestoreOriginalIdentity();
+  const inFlight = h.card.restoreOriginalIdentity();
+  assert.equal(h.card.getState().restorePhase, 'executing', 'the approval was not consumed synchronously');
+  /* The governed call is issued on a microtask, so let it be dispatched before
+   * asserting it happened. */
+  for (let i = 0; i < 4; i += 1) await Promise.resolve();
+  assert.equal(h.calls.restoreExecute.length, 1, 'the execution was not issued');
+  await h.card.selectVersion('archive/packages/chat_a.g2.h2ochat');
+  slow.resolve({ ok: true, status: 'restored', decision: 'restore-ready',
+    restored: { chatId: 'chat_from_A', snapshotId: 'snap_from_A', turnCount: 9 }, reason: '' });
+  await inFlight;
+  for (let i = 0; i < 12; i += 1) await Promise.resolve();
+  const s2 = h.card.getState();
+  assert.equal(s2.selectedPackagePath, 'archive/packages/chat_a.g2.h2ochat');
+  assert.notEqual(s2.restorePhase, 'success', "a late result painted the abandoned version's success onto a newer one");
+  assert.equal(s2.restoreResult, null, 'a late result was retained for a version no longer selected');
+  const text = allText(h.container);
+  for (const leaked of ['chat_from_A', 'snap_from_A']) {
+    assert.ok(!text.includes(leaked), `the abandoned version's result is displayed under a newer selection: ${leaked}`);
+  }
+  assert.equal(h.calls.restoreExecute.length, 1, 'the selection change issued another restore');
+});
+
+await checkAsync('77. a NEWER restore dry-run invalidates the approval the previous one produced', async () => {
+  /* Re-preparing must not leave the earlier verdict spendable — neither while
+   * the newer dry-run is still in flight, nor after it settles on a refusal. */
+  const slow = deferred();
+  let seen = 0;
+  const h = harness({
+    options: {
+      dryRunRestore: (input) => {
+        seen += 1;
+        return seen === 1
+          ? Promise.resolve({ ok: true, decision: 'restore-ready', status: 'restore-ready', packagePath: input.packagePath })
+          : slow.promise;
+      },
+    },
+  });
+  await previewed(h);
+  await h.card.prepareRestoreOriginalIdentity();
+  assert.equal(h.card.getState().restorePhase, 'ready-to-confirm');
+  const second = h.card.prepareRestoreOriginalIdentity();
+  const mid = h.card.getState();
+  assert.equal(mid.restorePhase, 'preflighting', 'the newer dry-run did not start');
+  assert.equal(mid.restoreForPath, '', 'the previous approval survived a newer dry-run');
+  assert.equal(nodesWithAttr(h.container, 'data-h2o-action', 'recovery-center-restore-original').length, 0,
+    'the mutation control survived a newer dry-run');
+  await h.card.restoreOriginalIdentity();
+  assert.equal(h.calls.restoreExecute.length, 0, 'the superseded approval was spendable mid-flight');
+  slow.resolve({ ok: false, decision: 'conflict-chat-id', status: 'conflict-chat-id', reason: 'r' });
+  await second;
+  const after = h.card.getState();
+  assert.equal(after.restorePhase, 'refused', `expected refused, got ${after.restorePhase}`);
+  assert.equal(after.restoreForPath, '');
+  await h.card.restoreOriginalIdentity();
+  assert.equal(h.calls.restoreExecute.length, 0, 'the superseded approval was spendable after the newer refusal');
+  assert.equal(seen, 2, 'the newer dry-run was not actually issued');
 });
 
 console.log('');

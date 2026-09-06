@@ -86,23 +86,43 @@
  * sanitizer; no second sanitizer family is introduced, and if that sanitizer is
  * absent the HTML is simply not rendered.
  *
- * RECOVER AS NEW is the one mutation this surface can REQUEST, and it owns none
- * of it. The operator must act twice: once to prepare — which runs the existing
- * importer's own non-mutating dry-run and shows its verdict verbatim — and once
- * to confirm, which calls the existing `importVerifiedPackage`. Nothing is
- * prepared or executed by selecting, previewing, refreshing or mounting.
+ * TWO MUTATIONS CAN BE REQUESTED HERE, and this surface owns neither.
  *
- * The importer re-runs its own dry-run and re-verifies the package at the write
- * gate, allocates the fresh recovered identity, writes the provenance and decides
- * every refusal. A dry-run verdict held here is PRESENTATION state that gates a
- * button; it is never sent back, and there is no argument by which this surface
- * could tell the importer that something is permitted. UI MAY REQUEST; IMPORTER
- * DECIDES.
+ *   RECOVER AS NEW copies a saved version into a brand-new chat through the
+ *   existing `importVerifiedPackage`.
  *
- * BOUNDARY. No restore-original-identity, no relink, no restore-current or
- * overwrite-existing, and no control for any of them — not even a disabled one.
- * This surface holds no direct write authority of any kind: no SQL, no store
- * write, no filesystem write, no archive or CAS mutation, no native command.
+ *   RESTORE ORIGINAL IDENTITY re-creates the chat under its ORIGINAL saved
+ *   chatId and snapshotId through the existing `restoreVerifiedPackage`. It is
+ *   absent-only: the restore module inserts what is missing and refuses
+ *   everything else.
+ *
+ * They are deliberately SEPARATE operations, not two modes of one generic
+ * recovery call. Each takes two deliberate operator actions: one to prepare —
+ * which runs that module's own non-mutating dry-run and shows its verdict
+ * verbatim — and one to confirm, which issues exactly one governed call.
+ * Nothing is prepared or executed by selecting, previewing, refreshing or
+ * mounting.
+ *
+ * Each module re-runs its own dry-run and re-establishes its own trusted binding
+ * at the write gate. The importer allocates the fresh recovered identity; the
+ * restore module re-checks conflicts and tombstones inside its transaction,
+ * writes INSERT-only and rolls back. A dry-run verdict held here is
+ * PRESENTATION state that gates a button; it is never sent back, and there is no
+ * argument by which this surface could tell either module that something is
+ * permitted. UI MAY REQUEST; THE GOVERNED MODULE DECIDES.
+ *
+ * An approval is pinned to the version it was prepared for and dies on any
+ * version change, chat change, refresh or remount. Starting either mutation
+ * discards an approval prepared for the other, because the store it was judged
+ * against is about to change.
+ *
+ * BOUNDARY. No relink, no restore-current, no overwrite-existing, no tombstone
+ * override, no un-delete, no merge-into and no forced or overriding variant of
+ * anything — and no control for any of them, not even a disabled one. A conflict
+ * or tombstone refusal is final here: there is no retry, no fallback and no
+ * destructive alternative. This surface holds no direct write authority of any
+ * kind: no SQL, no store write, no filesystem write, no archive or CAS mutation,
+ * no native command.
  *
  * Public API (H2O.Studio.recoveryCenterUi):
  *   mountRecoveryCenterCard(healthContainer, options)
@@ -112,6 +132,10 @@
  *   buildPreviewFromTurns(turns) -> pure
  *   selectionIdentityMatches(row, inspection) -> pure
  *   TEXT
+ *
+ * The card instance additionally exposes, for the two governed requests:
+ *   prepareRecoverAsNew() / recoverAsNew()
+ *   prepareRestoreOriginalIdentity() / restoreOriginalIdentity()
  */
 (function (global) {
   'use strict';
@@ -150,6 +174,21 @@
    * — including its other `ok` value, `already-imported` — is shown as-is and
    * leaves the mutation action unavailable. */
   var IMPORT_READY = 'import-ready';
+  /* The restore module's own mode and its only accepted value, passed explicitly
+   * so the request is legible at the call site. T05 is a DIFFERENT operation
+   * from T04, not a mode of one generic recovery call. */
+  var RESTORE_MODE = 'restore-original-ids';
+  /* The restore module's own verdict that opens the confirmation. Every other
+   * verdict — including its other `ok` value, `already-present` — is shown as
+   * the restore module stated it and leaves the mutation action unavailable. */
+  var RESTORE_READY = 'restore-ready';
+  /* The restore module's own no-write outcome. Reported honestly as "nothing was
+   * written" rather than as a restore that happened. */
+  var RESTORE_ALREADY_PRESENT = 'already-present';
+  /* The restore module's own success status. `ok` is TRUE for already-present
+   * too, so success is read from the status, never from `ok`. */
+  var RESTORE_RESTORED = 'restored';
+
   /* A preview that actually loaded. Recovery cannot be prepared for a version the
    * operator was never able to read. */
   var PREVIEWED_PHASES = ['ready', 'empty'];
@@ -216,6 +255,23 @@
     recoverDecision: 'Result: ',
     recoverReason: 'Reason: ',
     recoverNewChat: 'New chat: ',
+    restoreHeading: 'Restore original identity',
+    restoreIntro: 'Restoring re-creates this chat under its ORIGINAL saved identity. It only adds what is absent: nothing existing is changed, overwritten, relinked or un-deleted.',
+    restorePrepareButton: 'Review restore…',
+    restoreConfirmButton: 'Restore original identity',
+    restorePreflighting: 'Checking whether this version can be restored…',
+    restoreExecuting: 'Restoring…',
+    restoreReadyToConfirm: 'This version can be restored under its original identity. Confirm to proceed.',
+    restoreNoWrite: 'Already present. Nothing was written.',
+    restoreRefused: 'This version cannot be restored right now.',
+    restoreError: 'The restore check could not be completed.',
+    restoreStale: 'The selection changed. Review restore again.',
+    restoreSuccess: 'Restored under the original identity.',
+    restoreDecision: 'Result: ',
+    restoreReason: 'Reason: ',
+    restoreChat: 'Chat: ',
+    restoreSnapshot: 'Version: ',
+    restoreTurns: 'Messages restored: ',
   };
 
   function isObject(value) {
@@ -563,6 +619,17 @@
     var executeImport = typeof opts.executeImport === 'function'
       ? opts.executeImport
       : safeObject(safeObject(H2O.Studio).archiveImporter).importVerifiedPackage;
+    /* The two governed restore entry points, and nothing else from that module.
+     * The dry-run is non-mutating; the execution is the second — and only other
+     * — mutation this surface can request. Everything beneath them, including
+     * absent-only semantics, conflict and tombstone refusal, the trusted content
+     * binding and the transaction, stays entirely inside the restore module. */
+    var dryRunRestore = typeof opts.dryRunRestore === 'function'
+      ? opts.dryRunRestore
+      : safeObject(safeObject(H2O.Studio).archiveRestore).dryRunRestorePackage;
+    var executeRestore = typeof opts.executeRestore === 'function'
+      ? opts.executeRestore
+      : safeObject(safeObject(H2O.Studio).archiveRestore).restoreVerifiedPackage;
 
     var capable = (opts.capable !== undefined)
       ? opts.capable === true
@@ -594,6 +661,14 @@
       recoverDryRun: null,
       recoverResult: null,
       recoverForPath: '',
+      /* T05 request state, deliberately SEPARATE from T04's. The two are
+       * different mutations with different consequences, so one prepared
+       * approval can never be spent on the other, and starting either one
+       * discards any approval prepared for the other. */
+      restorePhase: 'idle',
+      restoreDryRun: null,
+      restoreResult: null,
+      restoreForPath: '',
       /* A single monotonically increasing token orders every asynchronous
        * inspection and preview read. Any result whose token is no longer current
        * is discarded, so a slow answer for an abandoned selection can never
@@ -627,6 +702,8 @@
     card.appendChild(previewBox);
     var recoverBox = el('div', null, 'margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,.08)');
     card.appendChild(recoverBox);
+    var restoreBox = el('div', null, 'margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,.08)');
+    card.appendChild(restoreBox);
 
     function pill(label) {
       return el('span', label,
@@ -900,6 +977,85 @@
       }
     }
 
+    /* The restore request area. Same shape as the recovery area above and
+     * deliberately NOT merged with it: two separate operations, two separate
+     * approvals, two separate governed calls. It appears only once a version has
+     * actually been previewed, and the confirming control appears only while a
+     * current restore-ready verdict belongs to the selected version. Both
+     * controls are ordinary buttons — no native confirm dialog, no generic
+     * confirmation framework. */
+    function renderRestore() {
+      restoreBox.textContent = '';
+      if (!state.selectedPackagePath || !previewIsReadable()) return;
+
+      restoreBox.appendChild(el('div', TEXT.restoreHeading, 'font-weight:600;font-size:13px'));
+      restoreBox.appendChild(el('div', TEXT.restoreIntro, 'opacity:.8;font-size:12px;margin-top:2px'));
+
+      var busy = state.restorePhase === 'preflighting' || state.restorePhase === 'executing';
+      var controls = el('div', null, 'display:flex;gap:8px;flex-wrap:wrap;margin-top:8px');
+      var prepare = el('button', TEXT.restorePrepareButton);
+      prepare.setAttribute('type', 'button');
+      prepare.setAttribute('data-h2o-action', 'recovery-center-prepare-restore-original');
+      prepare.disabled = busy;
+      prepare.addEventListener('click', function () { prepareRestoreOriginal(); });
+      controls.appendChild(prepare);
+
+      /* The mutation control EXISTS only while a current approval stands. */
+      if (restoreConfirmable()) {
+        var confirmBtn = el('button', TEXT.restoreConfirmButton);
+        confirmBtn.setAttribute('type', 'button');
+        confirmBtn.setAttribute('data-h2o-action', 'recovery-center-restore-original');
+        confirmBtn.disabled = busy;
+        confirmBtn.addEventListener('click', function () { executeRestoreOriginal(); });
+        controls.appendChild(confirmBtn);
+      }
+      restoreBox.appendChild(controls);
+
+      var status = {
+        preflighting: TEXT.restorePreflighting,
+        executing: TEXT.restoreExecuting,
+        'ready-to-confirm': TEXT.restoreReadyToConfirm,
+        'no-write': TEXT.restoreNoWrite,
+        refused: TEXT.restoreRefused,
+        error: TEXT.restoreError,
+        stale: TEXT.restoreStale,
+        success: TEXT.restoreSuccess,
+      };
+      if (Object.prototype.hasOwnProperty.call(status, state.restorePhase)) {
+        restoreBox.appendChild(el('div', status[state.restorePhase], 'font-size:12px;margin-top:8px'));
+      }
+
+      /* The restore module's own verdict, reported as it stated it. Nothing here
+       * re-derives eligibility, conflicts, tombstones, digest comparability or
+       * overwrite safety. */
+      var dry = safeObject(state.restoreDryRun);
+      if (cleanString(dry.decision)) {
+        restoreBox.appendChild(el('div', TEXT.restoreDecision + dry.decision, 'font-size:12px;opacity:.85;margin-top:4px'));
+        if (cleanString(dry.reason)) {
+          restoreBox.appendChild(el('div', TEXT.restoreReason + dry.reason, 'font-size:12px;opacity:.75'));
+        }
+      }
+      var done = safeObject(state.restoreResult);
+      if (cleanString(done.status)) {
+        restoreBox.appendChild(el('div', TEXT.restoreDecision + done.status, 'font-size:12px;opacity:.85;margin-top:4px'));
+        if (cleanString(done.reason)) {
+          restoreBox.appendChild(el('div', TEXT.restoreReason + done.reason, 'font-size:12px;opacity:.75'));
+        }
+        /* Only what the restore module itself returned about the restored rows.
+         * Nothing is fabricated and nothing is counted here. */
+        var restored = safeObject(done.restored);
+        if (cleanString(restored.chatId)) {
+          restoreBox.appendChild(el('div', TEXT.restoreChat + restored.chatId, 'font-size:12px;opacity:.85'));
+        }
+        if (cleanString(restored.snapshotId)) {
+          restoreBox.appendChild(el('div', TEXT.restoreSnapshot + restored.snapshotId, 'font-size:12px;opacity:.85'));
+        }
+        if (typeof restored.turnCount === 'number') {
+          restoreBox.appendChild(el('div', TEXT.restoreTurns + restored.turnCount, 'font-size:12px;opacity:.85'));
+        }
+      }
+    }
+
     function render() {
       if (!capable) {
         card.textContent = '';
@@ -911,14 +1067,14 @@
       if (state.phase === 'loading') {
         noticeBox.textContent = ''; chooserBox.textContent = '';
         timelineBox.textContent = ''; detailBox.textContent = ''; previewBox.textContent = '';
-        recoverBox.textContent = '';
+        recoverBox.textContent = ''; restoreBox.textContent = '';
         timelineBox.appendChild(el('div', TEXT.loading));
         return;
       }
       if (state.phase === 'error') {
         noticeBox.textContent = ''; chooserBox.textContent = '';
         timelineBox.textContent = ''; detailBox.textContent = ''; previewBox.textContent = '';
-        recoverBox.textContent = '';
+        recoverBox.textContent = ''; restoreBox.textContent = '';
         timelineBox.appendChild(el('div', TEXT.error + (state.error ? ' ' + state.error : '')));
         return;
       }
@@ -928,6 +1084,7 @@
       renderDetail();
       renderPreview();
       renderRecover();
+      renderRestore();
     }
 
     /* ONE trusted read per open/refresh. Rows never trigger their own. */
@@ -990,7 +1147,15 @@
     function clearPreview() {
       state.previewPhase = 'idle';
       state.preview = null;
+      clearPreparedActions();
+    }
+
+    /* Both prepared approvals die together whenever the thing they depended on
+     * moves. Neither operation may outlive the selection, chat, preview or card
+     * instance that justified it. */
+    function clearPreparedActions() {
       clearRecover();
+      clearRestore();
     }
 
     /* A prepared confirmation is discarded whenever anything it depended on
@@ -1001,6 +1166,14 @@
       state.recoverDryRun = null;
       state.recoverResult = null;
       state.recoverForPath = '';
+    }
+
+    /* The T05 counterpart. Separate state, separate lifetime. */
+    function clearRestore() {
+      state.restorePhase = 'idle';
+      state.restoreDryRun = null;
+      state.restoreResult = null;
+      state.restoreForPath = '';
     }
 
     /* The preview actually loaded for the version now selected. */
@@ -1014,6 +1187,29 @@
       return state.recoverPhase === 'ready-to-confirm'
         && !!state.recoverForPath
         && state.recoverForPath === state.selectedPackagePath
+        && isScopedPackagePath(state.selectedPackagePath)
+        && previewIsReadable();
+    }
+
+    /* A request that has been issued and has not settled. */
+    function isBusyPhase(phase) {
+      return phase === 'preflighting' || phase === 'executing';
+    }
+
+    /* T04 and T05 share ONE request token, so starting either one strands any
+     * IN-FLIGHT read belonging to the other: its result is discarded and its
+     * phase would never settle. A busy counterpart is therefore reset when a
+     * request starts. A SETTLED approval is deliberately left alone here — it is
+     * invalidated when a mutation actually BEGINS, which is the moment the store
+     * it was judged against is about to change. */
+    function releaseStrandedRecover() { if (isBusyPhase(state.recoverPhase)) clearRecover(); }
+    function releaseStrandedRestore() { if (isBusyPhase(state.restorePhase)) clearRestore(); }
+
+    /* The T05 counterpart, on its own pinned path. */
+    function restoreConfirmable() {
+      return state.restorePhase === 'ready-to-confirm'
+        && !!state.restoreForPath
+        && state.restoreForPath === state.selectedPackagePath
         && isScopedPackagePath(state.selectedPackagePath)
         && previewIsReadable();
     }
@@ -1143,10 +1339,12 @@
       state.versionPhase = 'loading';
       state.previewPhase = 'loading';
       state.preview = null;
-      /* Any approval prepared for the previous version dies here. The path pin
-       * already makes it unspendable, but leaving the phase behind would show a
-       * confirmed-looking state for a version nobody approved. */
-      clearRecover();
+      /* Any approval prepared for the previous version dies here — both of them.
+       * The path pin already makes each unspendable, but leaving the phase
+       * behind would show a confirmed-looking state for a version nobody
+       * approved. Re-selecting the SAME version clears them too, so a prepared
+       * approval can never be resurrected by navigating back to it. */
+      clearPreparedActions();
       render();
       return Promise.resolve()
         .then(function () { return inspectPackage({ packagePath: path }); })
@@ -1247,6 +1445,7 @@
       if (!path || !isScopedPackagePath(path) || !previewIsReadable()) return Promise.resolve();
       if (state.recoverPhase === 'preflighting' || state.recoverPhase === 'executing') return Promise.resolve();
       var token = invalidateRequests();
+      releaseStrandedRestore();
       clearRecover();
       state.recoverPhase = 'preflighting';
       render();
@@ -1286,7 +1485,14 @@
       if (!recoverConfirmable()) return Promise.resolve();
       var path = cleanString(state.selectedPackagePath);
       var token = invalidateRequests();
+      /* A T05 approval prepared BEFORE this mutation request must never be
+       * spendable after it: the store it was judged against is about to change. */
+      clearRestore();
+      /* Consumed synchronously, before the first await: the phase transition
+       * makes recoverConfirmable() false, so a second synchronous dispatch of
+       * this action cannot issue a second import. */
       state.recoverPhase = 'executing';
+      state.recoverForPath = '';
       state.recoverResult = null;
       render();
       return Promise.resolve()
@@ -1308,6 +1514,99 @@
         });
     }
 
+    /* T05 STEP ONE — non-mutating. Runs the restore module's OWN dry-run and
+     * shows its verdict. Nothing here interprets that verdict beyond deciding
+     * whether to offer the second action: conflict, tombstone, digest
+     * comparability, eligibility and overwrite safety are all decided there. */
+    function prepareRestoreOriginal() {
+      if (typeof dryRunRestore !== 'function') return Promise.resolve();
+      var path = cleanString(state.selectedPackagePath);
+      if (!path || !isScopedPackagePath(path) || !previewIsReadable()) return Promise.resolve();
+      if (state.restorePhase === 'preflighting' || state.restorePhase === 'executing') return Promise.resolve();
+      var token = invalidateRequests();
+      releaseStrandedRecover();
+      clearRestore();
+      state.restorePhase = 'preflighting';
+      render();
+      return Promise.resolve()
+        .then(function () { return dryRunRestore({ packagePath: path }); })
+        .then(function (result) {
+          if (!currentToken(token) || state.selectedPackagePath !== path) return;
+          var dry = safeObject(result);
+          state.restoreDryRun = dry;
+          var decision = cleanString(dry.decision);
+          if (decision === RESTORE_READY) {
+            state.restorePhase = 'ready-to-confirm';
+            state.restoreForPath = path;
+          } else if (decision === RESTORE_ALREADY_PRESENT) {
+            /* The restore module's other `ok` verdict. Nothing would be written,
+             * so it is reported as exactly that and no action is offered. */
+            state.restorePhase = 'no-write';
+            state.restoreForPath = '';
+          } else {
+            /* Every refusal — conflict-chat-id, conflict-snapshot-id, tombstoned,
+             * rejected, corrupted, unsupported-version, read-error — is reported
+             * as the restore module stated it, with no action offered and no
+             * fallback of any kind. */
+            state.restorePhase = 'refused';
+            state.restoreForPath = '';
+          }
+          render();
+        })
+        .catch(function () {
+          if (!currentToken(token) || state.selectedPackagePath !== path) return;
+          state.restorePhase = 'error';
+          state.restoreDryRun = null;
+          state.restoreForPath = '';
+          render();
+        });
+    }
+
+    /* T05 STEP TWO — the second mutation this surface can request, and the last.
+     * It sends the trusted row's own archive-relative path, the restore module's
+     * mode and its explicit confirmation, and nothing else: no dry-run result,
+     * no eligibility, no identity, no hash, no conflict or tombstone finding.
+     * The restore module re-runs its own dry-run, re-establishes the trusted
+     * content binding at the write gate, re-checks conflicts and tombstones
+     * inside the transaction, and decides the outcome. */
+    function executeRestoreOriginal() {
+      if (typeof executeRestore !== 'function') return Promise.resolve();
+      if (!restoreConfirmable()) return Promise.resolve();
+      var path = cleanString(state.selectedPackagePath);
+      var token = invalidateRequests();
+      /* A T04 approval prepared BEFORE this mutation request must never be
+       * spendable after it. */
+      clearRecover();
+      /* Consumed synchronously, before the first await: both the phase
+       * transition and the cleared path pin make restoreConfirmable() false, so
+       * rapid repeated dispatches issue exactly one restore for one approval. */
+      state.restorePhase = 'executing';
+      state.restoreForPath = '';
+      state.restoreResult = null;
+      render();
+      return Promise.resolve()
+        .then(function () { return executeRestore({ packagePath: path, mode: RESTORE_MODE, confirm: true }); })
+        .then(function (result) {
+          if (!currentToken(token) || state.selectedPackagePath !== path) return;
+          var restored = safeObject(result);
+          state.restoreResult = restored;
+          var status = cleanString(restored.status);
+          /* Success is read from the STATUS, never from `ok`: the restore module
+           * reports ok === true for already-present too, and a no-write outcome
+           * must never be shown as a restore that happened. */
+          if (status === RESTORE_RESTORED) state.restorePhase = 'success';
+          else if (status === RESTORE_ALREADY_PRESENT) state.restorePhase = 'no-write';
+          else state.restorePhase = 'refused';
+          render();
+        })
+        .catch(function () {
+          if (!currentToken(token) || state.selectedPackagePath !== path) return;
+          state.restorePhase = 'error';
+          state.restoreResult = null;
+          render();
+        });
+    }
+
     refresh.addEventListener('click', function () { load(); });
 
     render();
@@ -1320,6 +1619,8 @@
       selectVersion: selectVersion,
       prepareRecoverAsNew: prepareRecoverAsNew,
       recoverAsNew: executeRecoverAsNew,
+      prepareRestoreOriginalIdentity: prepareRestoreOriginal,
+      restoreOriginalIdentity: executeRestoreOriginal,
     };
   }
 
