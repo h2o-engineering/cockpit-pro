@@ -486,10 +486,40 @@ await fixture('corrected capability consumes existing range diagnostic', () => {
   equal(h.calls.range, [1], 'one composed range read');
 });
 
-await fixture('corrected capability does not reclassify wrappers independently', () => {
+await fixture('logical capability performs no wrapper classification', () => {
+  // Stage 2: wrapper/range classification is diagnostic. This fixture pins the
+  // architectural removal itself — the logical predicate must not name any
+  // native classification field — and then proves it behaviourally by holding
+  // every canonical input constant while varying only the classification.
   const source = extractFunction(SOURCE, 'evaluatePageCollapseCapability');
-  ok(source.includes('buildPageCollapseRangePlan(num, { includeDom: true })'), 'single range-plan proof consumed');
-  ok(!/flowRoot|querySelector|children|data-turn-id/.test(source), 'no independent DOM classification');
+  ok(source.includes('buildPageCollapseRangePlan(num, { includeDom: true })'),
+    'a single composed range-plan proof is still consumed, for diagnostics');
+  const predicate = source.slice(
+    source.indexOf('const prerequisitesReady = ('),
+    source.indexOf('let reason = null;'),
+  );
+  for (const field of [
+    'rangeProven', 'rangeStartIndex', 'rangeEndIndex', 'hostWrapperCount',
+    'ambiguousWrapperCount', 'pageUnitOrderCurrent', 'startWrapperCurrent',
+    'endWrapperCurrent', 'leaseCurrent', 'boundaryIdentityCurrent',
+  ]) {
+    equal(predicate.includes(field), false, `${field} is absent from the logical predicate`);
+  }
+  const baseline = createLiveCapabilityHarness().capability.capability(1);
+  equal(baseline.supported, true, 'baseline logical capability is available');
+  const classifications = [
+    { rangeProven: false, rangeStartIndex: -1, rangeEndIndex: -1 },
+    { hostWrapperCount: 0 },
+    { ambiguousWrapperCount: 4, firstAmbiguousIndex: 2 },
+    { pageUnitOrderCurrent: false, startWrapperCurrent: false, endWrapperCurrent: false },
+  ];
+  for (const rangeOverrides of classifications) {
+    const varied = createLiveCapabilityHarness({
+      rangeOverrides: { supported: false, rangeProven: false, ...rangeOverrides },
+    }).capability.capability(1);
+    equal(varied.supported, baseline.supported,
+      'native wrapper/range classification alone cannot change the logical result');
+  }
 });
 
 await fixture('live-equivalent range reports 50 host and 3 H2O nodes', () => {
@@ -584,7 +614,8 @@ await fixture('corrected readiness performs zero conversation-turn arithmetic', 
   ok(!/conversation-turn|testId|test-ID/.test(source), 'no test-ID authority');
 });
 
-await fixture('missing start boundary fails closed', () => {
+await fixture('missing start native boundary does not block logical capability', () => {
+  // Host windowing routinely leaves the page-start boundary unmounted.
   const h = createLiveCapabilityHarness({
     boundaryOverrides: {
       1: {
@@ -596,11 +627,14 @@ await fixture('missing start boundary fails closed', () => {
     },
   });
   const result = h.capability.capability(1);
-  equal(result.prerequisitesReady, false, 'start required');
-  equal(result.productReason, 'layout-incomplete', 'stable product reason');
+  equal(result.startBoundarySupported, false, 'the absent start boundary is still reported');
+  equal(result.titleRowsCurrent, true, 'canonical inputs are held healthy');
+  equal(result.prerequisitesReady, true, 'logical capability survives an unmounted start boundary');
+  equal(result.productReason, 'ready', 'no layout excuse is produced');
 });
 
-await fixture('missing next boundary fails closed', () => {
+await fixture('missing next native boundary does not block logical capability', () => {
+  // The 25-turn page cannot hold both distant boundaries in one host window.
   const h = createLiveCapabilityHarness({
     boundaryOverrides: {
       2: {
@@ -612,25 +646,37 @@ await fixture('missing next boundary fails closed', () => {
     },
   });
   const result = h.capability.capability(1);
-  equal(result.prerequisitesReady, false, 'end required');
-  equal(result.productReason, 'layout-incomplete', 'stable product reason');
+  equal(result.nextBoundarySupported, false, 'the absent next boundary is still reported');
+  equal(result.titleRowsCurrent, true, 'canonical inputs are held healthy');
+  equal(result.prerequisitesReady, true, 'logical capability survives an unmounted next boundary');
+  equal(result.productReason, 'ready', 'pair simultaneity is no longer required');
 });
 
-await fixture('stale start lease fails closed', () => {
+await fixture('stale start native lease does not block logical capability', () => {
   const h = createLiveCapabilityHarness({
     boundaryOverrides: { 1: { leaseCurrent: false } },
   });
-  equal(h.capability.capability(1).prerequisitesReady, false, 'stale start rejected');
+  equal(h.capability.capability(1).prerequisitesReady, true,
+    'a distant lease gone stale through host windowing does not invalidate the logical page');
+  // This does NOT authorize reusing a stale node: per-target native work still
+  // resolves CURRENT identity, which CV-3.26 owns and proves.
+  const identity = extractFunction(SOURCE, 'resolveCurrentMountedPageMembers');
+  ok(identity.includes('collapsedBoundaryNativeStartSurface'),
+    'per-target native resolution still binds the CURRENT surface by identity');
 });
 
-await fixture('stale end lease fails closed', () => {
+await fixture('stale end native lease does not block logical capability', () => {
   const h = createLiveCapabilityHarness({
     boundaryOverrides: { 2: { leaseCurrent: false } },
   });
-  equal(h.capability.capability(1).prerequisitesReady, false, 'stale end rejected');
+  const result = h.capability.capability(1);
+  equal(result.prerequisitesReady, true, 'a stale distant end lease does not invalidate the logical page');
+  equal(result.titleRowsCurrent, true, 'canonical inputs are held healthy');
 });
 
-await fixture('different flow-root range fails closed', () => {
+await fixture('unproven shared flow-root interval does not block logical capability', () => {
+  // One whole-page shared native flow-root interval cannot be proven under
+  // windowing; the canonical page does not depend on it.
   const h = createLiveCapabilityHarness({
     rangeOverrides: {
       supported: false,
@@ -641,8 +687,9 @@ await fixture('different flow-root range fails closed', () => {
     },
   });
   const result = h.capability.capability(1);
-  equal(result.prerequisitesReady, false, 'same flow required');
-  equal(result.productReason, 'layout-incomplete', 'flow failure normalized');
+  equal(result.rangeProven, false, 'the unproven interval is still reported');
+  equal(result.startWrapperCurrent, false, 'wrapper currency is still reported');
+  equal(result.prerequisitesReady, true, 'logical capability does not require one whole-page interval');
 });
 
 await fixture('generation mismatch fails closed', () => {
@@ -678,18 +725,23 @@ await fixture('route and chat mismatch fail closed', () => {
   equal(chat.capability.capability(1).prerequisitesReady, false, 'chat mismatch');
 });
 
-await fixture('page-unit drift fails closed', () => {
-  const h = createLiveCapabilityHarness({
+await fixture('native page-unit drift does not block logical capability but canonical drift still does', () => {
+  const nativeDrift = createLiveCapabilityHarness({
     rangeOverrides: {
       supported: false,
       reason: 'page-unit-order-invalid',
       rangeProven: false,
       pageUnitOrderCurrent: false,
     },
-  });
-  const result = h.capability.capability(1);
-  equal(result.prerequisitesReady, false, 'order required');
-  equal(result.productReason, 'layout-incomplete', 'order failure normalized');
+  }).capability.capability(1);
+  equal(nativeDrift.pageUnitOrderCurrent, false, 'native page-unit drift is still reported');
+  equal(nativeDrift.prerequisitesReady, true,
+    'native projection drift alone does not invalidate the canonical page definition');
+  // The paired guard: CANONICAL drift must still fail closed.
+  const canonicalDrift = createLiveCapabilityHarness({
+    boundaryOverrides: { 2: { generation: 2 } },
+  }).capability.capability(1);
+  equal(canonicalDrift.prerequisitesReady, false, 'canonical generation drift still fails closed');
 });
 
 await fixture('streaming maps to page-updating', () => {
@@ -728,7 +780,10 @@ await fixture('incomplete title rows map to page-loading', () => {
   equal(result.productReason, 'page-loading', 'title pending normalized');
 });
 
-await fixture('ambiguous range maps to unsupported-layout', () => {
+await fixture('ambiguous whole-range classification is diagnostic, not a logical gate', () => {
+  // Ambiguous WHOLE-RANGE wrapper classification is retired as a gate. This is
+  // NOT ambiguous canonical/current IDENTITY, which remains fail-closed and is
+  // owned by CV-3.26 (a duplicate connected carrier fails the whole plan).
   const h = createLiveCapabilityHarness({
     rangeOverrides: {
       supported: false,
@@ -739,14 +794,33 @@ await fixture('ambiguous range maps to unsupported-layout', () => {
     },
   });
   const result = h.capability.capability(1);
-  equal(result.ambiguousWrapperCount, 1, 'ambiguity reported');
-  equal(result.productReason, 'unsupported-layout', 'ambiguity normalized');
+  equal(result.ambiguousWrapperCount, 1, 'whole-range ambiguity is still reported as a diagnostic');
+  equal(result.firstAmbiguousIndex, 9, 'its index is still reported');
+  equal(result.prerequisitesReady, true, 'whole-range ambiguity no longer blocks logical capability');
+  const subset = extractFunction(SOURCE, 'resolveCurrentMountedPageMembers');
+  ok(subset.includes("'candidate-identity-ambiguous'"),
+    'ambiguous canonical/current identity still fails the plan closed');
 });
 
-await fixture('final page maps to layout-incomplete', () => {
-  const result = createLiveCapabilityHarness().capability.capability(2);
-  equal(result.prerequisitesReady, false, 'final page remains unsupported');
-  equal(result.productReason, 'layout-incomplete', 'final page normalized');
+await fixture('final canonical page is logically collapse-capable without a next native boundary', () => {
+  // Stage 2: a final page HAS no next-page native boundary by definition. That
+  // absence is structural, not a defect, and must not withhold logical
+  // capability while the canonical page itself is coherent and current.
+  const h = createLiveCapabilityHarness();
+  const result = h.capability.capability(2);
+  const model = h.model;
+  const finalPage = model.pages.find((entry) => entry.pageNo === 2) || null;
+  equal(model.coherent, true, 'canonical authority is coherent');
+  ok(!!finalPage, 'the final page exists canonically');
+  equal(finalPage.startOrder, 26, 'final page starts at turn 26');
+  equal(finalPage.endOrder, 39, 'final page ends at turn 39');
+  equal(result.isFinalPage, true, 'the page is reported as final');
+  equal(result.titleRowsCurrent, true, 'title/model state is current');
+  equal(result.streaming, false, 'not streaming');
+  equal(result.branchTransition, false, 'no branch transition');
+  equal(result.nextBoundarySupported, false, 'there is no next native boundary, because the page is final');
+  equal(result.prerequisitesReady, true, 'logical capability remains AVAILABLE on the final page');
+  equal(result.productReason, 'ready', 'final page reports ready');
 });
 
 await fixture('product reason never exposes native-slot terminology', () => {

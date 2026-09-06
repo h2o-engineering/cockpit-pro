@@ -4705,6 +4705,94 @@
     return 'layout-incomplete';
   }
 
+  /* Stage 2 (Defect V) — current mounted canonical subset.
+
+     The host keeps only a sliding window of the transcript mounted, so the two
+     distant boundaries of a 25-turn logical page are never present at once and
+     no contiguous native interval spanning the page can exist. Enumeration is
+     therefore canonical-FIRST: we walk the canonical members of the logical
+     page and ask the frozen Stage-1 identity path for each member's CURRENT
+     surface. We never enumerate DOM wrappers and infer which ones "look" like
+     they belong to the page, so a mounted wrong-page member, a DOM-only
+     noncanonical node and visual adjacency are all structurally irrelevant.
+
+     Policy per member:
+       connected surface   -> include in the current mounted subset
+       identity-unmounted  -> skip; ordinary host windowing, not a failure
+       identity-ambiguous  -> fail the WHOLE plan closed
+       stale/disconnected/other resolver refusal -> fail the whole plan closed
+
+     Note the deliberate asymmetry against the retired whole-range rule: a
+     page-wide "ambiguousWrapperCount === 0" prerequisite is gone, but ambiguity
+     on a specific CURRENT candidate still fails closed. */
+  function resolveCurrentMountedPageMembers(page = null, options = {}) {
+    const members = Array.isArray(page?.turnRecords) ? page.turnRecords : [];
+    const startOrder = Math.max(0, Number(page?.startOrder || 0) || 0);
+    const endOrder = Math.max(startOrder, Number(page?.endOrder || 0) || 0);
+    if (!members.length || !startOrder) {
+      return { ok: false, reason: 'page-membership-unavailable', flowRoot: null, mounted: [], unmountedCount: 0 };
+    }
+    const scoped = members.filter((member) => {
+      const order = Math.max(0, Number(member?.turnNo || 0) || 0);
+      return order >= startOrder && order <= endOrder;
+    });
+    // Discovery pass: the flow root is taken from whichever canonical member of
+    // this page is currently mounted, never from a start/end wrapper pair.
+    let flowRoot = options?.flowRoot || null;
+    if (!flowRoot) {
+      for (const member of scoped) {
+        const probe = collapsedBoundaryNativeStartSurface(member);
+        if (probe.reason === 'identity-ambiguous') {
+          return { ok: false, reason: 'candidate-identity-ambiguous', flowRoot: null, mounted: [], unmountedCount: 0 };
+        }
+        if (!probe.ok) continue;
+        const anchor = getTurnAnchorNode(probe.section);
+        const root = anchor?.parentElement || null;
+        if (root?.isConnected === true) { flowRoot = root; break; }
+      }
+    }
+    const mounted = [];
+    let unmountedCount = 0;
+    for (const member of scoped) {
+      const surface = collapsedBoundaryNativeStartSurface(member, flowRoot);
+      if (surface.reason === 'identity-ambiguous') {
+        return { ok: false, reason: 'candidate-identity-ambiguous', flowRoot, mounted: [], unmountedCount: 0 };
+      }
+      if (!surface.ok) {
+        /* Ordinary presentation absence for the windowed mounted-subset model.
+
+           `identity-unmounted` is the obvious case. `flow-wrapper-unavailable`
+           is the same thing seen one step later: the identity carrier is still
+           mounted and unambiguous, but the host has re-parented it such that no
+           direct flow child can currently be derived beneath this root.
+           Measured live: that turned into a page-wide
+           candidate-flow-wrapper-unavailable and expanded a committed windowed
+           collapse whose canonical authority was entirely coherent.
+
+           This list is exhaustive and deliberately short. Every other refusal —
+           ambiguity, a surface/wrapper mismatch, a missing native turn host — is
+           a resolution the model cannot trust, and still fails the whole page
+           closed. */
+        if (
+          surface.reason === 'identity-unmounted'
+          || surface.reason === 'flow-wrapper-unavailable'
+        ) { unmountedCount += 1; continue; }
+        return { ok: false, reason: `candidate-${String(surface.reason || 'unresolved')}`, flowRoot, mounted: [], unmountedCount: 0 };
+      }
+      const node = getTurnAnchorNode(surface.section);
+      if (!node || node.isConnected !== true || (flowRoot && node.parentElement !== flowRoot)) {
+        return { ok: false, reason: 'candidate-flow-scope-invalid', flowRoot, mounted: [], unmountedCount: 0 };
+      }
+      mounted.push(Object.freeze({
+        turnNo: Math.max(0, Number(member?.turnNo || 0) || 0),
+        questionId: String(member?.questionId || ''),
+        answerId: String(member?.answerId || ''),
+        node,
+      }));
+    }
+    return { ok: true, reason: null, flowRoot: flowRoot || null, mounted, unmountedCount };
+  }
+
   function evaluatePageCollapseCapability(pageNum = 0, options = {}) {
     const num = Math.max(1, Number(pageNum || 0) || 0);
     const model = buildTitleListPresentationPageModel();
@@ -4771,43 +4859,43 @@
     );
     const streaming = range.streaming === true;
     const branchTransition = range.branchTransition === true;
+    /* Stage 2 (Defect V): LOGICAL page-collapse capability is canonical only.
+
+       The retired predicate additionally required both distant native
+       boundaries to be mounted and leased at the same instant, plus a proven
+       contiguous wrapper interval spanning the page (rangeProven,
+       rangeStartIndex/rangeEndIndex, hostWrapperCount > 0, a page-wide
+       ambiguousWrapperCount === 0, and native document order). Under current
+       host windowing those can never all hold for a 25-turn page, so a
+       perfectly healthy canonical page was refused.
+
+       Every field below comes from canonical authority and is fully populated
+       with ZERO native boundary surfaces mounted. The native range values are
+       still computed above, but only as diagnostics.
+
+       `scopesCurrent` is retained in full: it is pure canonical scope CURRENCY
+       (chat, route, generation, effective fingerprint, graph fingerprint and
+       page order agreement between the authority and the range descriptor).
+       Scope *presence* is not the same as scope *currency*, so a generation,
+       fingerprint or route mismatch must still fail closed here. What is
+       retired is only the native machinery layered on top of it. */
     const prerequisitesReady = (
       scopesCurrent
-      && startCapability.supported === true
-      && startCapability.boundaryIdentityCurrent === true
-      && startCapability.leaseCurrent === true
-      && (finalPage || (
-        nextCapability.supported === true
-        && nextCapability.boundaryIdentityCurrent === true
-        && nextCapability.leaseCurrent === true
-      ))
-      && range.supported === true
-      && range.startBoundarySupported === true
-      && (finalPage || range.nextBoundarySupported === true)
-      && (!finalPage || range.finalTailSupported === true)
-      && range.startWrapperCurrent === true
-      && range.endWrapperCurrent === true
-      && range.rangeProven === true
-      && range.rangeStartIndex >= 0
-      && range.rangeEndIndex > range.rangeStartIndex
-      && range.hostWrapperCount > 0
-      && range.ambiguousWrapperCount === 0
-      && range.pageUnitOrderCurrent === true
       && !streaming
       && !branchTransition
       && titleRowsCurrent
     );
     let reason = null;
     if (!prerequisitesReady) {
+      // Only logical causes can block logical capability now. Native boundary
+      // and range reasons are no longer eligible outcomes here.
       if (!model?.coherent || !page) reason = model?.reason || 'authority-unavailable';
-      else if (range.isFinalPage) reason = range.reason || 'final-page-tail-unproven';
-      else if (!nextPage) reason = 'next-boundary-unavailable';
-      else if (!startCapability.supported) reason = startCapability.reason || 'start-boundary-unavailable';
-      else if (!nextCapability.supported) reason = nextCapability.reason || 'next-boundary-unavailable';
+      else if (!finalPage && !nextPage) reason = 'next-page-unavailable';
       else if (!scopesCurrent) reason = 'range-scope-changed';
-      else if (!range.supported || !range.rangeProven) reason = range.reason || 'range-unavailable';
+      else if (streaming) reason = 'streaming-active';
+      else if (branchTransition) reason = 'boundary-scope-changed';
       else if (!titleRowsCurrent) reason = 'title-rows-incomplete';
-      else reason = 'layout-incomplete';
+      else reason = 'authority-unavailable';
     }
     const productReason = pageCollapseCapabilityProductReason({
       prerequisitesReady,
@@ -4853,12 +4941,35 @@
       activationReady: prerequisitesReady,
       activationBlockReason: prerequisitesReady ? null : (reason || 'layout-incomplete'),
     });
+    /* Stage-2 Pass-2 plan shape.
+
+       Authority is canonical and scalar. The current native nodes are carried
+       as EPHEMERAL input for this pass only and are never persisted as logical
+       truth: page existence, its start/end order and its membership all come
+       from canonical authority alone.
+
+       The legacy contiguous-range fields are still spread in when a native
+       range happens to be proven, so the existing (Pass-3-owned) transaction
+       path keeps its current behaviour untouched in the full-interval world. */
+    const mountedSubset = (
+      options?.includePlan === true && capability.activationReady === true
+    ) ? resolveCurrentMountedPageMembers(page) : null;
     const privatePlan = (
       options?.includePlan === true
       && capability.activationReady === true
-      && rangePlan?.ok === true
+      && mountedSubset?.ok === true
     ) ? {
-      ...rangePlan,
+      ...(rangePlan?.ok === true ? rangePlan : {}),
+      stage2WindowedPlan: true,
+      count: Math.max(0, Number(model?.count || 0) || 0),
+      candidateIdentities: Object.freeze(mountedSubset.mounted.map((entry) => Object.freeze({
+        turnNo: entry.turnNo,
+        questionId: entry.questionId,
+      }))),
+      mountedCandidates: mountedSubset.mounted,
+      mountedCandidateCount: mountedSubset.mounted.length,
+      unmountedCandidateCount: mountedSubset.unmountedCount,
+      currentFlowRoot: mountedSubset.flowRoot,
       version: 1,
       pageNum: num,
       pageStartOrder,
@@ -4913,21 +5024,40 @@
     ]);
   }
 
-  function exactNativeStartSection(member = null) {
-    const order = Math.max(0, Number(member?.turnNo || 0) || 0);
+  /* Current-host native page-boundary identity.
+
+     The host renders `data-testid="conversation-turn-N"` WINDOW-RELATIVE: N
+     tracks the sliding render window and is renumbered whenever history is
+     prepended, so it can never address a canonical member. Section
+     `data-turn-id` carries the branch NODE id, which equals the product qId
+     only for never-branched turns. A logical turn is also not fixed at two
+     native sections. The retired resolver assumed all three, so it silently
+     failed to bind current surfaces.
+
+     Both collapsed-boundary lookups therefore delegate to the established
+     MountRegistry/message-id resolver and accept only the CURRENT connected
+     node; resolver outcomes (identity-unmounted, identity-ambiguous, stale or
+     disconnected bindings) are surfaced unchanged and never approximated. */
+  function collapsedBoundaryNativeStartSurface(member = null, flowRoot = null) {
     const qId = String(member?.questionId || '').trim();
-    if (!order || !qId) return null;
-    const testId = `conversation-turn-${String(((order - 1) * 2) + 1)}`;
-    let sections = [];
+    if (!qId) return { ok: false, reason: 'identity-unavailable', section: null, surface: null };
+    let surface = null;
     try {
-      const escId = (typeof CSS !== 'undefined' && CSS?.escape)
-        ? CSS.escape(qId)
-        : qId;
-      sections = Array.from(document.querySelectorAll(
-        `section[data-testid="${testId}"][data-turn="user"][data-turn-id="${escId}"]`
-      ));
-    } catch {}
-    return sections.length === 1 ? sections[0] : null;
+      surface = resolveRenderedTurnSurfaceByIdentity(qId, flowRoot || document.body);
+    } catch {
+      return { ok: false, reason: 'identity-unmounted', section: null, surface: null };
+    }
+    if (surface?.ok !== true) {
+      return {
+        ok: false,
+        reason: String(surface?.reason || 'identity-unmounted'),
+        section: null,
+        surface: null,
+      };
+    }
+    const section = surface.nativeTestHost?.isConnected === true ? surface.nativeTestHost : null;
+    if (!section) return { ok: false, reason: 'identity-unmounted', section: null, surface: null };
+    return { ok: true, reason: null, section, surface };
   }
 
   function frozenCollapsedBoundaryResult(raw = {}) {
@@ -5515,27 +5645,32 @@
     if (!nextPage) return fail('next-page-native-start-unavailable');
     const startMember = page.turnRecords[0] || null;
     const nextStartMember = nextPage.turnRecords[0] || null;
-    const startSection = exactNativeStartSection(startMember);
-    const nextStartSection = exactNativeStartSection(nextStartMember);
     const startIdentity = {
       order: Number(startMember?.turnNo || 0),
       qId: String(startMember?.questionId || ''),
-      testId: `conversation-turn-${String((((Number(startMember?.turnNo || 0) || 1) - 1) * 2) + 1)}`,
     };
     const nextStartIdentity = {
       order: Number(nextStartMember?.turnNo || 0),
       qId: String(nextStartMember?.questionId || ''),
-      testId: `conversation-turn-${String((((Number(nextStartMember?.turnNo || 0) || 1) - 1) * 2) + 1)}`,
     };
-    if (!startSection) return fail('native-start-not-mounted', { startIdentity, nextStartIdentity });
-    if (!nextStartSection) return fail('next-page-native-start-not-mounted', { startIdentity, nextStartIdentity });
-    const nativeStart = getTurnAnchorNode(startSection);
-    const nextPageNativeStart = getTurnAnchorNode(nextStartSection);
-    const flowRoot = nativeStart?.parentElement || null;
+    // Discovery pass: bind the start member's current native surface, then take
+    // the flow root from that surface and re-resolve BOTH boundaries against it
+    // so wrapper coherence is proved for the pair, not assumed from one side.
+    const startProbe = collapsedBoundaryNativeStartSurface(startMember);
+    if (!startProbe.ok) return fail('native-start-not-mounted', { startIdentity, nextStartIdentity });
+    const probedStart = getTurnAnchorNode(startProbe.section);
+    const flowRoot = probedStart?.parentElement || null;
+    if (!flowRoot) return fail('native-layout-boundary-unresolved', { startIdentity, nextStartIdentity });
+    const startResolved = collapsedBoundaryNativeStartSurface(startMember, flowRoot);
+    const nextStartResolved = collapsedBoundaryNativeStartSurface(nextStartMember, flowRoot);
+    if (!startResolved.ok) return fail('native-start-not-mounted', { startIdentity, nextStartIdentity });
+    if (!nextStartResolved.ok) return fail('next-page-native-start-not-mounted', { startIdentity, nextStartIdentity });
+    const nativeStart = getTurnAnchorNode(startResolved.section);
+    const nextPageNativeStart = getTurnAnchorNode(nextStartResolved.section);
     if (
       !nativeStart
       || !nextPageNativeStart
-      || !flowRoot
+      || nativeStart.parentElement !== flowRoot
       || nextPageNativeStart.parentElement !== flowRoot
     ) return fail('native-layout-boundary-unresolved', { startIdentity, nextStartIdentity });
     let ordered = false;
@@ -5685,27 +5820,32 @@
           if (!nextPage) return fail('next-page-native-start-unavailable');
           const startMember = page.turnRecords[0] || null;
           const nextStartMember = nextPage.turnRecords[0] || null;
-          const startSection = exactNativeStartSection(startMember);
-          const nextStartSection = exactNativeStartSection(nextStartMember);
           const startIdentity = {
             order: Number(startMember?.turnNo || 0),
             qId: String(startMember?.questionId || ''),
-            testId: `conversation-turn-${String((((Number(startMember?.turnNo || 0) || 1) - 1) * 2) + 1)}`,
           };
           const nextStartIdentity = {
             order: Number(nextStartMember?.turnNo || 0),
             qId: String(nextStartMember?.questionId || ''),
-            testId: `conversation-turn-${String((((Number(nextStartMember?.turnNo || 0) || 1) - 1) * 2) + 1)}`,
           };
-          if (!startSection) return fail('native-start-not-mounted', { startIdentity, nextStartIdentity });
-          if (!nextStartSection) return fail('next-page-native-start-not-mounted', { startIdentity, nextStartIdentity });
-          const nativeStart = getTurnAnchorNode(startSection);
-          const nextPageNativeStart = getTurnAnchorNode(nextStartSection);
-          const flowRoot = nativeStart?.parentElement || null;
+          // Discovery pass: bind the start member's current native surface, then take
+          // the flow root from that surface and re-resolve BOTH boundaries against it
+          // so wrapper coherence is proved for the pair, not assumed from one side.
+          const startProbe = collapsedBoundaryNativeStartSurface(startMember);
+          if (!startProbe.ok) return fail('native-start-not-mounted', { startIdentity, nextStartIdentity });
+          const probedStart = getTurnAnchorNode(startProbe.section);
+          const flowRoot = probedStart?.parentElement || null;
+          if (!flowRoot) return fail('native-layout-boundary-unresolved', { startIdentity, nextStartIdentity });
+          const startResolved = collapsedBoundaryNativeStartSurface(startMember, flowRoot);
+          const nextStartResolved = collapsedBoundaryNativeStartSurface(nextStartMember, flowRoot);
+          if (!startResolved.ok) return fail('native-start-not-mounted', { startIdentity, nextStartIdentity });
+          if (!nextStartResolved.ok) return fail('next-page-native-start-not-mounted', { startIdentity, nextStartIdentity });
+          const nativeStart = getTurnAnchorNode(startResolved.section);
+          const nextPageNativeStart = getTurnAnchorNode(nextStartResolved.section);
           if (
             !nativeStart
             || !nextPageNativeStart
-            || !flowRoot
+            || nativeStart.parentElement !== flowRoot
             || nextPageNativeStart.parentElement !== flowRoot
           ) return fail('native-layout-boundary-unresolved', { startIdentity, nextStartIdentity });
           let ordered = false;
@@ -5829,8 +5969,78 @@
     return released;
   }
 
-  function applyCollapsedNativeRange(plan = null) {
+  function applyCollapsedNativeRange(plan = null, mode = '') {
     const num = Math.max(1, Number(plan?.pageNum || 0) || 0);
+    /* Execution mode is the CALLER'S operation, never an incidental field.
+
+       Measured live: a legacy full-interval plan legitimately carries BOTH a
+       six-wrapper obligation set and a three-member mounted subset, and
+       selecting the branch from `Array.isArray(plan.mountedCandidates)`
+       silently executed the subset over three of the six. The legacy caller
+       then compared that result against its own true obligation set and
+       correctly rolled back a success produced over the wrong domain — the
+       guard was right, the dispatch was not.
+
+       An unrecognised mode is refused rather than guessed. */
+    const branch = mode === 'legacy' || mode === 'windowed' ? mode : '';
+    if (!branch) {
+      return {
+        ok: false,
+        status: 'rendered-collapse-apply-mode-unspecified',
+        branch: '',
+        hidden: 0,
+        mutations: 0,
+        stamped: [],
+        restorable: [],
+      };
+    }
+    /* Windowed: the execution unit is the current mounted canonical subset —
+       sparse by nature, and requiring no whole-page flow root, no wrapper pair
+       and no contiguous interval. Prior attribute state is captured per
+       candidate so rollback (model B) can restore scalars onto re-resolved
+       CURRENT nodes. The legacy contiguous branch below is unchanged for the
+       full-interval world. */
+    if (branch === 'windowed') {
+      const subset = Array.isArray(plan?.mountedCandidates) ? plan.mountedCandidates : [];
+      const restorable = [];
+      for (const entry of subset) {
+        const node = entry?.node || null;
+        if (!node || node.isConnected !== true || pageCollapseRangeH2OOwned(node)) {
+          return { ok: false, status: 'rendered-collapse-subset-stale', branch, hidden: 0, mutations: 0, stamped: [], restorable: [] };
+        }
+      }
+      const stamped = [];
+      for (const entry of subset) {
+        const node = entry.node;
+        const priorValue = node.getAttribute?.(ATTR_CHAT_PAGE_NATIVE_HIDDEN);
+        try {
+          if (String(priorValue || '') !== String(num)) node.setAttribute(ATTR_CHAT_PAGE_NATIVE_HIDDEN, String(num));
+          restorable.push({ questionId: entry.questionId, turnNo: entry.turnNo, priorValue: priorValue == null ? null : String(priorValue) });
+          stamped.push(node);
+        } catch (error) {
+          /* All-or-nothing within the subset: hand back everything already
+             mutated so the caller can roll every one of them back.
+
+             The guard is right and stays exactly as it is; what was missing is
+             WHY. Discarding the exception here left a live stall reporting
+             nothing but a generic transient failure, so the thrown reason is
+             carried out as a bounded scalar — no exception object, no node,
+             nothing persisted — beside the unchanged status. */
+          const reason = String(error?.message || error || 'stamp-write-failed').slice(0, 200);
+          return {
+            ok: false,
+            status: 'rendered-collapse-stamp-failed',
+            branch,
+            reason,
+            hidden: stamped.length,
+            mutations: stamped.length,
+            stamped,
+            restorable,
+          };
+        }
+      }
+      return { ok: true, status: 'collapsed', branch, hidden: subset.length, mutations: stamped.length, stamped, restorable };
+    }
     const root = plan?.flowRoot || null;
     const candidates = Array.isArray(plan?.hostWrappers) ? plan.hostWrappers : [];
     if (
@@ -5844,6 +6054,7 @@
       return {
         ok: false,
         status: 'rendered-collapse-plan-invalid',
+        branch,
         hidden: 0,
         mutations: 0,
         stamped: [],
@@ -5859,16 +6070,29 @@
         return {
           ok: false,
           status: 'rendered-collapse-plan-stale',
+          branch,
           hidden: 0,
           mutations: 0,
           stamped: [],
         };
       }
+      /* A candidate already carrying THIS page's marker is not a conflict — it
+         is an obligation already satisfied, which the write loop below has
+         always understood (`if (marker === String(num)) continue`). Rejecting
+         it here contradicted that skip and broke the designed recovery:
+         unbind may clear the ephemeral transaction map while the durable
+         collapse intent and the markers this page itself wrote both survive,
+         and the replay owner's re-entry then refused the page's own work.
+
+         A marker belonging to ANOTHER page stays a hard conflict. It is never
+         cleared, overwritten or appropriated, and it fails the whole apply
+         closed with zero writes. */
       const existing = String(node.getAttribute?.(ATTR_CHAT_PAGE_NATIVE_HIDDEN) || '');
-      if (existing) {
+      if (existing && existing !== String(num)) {
         return {
           ok: false,
           status: 'rendered-collapse-stamp-conflict',
+          branch,
           hidden: 0,
           mutations: 0,
           stamped: [],
@@ -5886,6 +6110,7 @@
       return {
         ok: false,
         status: 'rendered-collapse-stamp-failed',
+        branch,
         hidden: stamped.length,
         mutations: stamped.length,
         stamped,
@@ -5894,6 +6119,7 @@
     return {
       ok: true,
       status: 'collapsed',
+      branch,
       hidden: candidates.length,
       mutations: stamped.length,
       stamped,
@@ -6338,6 +6564,70 @@
     return { ok: true, status: 'prepared', container, rows };
   }
 
+  /* Canonical currency of a collapsed page scope.
+
+     Pass 4 retires the NATIVE half of committed-state validation, not this
+     half. Route, generation, fingerprint, boundary identity, branch
+     transition, streaming and title-row currency were always questions about
+     the conversation rather than about remembered elements, and they stay a
+     hard gate: a page whose canonical scope moved really is invalid, unlike a
+     page whose wrappers merely churned.
+
+     What is NOT required here is rendered-lease currency of either boundary
+     (supported / leaseCurrent / pageUnitOrderCurrent). Measured in the windowed
+     world: every canonical field of a healthy collapsed page agrees, and the
+     validation still failed 'atomic-plan-scope-stale' solely because the NEXT
+     page's distant boundary was not mounted — Defect V a second time, in the
+     committed-state test rather than the activation predicate. Pass 2 retired
+     the same requirement from activation; this is the same retirement, in the
+     same terms, for the committed state.
+
+     `scope` is any object carrying the canonical fields — a live plan during
+     collapse, or a committed transaction afterwards. */
+  function collapsedPageCanonicalAuthorityCurrent(scope = null) {
+    if (!scope?.capabilityIdentity) return { ok: false, reason: 'atomic-plan-scope-stale' };
+    const finalScope = scope.isFinalPage === true;
+    const authority = readRenderedBoundaryAuthority(scope.pageNum);
+    const nextAuthority = finalScope ? null : readRenderedBoundaryAuthority(scope.pageNum + 1);
+    const startCapability = getRenderedPageBoundaryCapability(scope.pageNum);
+    const nextCapability = finalScope ? null : getRenderedPageBoundaryCapability(scope.pageNum + 1);
+    if (
+      !authority?.ok
+      || (!finalScope && !nextAuthority?.ok)
+      || authority.chatId !== scope.chatId
+      || authority.routeKey !== scope.routeKey
+      || authority.generation !== scope.generation
+      || authority.effectiveFingerprint !== scope.effectiveFingerprint
+      || authority.qId !== scope.startBoundaryQId
+      || renderedBoundaryTransitionActive(authority.projection)
+      || renderedBoundaryRecordStreaming(authority.record)
+      || startCapability.graphFingerprint !== scope.graphFingerprint
+      || (!finalScope && (
+        nextAuthority.chatId !== scope.chatId
+        || nextAuthority.routeKey !== scope.routeKey
+        || nextAuthority.generation !== scope.generation
+        || nextAuthority.effectiveFingerprint !== scope.effectiveFingerprint
+        || nextAuthority.qId !== scope.nextBoundaryQId
+        || renderedBoundaryTransitionActive(nextAuthority.projection)
+        || renderedBoundaryRecordStreaming(nextAuthority.record)
+        || nextCapability.graphFingerprint !== scope.graphFingerprint
+      ))
+    ) return { ok: false, reason: 'atomic-plan-scope-stale' };
+    const model = buildTitleListPresentationPageModel();
+    const page = model?.pages?.find?.((entry) => entry.pageNo === scope.pageNum) || null;
+    const currentRows = Array.isArray(page?.turnRecords) ? page.turnRecords : [];
+    if (
+      model?.coherent !== true
+      || currentRows.length !== scope.expectedTitleRowCount
+      || currentRows.length !== scope.titleRows.length
+      || currentRows.some((member, index) => (
+        member?.id !== scope.titleRows[index]?.id
+        || Number(member?.turnNo || 0) !== Number(scope.titleRows[index]?.turnNo || 0)
+      ))
+    ) return { ok: false, reason: 'atomic-plan-title-rows-stale' };
+    return { ok: true, reason: null };
+  }
+
   function revalidateAtomicPageCollapsePlan(plan = null) {
     if (
       !plan
@@ -6412,19 +6702,51 @@
         || nextCapability.pageUnitOrderCurrent !== true
       ))
     ) return { ok: false, reason: 'atomic-plan-scope-stale' };
+    return collapsedPageCanonicalAuthorityCurrent(plan);
+  }
+
+  /* Stage 2 (Defect V) Pass 4 — identity-derived collapse surface.
+
+     The flow root is re-derived on every use from the page's OWN divider
+     rather than carried on the transaction. Under host windowing the element
+     that was the flow root at commit time may have been replaced, and a
+     transaction that pins it answers questions about a DOM that no longer
+     exists. */
+  function collapsedPageFlowRootByIdentity(pageNum = 0, options = {}) {
+    const num = Math.max(1, Number(pageNum || 0) || 0);
+    let divider = null;
+    try {
+      const node = document.querySelector(
+        `.cgxui-chat-page-divider[data-page-num="${String(num)}"]`
+      );
+      divider = node?.getAttribute?.('data-page-num') === String(num) ? node : null;
+    } catch { divider = null; }
+    const root = divider?.parentElement || null;
+    if (!root) return null;
+    // Callers that ask a question about the CURRENT surface require liveness;
+    // cleanup callers (see releaseAtomicPageCollapseState) do not.
+    return options?.requireLive === false || root.isConnected === true ? root : null;
+  }
+
+  /* Current canonical membership of a committed page. Unmounted members are
+     ordinary absence under windowing, replacements resolve to the CURRENT
+     node, and ambiguity fails the caller closed. */
+  function currentCollapsedPageMembers(transaction = null) {
+    const empty = (reason) => ({ ok: false, reason, flowRoot: null, mounted: [], unmountedCount: 0 });
+    if (!transaction || transaction.atomicRenderedBoundaryPlan !== true) return empty('transaction-missing');
     const model = buildTitleListPresentationPageModel();
-    const page = model?.pages?.find?.((entry) => entry.pageNo === plan.pageNum) || null;
-    const currentRows = Array.isArray(page?.turnRecords) ? page.turnRecords : [];
-    if (
-      model?.coherent !== true
-      || currentRows.length !== plan.expectedTitleRowCount
-      || currentRows.length !== plan.titleRows.length
-      || currentRows.some((member, index) => (
-        member?.id !== plan.titleRows[index]?.id
-        || Number(member?.turnNo || 0) !== Number(plan.titleRows[index]?.turnNo || 0)
-      ))
-    ) return { ok: false, reason: 'atomic-plan-title-rows-stale' };
-    return { ok: true, reason: null };
+    const page = model?.pages?.find?.((entry) => entry.pageNo === transaction.pageNum) || null;
+    if (!page) return empty('page-outside-presentation');
+    return resolveCurrentMountedPageMembers(page, {
+      flowRoot: collapsedPageFlowRootByIdentity(transaction.pageNum),
+    });
+  }
+
+  /* The single logical-intent authority: a page is collapsed if and only if a
+     transaction is registered for it. */
+  function currentCollapsedPageIntent(chatId = '', pageNum = 0) {
+    const num = Math.max(1, Number(pageNum || 0) || 0);
+    return S.atomicPageCollapseTransactions.has(collapsedNativeRangeKey(String(chatId || '').trim(), num));
   }
 
   function releaseAtomicPageCollapseState(transaction = null, options = {}) {
@@ -6432,13 +6754,34 @@
     const num = transaction.pageNum;
     const id = transaction.chatId;
     let mutations = 0;
+    /* Rollback model B on release: the un-stamp target is re-resolved from
+       CURRENT identity, never from a list captured at commit. A predecessor
+       the host has already swapped out is left exactly as it is (writing it
+       would both un-stamp nothing and strand our marker on the live element
+       that replaced it); the element that currently carries the identity is
+       the one released. */
+    const snapshot = currentCollapsedPageMembers(transaction);
+    /* Release derives its sweep root by identity like everything else, but
+       deliberately does NOT require it to be live. Removing our marker inside
+       a tree the host has already detached is harmless and completes the
+       release; refusing to do it would leave the marker on nodes the host is
+       free to recycle back into the flow, which is the stale-re-entry bug in
+       reverse. The compatibility writer keeps its liveness rule. */
+    const identityRoot = collapsedPageFlowRootByIdentity(num);
+    const releaseRoot = identityRoot || snapshot.flowRoot || collapsedPageFlowRootByIdentity(num, { requireLive: false });
     try {
       mutations += clearTitleListNativeInPlaceProjection(transaction, { rehide: false }).mutations;
     } catch {}
-    for (const node of transaction.stampedWrappers || []) {
-      if (node?.getAttribute?.(ATTR_CHAT_PAGE_NATIVE_HIDDEN) !== String(num)) continue;
+    const expectedMarker = String(num);
+    const unstamp = (node) => {
+      if (!node || node.getAttribute?.(ATTR_CHAT_PAGE_NATIVE_HIDDEN) !== expectedMarker) return;
       try { node.removeAttribute(ATTR_CHAT_PAGE_NATIVE_HIDDEN); mutations += 1; } catch {}
-    }
+    };
+    for (const entry of snapshot.ok ? snapshot.mounted : []) unstamp(entry.node);
+    // Interior host nodes that the legacy contiguous range stamped are not
+    // canonical members, so they are released by their own marker inside the
+    // live flow root instead of from a retained reference list.
+    for (const child of Array.from(releaseRoot?.children || [])) unstamp(child);
     const container = transaction.titleListContainer || null;
     if (container) {
       try { releaseTitleStackBars(container); } catch {}
@@ -6492,27 +6835,303 @@
     };
   }
 
+  /* Committed-state validation, Pass 4: identity only.
+
+     The old test asked whether a set of REMEMBERED elements was still where it
+     was left. Under host windowing that question has no good answer — an
+     unmounted member and a replaced member both look like invalidation, so a
+     perfectly good collapse was expanded on ordinary host churn. This asks the
+     only question that survives virtualization: is every member of this page
+     that is CURRENTLY mounted currently suppressed? */
   function validateCommittedAtomicPageCollapse(transaction = null) {
-    if (!transaction) return { ok: false, reason: 'transaction-missing' };
-    const planCheck = revalidateAtomicPageCollapsePlan(transaction);
-    if (!planCheck.ok) return planCheck;
-    const openMount = typeof titleListCurrentOpenMount === 'function'
+    if (!transaction || transaction.atomicRenderedBoundaryPlan !== true) {
+      return { ok: false, reason: 'transaction-missing' };
+    }
+    // Exactly the canonical half of the pre-Pass-4 plan revalidation, shared
+    // verbatim with it. Only the native half became identity-resolved.
+    const canonical = collapsedPageCanonicalAuthorityCurrent(transaction);
+    if (!canonical.ok) return canonical;
+    const snapshot = currentCollapsedPageMembers(transaction);
+    if (!snapshot.ok) return { ok: false, reason: String(snapshot.reason || 'candidate-unresolved') };
+    /* Derived independently from the page's own divider, with the
+       member-discovered root as the windowed fallback.
+
+       A windowed collapse is LOGICAL state. Its own commit path already
+       succeeds with nothing currently mounted — collapsed-no-native-work /
+       no-current-mounted-members — so requiring a live native root here made
+       validation contradict the commit that produced the transaction, and
+       ordinary host virtualization expanded a collapse the user still owned.
+       Canonical authority is the first-order truth and has already been
+       checked above; a missing root is presentation absence, exactly like a
+       missing member. Every current member that IS mounted is still held to
+       the marker invariant below.
+
+       The legacy full-interval world keeps the stricter rule: it owns a
+       synthetic title list that has to live somewhere, so a root it cannot
+       find really is invalid for it. */
+    const derivedRoot = collapsedPageFlowRootByIdentity(transaction.pageNum) || snapshot.flowRoot || null;
+    if (derivedRoot?.isConnected !== true && transaction.titleListContainer) {
+      return { ok: false, reason: 'flow-root-unavailable' };
+    }
+    // The one permitted indirect title-list dependency: a member deliberately
+    // opened in place is legitimately visible and must not read as incomplete.
+    // Skipped entirely when no open state exists, which is the same answer.
+    const openMount = S.titleListOpenStatesByKey?.size
       ? titleListCurrentOpenMount(transaction)
       : { ok: false, anchors: [] };
-    const visibleOpenWrappers = new Set(openMount.ok ? openMount.anchors : []);
+    const openAnchors = new Set(openMount.ok ? openMount.anchors : []);
+    /* Truthful status for an ACTIVE in-place open whose exact target is not
+       available right now.
+
+       An unmounted PAGE MEMBER is ordinary absence under windowing — that is
+       the Pass-4 correction and it stands. An opened member is different: the
+       user asked for that exact turn to be visible, a materialization request
+       is already outstanding for it, and the title-list state still says
+       `pending`. Reporting `current` there claims the open succeeded while the
+       projection is still waiting, which is how a genuinely pending open began
+       reading as settled.
+
+       The verdict is the title-list's OWN (`openMount`, already computed above
+       for the anchor exemption — no second call and no second projection
+       model). That matters for the partial case in particular: an answer-type
+       member requires both its current question and answer anchors, and one
+       resolved anchor out of two is reported by that contract as
+       `canonical-mount-incomplete`. Compatibility state may legitimately hold
+       the one truthful wrapper for the legacy readers; it is not evidence that
+       the exact target is complete, and this reads completeness only from the
+       contract that defines it.
+
+       Deliberately narrow: it requires an open state that is CURRENT (a member
+       resolved) and ALREADY pending, so ordinary host churn around a healthy
+       open cannot force pending on its own. */
     if (
-      transaction.hostWrappers.some((node) => (
-        node?.getAttribute?.(ATTR_CHAT_PAGE_NATIVE_HIDDEN) !== String(transaction.pageNum)
-        && !visibleOpenWrappers.has(node)
-      ))
-      || transaction.endWrapper?.hasAttribute?.(ATTR_CHAT_PAGE_NATIVE_HIDDEN)
-      || transaction.titleListContainer?.isConnected !== true
-      || transaction.titleListContainer?.parentElement !== transaction.flowRoot
+      openMount.member
+      && openMount.ok !== true
+      && (openMount.state?.status === 'pending' || openMount.state?.pending === true)
+    ) return { ok: false, reason: String(openMount.reason || 'title-list-open-target-unavailable') };
+    const expectedMarker = String(transaction.pageNum);
+    for (const entry of snapshot.mounted) {
+      if (openAnchors.has(entry.node)) continue;
+      if (entry.node?.getAttribute?.(ATTR_CHAT_PAGE_NATIVE_HIDDEN) !== expectedMarker) {
+        return { ok: false, reason: 'transaction-commit-incomplete' };
+      }
+    }
+    const container = transaction.titleListContainer || null;
+    if (container && (
+      container.isConnected !== true
+      || (derivedRoot && container.parentElement !== derivedRoot)
       || getSyntheticTitleListContainers(transaction.pageNum).filter(
-        (node) => node === transaction.titleListContainer
+        (node) => node === container
       ).length !== 1
-    ) return { ok: false, reason: 'transaction-commit-incomplete' };
+    )) return { ok: false, reason: 'transaction-commit-incomplete' };
     return { ok: true, reason: null };
+  }
+
+  /* Stage 2 (Defect V) Pass 3 — canonical operation epoch.
+
+     Identity-defining fields only. `authoritySource` travels with the epoch as
+     diagnostic provenance and is deliberately NOT compared: a source relabel
+     while chat/route/generation/fingerprints/count/page-layout all hold is not
+     canonical drift. Host presentation churn (mount, unmount, replacement,
+     hydration) is likewise never epoch drift — it is re-resolved, not aborted
+     on. */
+  function pageCollapseOperationEpoch(pageNum = 0) {
+    const num = Math.max(1, Number(pageNum || 0) || 0);
+    const rt = TURN_RUNTIME();
+    let status = null;
+    try { status = rt?.[TITLE_LIST_EFFECTIVE_METHOD.STATUS]?.() || null; } catch { return null; }
+    const model = buildTitleListPresentationPageModel();
+    const page = model?.pages?.find?.((entry) => entry.pageNo === num) || null;
+    const authority = readRenderedBoundaryAuthority(num);
+    return Object.freeze({
+      chatId: String(authority?.chatId || status?.chatId || ''),
+      routeKey: String(authority?.routeKey || status?.routeKey || ''),
+      generation: Math.max(0, Number(authority?.generation || status?.generation || 0) || 0),
+      effectiveFingerprint: String(authority?.effectiveFingerprint || status?.canonicalFingerprint || ''),
+      graphFingerprint: String(getRenderedPageBoundaryCapability(num)?.graphFingerprint || ''),
+      count: Math.max(0, Number(model?.count || 0) || 0),
+      pageStartOrder: Math.max(0, Number(page?.startOrder || 0) || 0),
+      pageEndOrder: Math.max(0, Number(page?.endOrder || 0) || 0),
+      coherent: model?.coherent === true,
+      // Diagnostic provenance only — never compared for drift.
+      authoritySource: String(model?.source || status?.source || ''),
+      statusIdentity: collapsedBoundaryStatusIdentity(status),
+    });
+  }
+
+  function pageCollapseEpochCoherent(before = null, after = null) {
+    if (!before || !after) return false;
+    return (
+      before.coherent === true
+      && after.coherent === true
+      && before.chatId === after.chatId
+      && before.routeKey === after.routeKey
+      && before.generation === after.generation
+      && before.effectiveFingerprint === after.effectiveFingerprint
+      && before.graphFingerprint === after.graphFingerprint
+      && before.count === after.count
+      && before.pageStartOrder === after.pageStartOrder
+      && before.pageEndOrder === after.pageEndOrder
+      && before.statusIdentity === after.statusIdentity
+    );
+  }
+
+  /* Rollback model B — ALWAYS re-resolve identity before restoring.
+
+     The captured prior value is scalar presentation data. The captured node is
+     NOT rollback authority: between stamping and rollback the host may have
+     replaced the element, so we re-resolve the canonical identity and write the
+     captured scalar onto the CURRENT node. A stale predecessor is never
+     written, and an identity that has become ambiguous or unavailable is
+     reported as precise residue rather than approximated. */
+  function rollbackWindowedCollapseCandidates(pageNum = 0, entries = []) {
+    let restored = 0;
+    const residue = [];
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      const member = { questionId: entry?.questionId, turnNo: entry?.turnNo };
+      const surface = collapsedBoundaryNativeStartSurface(member);
+      if (!surface.ok) {
+        residue.push({ questionId: entry?.questionId, reason: String(surface.reason || 'unresolved') });
+        continue;
+      }
+      const node = getTurnAnchorNode(surface.section);
+      if (!node || node.isConnected !== true) {
+        residue.push({ questionId: entry?.questionId, reason: 'rollback-node-unavailable' });
+        continue;
+      }
+      try {
+        if (entry?.priorValue == null) node.removeAttribute(ATTR_CHAT_PAGE_NATIVE_HIDDEN);
+        else node.setAttribute(ATTR_CHAT_PAGE_NATIVE_HIDDEN, String(entry.priorValue));
+        restored += 1;
+      } catch {
+        residue.push({ questionId: entry?.questionId, reason: 'rollback-write-failed' });
+      }
+    }
+    return { restored, residue };
+  }
+
+  /* Stage-2 windowed transaction commit.
+
+     Intent commit model A: validate E0/E1, record logical intent, then stamp the
+     final current subset. Canonical drift is rejected BEFORE intent, and intent
+     is logical so it does not depend on native availability — which is why an
+     empty subset still commits successfully. */
+  function commitWindowedPageCollapse(context = {}) {
+    const { num, id, key, plan, epochBefore, metrics } = context;
+    const model = buildTitleListPresentationPageModel();
+    const page = model?.pages?.find?.((entry) => entry.pageNo === num) || null;
+    if (!page) return { ok: false, status: 'collapsed-exact-boundary-unavailable', reason: 'page-outside-presentation' };
+
+    // Final current candidate snapshot: Pass-2 ephemeral nodes are NOT trusted
+    // at commit time. Members that mounted since planning are included; members
+    // that unmounted are ordinary absence; replacements resolve to the CURRENT
+    // node; ambiguity fails the whole transaction closed.
+    const snapshot = resolveCurrentMountedPageMembers(page);
+    if (!snapshot.ok) {
+      return {
+        ok: false,
+        status: 'atomic-collapse-candidate-unresolved',
+        reason: String(snapshot.reason || 'candidate-unresolved'),
+      };
+    }
+    const epochAfter = pageCollapseOperationEpoch(num);
+    if (!pageCollapseEpochCoherent(epochBefore, epochAfter)) {
+      return { ok: false, status: 'atomic-collapse-epoch-drift', reason: 'authority-changed-during-transaction' };
+    }
+
+    /* Version 3 — Pass 5A. The committed collapse is IDENTITY state end to end:
+       it retains no ChatGPT-owned native node at all. An element captured at
+       commit time is only ever a guess about a host that recycles its DOM, so
+       every host relationship — flow root, member wrapper, anchor order — is
+       re-derived from canonical identity at the moment of use.
+
+       The two handles that remain are H2O's own synthetic UI, not host state. */
+    const transaction = {
+      atomicRenderedBoundaryPlan: true,
+      version: 3,
+      pageNum: num,
+      pageStartOrder: plan.pageStartOrder,
+      pageEndOrder: plan.pageEndOrder,
+      chatId: plan.chatId,
+      routeKey: plan.routeKey,
+      generation: plan.generation,
+      effectiveFingerprint: plan.effectiveFingerprint,
+      graphFingerprint: plan.graphFingerprint,
+      startBoundaryQId: plan.startBoundaryQId || '',
+      nextBoundaryQId: plan.nextBoundaryQId || '',
+      isFinalPage: plan.isFinalPage === true,
+      titleRows: Array.isArray(plan.titleRows) ? plan.titleRows.slice() : [],
+      expectedTitleRowCount: plan.expectedTitleRowCount,
+      capabilityIdentity: plan.capabilityIdentity,
+      titleListContainer: null,
+      titleRowsPrepared: [],
+      source: String(context?.source || 'explicit-collapse'),
+    };
+
+    // Model A: intent is recorded before native work and does not depend on it.
+    S.atomicPageCollapseTransactions.set(key, transaction);
+    setAtomicCollapsedPageMemory(id, num, true);
+
+    if (!snapshot.mounted.length) {
+      // Valid no-native-work success: canonical page is collapsed logically,
+      // there is simply nothing currently mounted to suppress this pass.
+      return {
+        ok: true,
+        status: 'collapsed-no-native-work',
+        reason: 'no-current-mounted-members',
+        pageNum: num,
+        chatId: id,
+        hidden: 0,
+        mutations: 0,
+        rows: 0,
+        generation: transaction.generation,
+        effectiveFingerprint: transaction.effectiveFingerprint,
+        graphFingerprint: transaction.graphFingerprint,
+      };
+    }
+
+    const applied = applyCollapsedNativeRange({
+      atomicRenderedBoundaryPlan: true,
+      pageNum: num,
+      mountedCandidates: snapshot.mounted,
+    }, 'windowed');
+    if (metrics) {
+      metrics.wrappersStamped = (applied.stamped || []).length;
+      // Exactly the comparands of the guard on the next line.
+      metrics.applyBranch = String(applied.branch || '');
+      metrics.appliedOk = applied.ok === true;
+      metrics.appliedHidden = Math.max(0, Number(applied.hidden || 0) || 0);
+      metrics.appliedMutations = Math.max(0, Number(applied.mutations || 0) || 0);
+      metrics.appliedStampedCount = (applied.stamped || []).length;
+      metrics.comparisonExpectedCount = snapshot.mounted.length;
+    }
+    if (!applied.ok || applied.hidden !== snapshot.mounted.length) {
+      const rolled = rollbackWindowedCollapseCandidates(num, applied.restorable || []);
+      S.atomicPageCollapseTransactions.delete(key);
+      setAtomicCollapsedPageMemory(id, num, false);
+      return {
+        ok: false,
+        status: 'atomic-collapse-rolled-back',
+        // The captured cause when there is one, so the recorded attempt's
+        // internalReason names the real failure instead of the stage alone.
+        reason: String(applied.reason || applied.status || 'atomic-collapse-failed'),
+        mutations: rolled.restored,
+        residue: rolled.residue,
+      };
+    }
+    S.nativeRangeActivePages.add(key);
+    return {
+      ok: true,
+      status: 'collapsed',
+      pageNum: num,
+      chatId: id,
+      hidden: applied.hidden,
+      mutations: applied.mutations,
+      rows: transaction.titleRows.length,
+      generation: transaction.generation,
+      effectiveFingerprint: transaction.effectiveFingerprint,
+      graphFingerprint: transaction.graphFingerprint,
+    };
   }
 
   function collapsePageWithRenderedBoundaries(pageNum = 0, options = {}) {
@@ -6544,9 +7163,27 @@
       }
       if (metrics) {
         metrics.rangePlansBuilt += 1;
-        metrics.wrappersPlanned = plan.hostWrappers.length;
+        /* A Stage-2 windowed plan legitimately carries no hostWrappers field at
+           all — the branch below is written for exactly that shape — so this
+           line must not be the thing that decides whether collapse runs.
+           Measured live: recording metrics threw before the windowed branch it
+           was standing in front of could ever be reached. */
+        metrics.wrappersPlanned = Array.isArray(plan.hostWrappers) ? plan.hostWrappers.length : 0;
       }
       plan.atomicRenderedBoundaryPlan = true;
+      /* Stage 2 Pass 3 intake: a plan without a proven legacy contiguous
+         interval is executed as a mounted-subset transaction. The full-interval
+         world keeps the legacy path below byte-for-byte. */
+      if (plan.stage2WindowedPlan === true && !(Array.isArray(plan.hostWrappers) && plan.hostWrappers.length)) {
+        const epochBefore = pageCollapseOperationEpoch(num);
+        if (!epochBefore?.coherent) {
+          return { ok: false, status: 'collapsed-exact-boundary-unavailable', reason: 'authority-unavailable', capability };
+        }
+        return commitWindowedPageCollapse({
+          num, id, key, plan, capability, epochBefore, metrics,
+          source: options?.source,
+        });
+      }
       const prepared = prepareDetachedPageTitleList(plan);
       if (!prepared.ok) {
         return { ok: false, status: prepared.status, capability };
@@ -6563,9 +7200,12 @@
       if (!finalCheck.ok) {
         return { ok: false, status: finalCheck.reason, capability };
       }
+      // One transaction shape for both worlds (version 3 — see the windowed
+      // commit). The full-interval plan still owns wrapper elements while it
+      // executes; they simply stop being durable committed state.
       transaction = {
         atomicRenderedBoundaryPlan: true,
-        version: 1,
+        version: 3,
         pageNum: plan.pageNum,
         pageStartOrder: plan.pageStartOrder,
         pageEndOrder: plan.pageEndOrder,
@@ -6574,22 +7214,14 @@
         generation: plan.generation,
         effectiveFingerprint: plan.effectiveFingerprint,
         graphFingerprint: plan.graphFingerprint,
-        flowRoot: plan.flowRoot,
         startBoundaryQId: plan.startBoundaryQId,
         nextBoundaryQId: plan.nextBoundaryQId,
         isFinalPage: plan.isFinalPage === true,
-        pageEndOrder: plan.pageEndOrder,
-        startWrapper: plan.startWrapper,
-        endWrapper: plan.endWrapper,
-        hostWrappers: plan.hostWrappers.slice(),
-        wrapperProofs: new Map(plan.wrapperProofs),
-        pageDivider: plan.pageDivider,
         titleRows: plan.titleRows.slice(),
         expectedTitleRowCount: plan.expectedTitleRowCount,
         capabilityIdentity: plan.capabilityIdentity,
         titleListContainer: prepared.container,
         titleRowsPrepared: prepared.rows,
-        stampedWrappers: [],
         source: String(options?.source || 'explicit-collapse'),
       };
       try {
@@ -6598,9 +7230,17 @@
           metrics.firstWriteReached = true;
           metrics.syntheticListsInserted += 1;
         }
-        const stamped = applyCollapsedNativeRange(plan);
-        transaction.stampedWrappers = stamped.stamped || [];
-        if (metrics) metrics.wrappersStamped = transaction.stampedWrappers.length;
+        const stamped = applyCollapsedNativeRange(plan, 'legacy');
+        if (metrics) {
+          metrics.wrappersStamped = (stamped.stamped || []).length;
+          // Exactly the comparands of the guard on the next line.
+          metrics.applyBranch = String(stamped.branch || '');
+          metrics.appliedOk = stamped.ok === true;
+          metrics.appliedHidden = Math.max(0, Number(stamped.hidden || 0) || 0);
+          metrics.appliedMutations = Math.max(0, Number(stamped.mutations || 0) || 0);
+          metrics.appliedStampedCount = (stamped.stamped || []).length;
+          metrics.comparisonExpectedCount = plan.hostWrappers.length;
+        }
         if (!stamped.ok || stamped.hidden !== plan.hostWrappers.length) {
           return rollbackAtomicPageCollapse(transaction, viewportAnchor, stamped.status);
         }
@@ -6629,7 +7269,7 @@
         status: 'collapsed',
         pageNum: num,
         chatId: id,
-        hidden: transaction.hostWrappers.length,
+        hidden: plan.hostWrappers.length,
         rows: transaction.titleRowsPrepared.length,
         generation: transaction.generation,
         effectiveFingerprint: transaction.effectiveFingerprint,
@@ -6662,194 +7302,174 @@
     });
   }
 
-  function expandPageWithRenderedBoundaries(pageNum = 0, options = {}) {
+  /* Stage 2 (Defect V) Pass 4 — windowed expansion.
+
+     Logical intent is cleared FIRST. While the transaction is still registered
+     any concurrent reconcile pass would legitimately re-stamp the very members
+     this function is about to release, so dropping the intent before the DOM
+     work is what makes an expansion terminal rather than a race.
+
+     Expansion reveals nothing. A member that is not mounted stays not mounted:
+     materialising it is host navigation, which is not this function's business
+     and would move the user's viewport on an operation they asked to be a
+     removal of suppression. Residue is measured from the live flow root, not
+     from a remembered wrapper list. */
+  function expandWindowedPageCollapse(pageNum = 0, options = {}) {
     const num = Math.max(1, Number(pageNum || 0) || 0);
     const id = String(options?.chatId || resolveChatId()).trim();
     const key = collapsedNativeRangeKey(id, num);
     const transaction = S.atomicPageCollapseTransactions.get(key) || null;
-    if (!transaction) return { ok: true, status: 'inactive', pageNum: num, mutations: 0 };
+    if (!transaction) {
+      return { ok: true, status: 'inactive', pageNum: num, chatId: id, mutations: 0, revealCount: 0 };
+    }
+    const explicitExpansion = /^chat-page-divider:/.test(String(options?.source || ''));
+    const viewportAnchor = captureCollapsedPageViewportAnchor(num);
+    // Intent first — see above.
+    S.atomicPageCollapseTransactions.delete(key);
+    S.nativeRangeActivePages.delete(key);
+    const released = releaseAtomicPageCollapseState(transaction, {
+      controlReadiness: explicitExpansion
+        ? { ready: true, reason: null, productReason: 'ready' }
+        : null,
+      preserveIntent: !explicitExpansion,
+    });
+    if (viewportAnchor) restoreCollapsedPageViewportAnchor(viewportAnchor, 4);
+    // A lifecycle expansion is not itself evidence that the exact boundaries
+    // are gone. Derive the expanded control state from the authoritative
+    // capability once the release has settled: a page that is still provable
+    // renders ready, and a page whose authority genuinely failed keeps its
+    // own reason instead of a blanket boundary-unavailable claim.
+    if (!explicitExpansion) {
+      applyExpandedCollapseControlState(num, id);
+    }
+    const residualRoot = collapsedPageFlowRootByIdentity(num);
+    const residualStamps = Array.from(residualRoot?.children || []).filter((node) => (
+      node?.getAttribute?.(ATTR_CHAT_PAGE_NATIVE_HIDDEN) === String(num)
+    )).length;
+    const residualLists = getSyntheticTitleListContainers(num).filter((node) => node?.isConnected).length;
+    return {
+      ok: residualStamps === 0 && residualLists === 0,
+      status: residualStamps || residualLists ? 'expansion-incomplete' : 'expanded',
+      pageNum: num,
+      chatId: id,
+      mutations: released.mutations,
+      revealCount: 0,
+      residualStamps,
+      residualLists,
+    };
+  }
+
+  /* Stage 2 (Defect V) Pass 4 — stale marker cleanup on host re-entry.
+
+     The host recycles wrappers across virtualization cycles, so a node can
+     arrive already carrying our hidden marker from a page the user has since
+     expanded. Without this, re-entering a chat silently re-hides content
+     nobody asked to hide. The live transaction registry is the authority: a
+     marker whose page has no active transaction is residue, not state. */
+  function clearStaleWindowedCollapseStamps(chatId = '') {
+    const id = String(chatId || resolveChatId()).trim();
+    const model = buildTitleListPresentationPageModel();
+    let root = null;
+    for (const page of Array.isArray(model?.pages) ? model.pages : []) {
+      root = collapsedPageFlowRootByIdentity(page.pageNo);
+      if (root) break;
+      const probe = resolveCurrentMountedPageMembers(page);
+      if (probe.ok && probe.flowRoot?.isConnected === true) { root = probe.flowRoot; break; }
+    }
+    let mutations = 0;
+    let scanned = 0;
+    for (const child of Array.from(root?.children || [])) {
+      const marker = child?.getAttribute?.(ATTR_CHAT_PAGE_NATIVE_HIDDEN);
+      if (marker == null) continue;
+      scanned += 1;
+      const num = Math.max(0, Number(marker) || 0);
+      if (num && currentCollapsedPageIntent(id, num)) continue;
+      try { child.removeAttribute(ATTR_CHAT_PAGE_NATIVE_HIDDEN); mutations += 1; } catch {}
+    }
+    return { ok: true, mutations, scanned };
+  }
+
+  function expandPageWithRenderedBoundaries(pageNum = 0, options = {}) {
+    const num = Math.max(1, Number(pageNum || 0) || 0);
+    const id = String(options?.chatId || resolveChatId()).trim();
+    const key = collapsedNativeRangeKey(id, num);
+    if (!S.atomicPageCollapseTransactions.has(key)) {
+      return { ok: true, status: 'inactive', pageNum: num, mutations: 0 };
+    }
     if (S.atomicPageCollapseGuards.has(key)) {
       return { ok: false, status: 'transaction-busy', pageNum: num, chatId: id };
     }
     S.atomicPageCollapseGuards.add(key);
     try {
-      const viewportAnchor = captureCollapsedPageViewportAnchor(num);
-      const explicitExpansion = /^chat-page-divider:/.test(String(options?.source || ''));
-      const released = releaseAtomicPageCollapseState(transaction, {
-        controlReadiness: explicitExpansion
-          ? { ready: true, reason: null, productReason: 'ready' }
-          : null,
-        preserveIntent: !explicitExpansion,
-      });
-      if (viewportAnchor) restoreCollapsedPageViewportAnchor(viewportAnchor, 4);
-      // A lifecycle expansion is not itself evidence that the exact boundaries
-      // are gone. Derive the expanded control state from the authoritative
-      // capability once the release has settled: a page that is still provable
-      // renders ready, and a page whose authority genuinely failed keeps its
-      // own reason instead of a blanket boundary-unavailable claim.
-      if (!explicitExpansion) {
-        applyExpandedCollapseControlState(num, id);
-      }
-      const residualStamps = transaction.hostWrappers.filter((node) => (
-        node?.getAttribute?.(ATTR_CHAT_PAGE_NATIVE_HIDDEN) === String(num)
-      )).length;
-      const residualLists = getSyntheticTitleListContainers(num).filter((node) => node?.isConnected).length;
-      return {
-        ok: residualStamps === 0 && residualLists === 0,
-        status: residualStamps || residualLists ? 'expansion-incomplete' : 'expanded',
-        pageNum: num,
-        chatId: id,
-        mutations: released.mutations,
-        residualStamps,
-        residualLists,
-      };
+      return expandWindowedPageCollapse(num, { ...options, chatId: id });
     } finally {
       S.atomicPageCollapseGuards.delete(key);
     }
   }
 
-  /* Committed-transaction identity maintenance. The host reacts to a hidden
-     collapsed range by REPLACING wrapper elements (measured live: an
-     observer-hub remount right after commit left the transaction's pinned
-     member nodes stale, which expanded a perfectly good collapse as
-     'atomic-plan-member-stale'). Element references are ephemeral by host
-     contract — the committed state is IDENTITY-keyed, so maintenance
-     re-resolves each stale member by its recorded identity inside the live
-     flow root, restamps the hidden marker the replacement arrived without,
-     and only an identity that cannot be re-resolved keeps the expansion
-     path. */
-  function rebindCommittedAtomicPageCollapse(transaction = null) {
-    if (!transaction || transaction.atomicRenderedBoundaryPlan !== true) {
-      return { ok: false, rebound: 0, reason: 'transaction-missing' };
-    }
-    let rebound = 0;
-    const divider = transaction.pageDivider?.isConnected === true
-      ? transaction.pageDivider
-      : document.querySelector(
-        `.cgxui-chat-page-divider[data-page-num="${String(transaction.pageNum)}"]`
-      );
-    if (divider && transaction.pageDivider !== divider) {
-      transaction.pageDivider = divider;
-      rebound += 1;
-    }
-    const liveFlowRoot = divider?.parentElement?.isConnected === true
-      ? divider.parentElement
-      : (transaction.flowRoot?.isConnected === true ? transaction.flowRoot : null);
-    if (!liveFlowRoot) return { ok: false, rebound, reason: 'flow-root-unavailable' };
-    if (transaction.flowRoot !== liveFlowRoot) {
-      transaction.flowRoot = liveFlowRoot;
-      rebound += 1;
-    }
-    // The direct flow child that currently hosts an element, so a registry
-    // binding (which points at the message element, not the flow wrapper)
-    // resolves to the wrapper this transaction owns.
-    const directFlowChildOf = (el) => {
-      let cur = el;
-      while (cur && cur.parentElement && cur.parentElement !== liveFlowRoot) cur = cur.parentElement;
-      return cur?.parentElement === liveFlowRoot ? cur : null;
-    };
-    const findByProof = (proof, used) => {
-      if (!proof) return null;
-      // MountRegistry first: the hub is the single writer of
-      // identity->element bindings, so a rematerialized turn resolves without
-      // scanning the flow at all.
-      try {
-        const mounts = (TOPW?.H2O?.obs || W?.H2O?.obs)?.mounts;
-        const rec = mounts?.get?.(String(proof.identity || '').trim());
-        const el = rec?.el?.isConnected === true ? (rec.shell || rec.el) : null;
-        const wrapper = el ? directFlowChildOf(el) : null;
-        if (wrapper && !used.has(wrapper) && !pageCollapseRangeH2OOwned(wrapper)) return wrapper;
-      } catch {}
-      for (const child of Array.from(liveFlowRoot.children || [])) {
-        if (used.has(child) || pageCollapseRangeH2OOwned(child)) continue;
-        if (pageCollapseMemberIdentityCurrent(child, proof)) return child;
+
+  /* Stage 2 (Defect V) Pass 4 — incremental reconcile of ACTIVE collapsed pages.
+
+     Under host windowing a committed collapse is never "finished". Members
+     mount, unmount and get replaced for as long as the collapse lives, so a
+     pass that concluded "already valid, nothing to do" left every later
+     arrival visible inside a page the user had collapsed. Each pass now
+     re-resolves current membership and stamps exactly the members that are
+     currently missing the marker — an already-correct member is not rewritten,
+     so the pass stays idempotent, and an identity that has become ambiguous
+     fails the pass closed rather than projecting an approximation. */
+  function reconcileActiveWindowedCollapse(reason = 'presentation-updated') {
+    let mutations = 0;
+    for (const transaction of Array.from(S.atomicPageCollapseTransactions.values())) {
+      const snapshot = currentCollapsedPageMembers(transaction);
+      if (!snapshot.ok) {
+        return {
+          ok: false,
+          reason: String(snapshot.reason || 'candidate-unresolved'),
+          pageNum: transaction.pageNum,
+          mutations,
+        };
       }
-      return null;
-    };
-    const findByIdentity = (identity, used) => findByProof({ identity }, used);
-    // One currency test, shared with the committed-state validator. They must
-    // not disagree: the weaker "connected and a direct child" test used here
-    // before reported success having rebound nothing (measured live:
-    // rebind ok / rebound 0), after which the validator still rejected the
-    // same member and the committed collapse was expanded away.
-    const memberCurrent = (node, proof) => (
-      node?.isConnected === true
-      && node?.parentElement === liveFlowRoot
-      && !pageCollapseRangeH2OOwned(node)
-      && pageCollapseMemberIdentityCurrent(node, proof)
-    );
-    const used = new Set();
-    for (const node of transaction.hostWrappers) {
-      const proof = transaction.wrapperProofs?.get?.(node) || null;
-      if (memberCurrent(node, proof)) used.add(node);
-    }
-    const nextWrappers = [];
-    const nextProofs = new Map();
-    for (const node of transaction.hostWrappers) {
-      const proof = transaction.wrapperProofs?.get?.(node) || null;
-      if (!proof?.identity) return { ok: false, rebound, reason: 'member-proof-missing' };
-      if (memberCurrent(node, proof)) {
-        nextWrappers.push(node);
-        nextProofs.set(node, proof);
-        continue;
+      // A member deliberately opened in place is an explicit visibility
+      // decision by the user; re-stamping it here would have this pass fight
+      // the title-list projection every time it ran.
+      const openMount = S.titleListOpenStatesByKey?.size
+        ? titleListCurrentOpenMount(transaction)
+        : { ok: false, anchors: [] };
+      const openAnchors = new Set(openMount.ok ? openMount.anchors : []);
+      const expectedMarker = String(transaction.pageNum);
+      const pending = snapshot.mounted.filter((entry) => (
+        !openAnchors.has(entry.node)
+        && entry.node?.getAttribute?.(ATTR_CHAT_PAGE_NATIVE_HIDDEN) !== expectedMarker
+      ));
+      if (!pending.length) continue;
+      const applied = applyCollapsedNativeRange({
+        atomicRenderedBoundaryPlan: true,
+        pageNum: transaction.pageNum,
+        mountedCandidates: pending,
+      }, 'windowed');
+      if (!applied.ok) {
+        const rolled = rollbackWindowedCollapseCandidates(transaction.pageNum, applied.restorable || []);
+        return {
+          ok: false,
+          reason: String(applied.status || 'reconcile-stamp-failed'),
+          pageNum: transaction.pageNum,
+          mutations: mutations + rolled.restored,
+        };
       }
-      const replacement = findByProof(proof, used);
-      if (!replacement) return { ok: false, rebound, reason: 'member-identity-unresolved' };
-      used.add(replacement);
-      try {
-        replacement.setAttribute(ATTR_CHAT_PAGE_NATIVE_HIDDEN, String(transaction.pageNum));
-      } catch {}
-      if (transaction.startWrapper === node) transaction.startWrapper = replacement;
-      nextWrappers.push(replacement);
-      nextProofs.set(replacement, proof);
-      rebound += 1;
+      mutations += applied.mutations;
     }
-    // Boundary wrappers re-resolve by their recorded identities too.
-    if (!(transaction.startWrapper?.isConnected === true
-      && transaction.startWrapper?.parentElement === liveFlowRoot)) {
-      const replacement = findByIdentity(transaction.startBoundaryQId, used);
-      if (!replacement) return { ok: false, rebound, reason: 'start-identity-unresolved' };
-      used.add(replacement);
-      transaction.startWrapper = replacement;
-      rebound += 1;
-    }
-    if (!(transaction.endWrapper?.isConnected === true
-      && transaction.endWrapper?.parentElement === liveFlowRoot)) {
-      if (transaction.isFinalPage === true) {
-        const sentinel = renderedBoundaryPageEndSentinel(transaction.pageNum);
-        if (!(sentinel?.isConnected === true && sentinel.parentElement === liveFlowRoot)) {
-          return { ok: false, rebound, reason: 'end-identity-unresolved' };
-        }
-        transaction.endWrapper = sentinel;
-      } else {
-        const replacement = findByIdentity(transaction.nextBoundaryQId, used);
-        if (!replacement) return { ok: false, rebound, reason: 'end-identity-unresolved' };
-        transaction.endWrapper = replacement;
-      }
-      rebound += 1;
-    }
-    transaction.hostWrappers = nextWrappers;
-    transaction.wrapperProofs = nextProofs;
-    // Stale references are released, never retained as durable authority: the
-    // release path un-stamps exactly this list, so a detached original left
-    // here would both un-stamp nothing and leak our hidden attribute on the
-    // live replacement that took its place.
-    transaction.stampedWrappers = nextWrappers.slice();
-    return { ok: true, rebound, reason: null };
+    return { ok: true, reason: String(reason || ''), mutations };
   }
 
   function reconcileAtomicPageCollapseTransactions(reason = 'presentation-updated') {
     const results = [];
+    // Stamping runs first and unconditionally: validation reports whether the
+    // page is currently coherent, it is not a licence to skip the members that
+    // mounted since the last pass.
+    reconcileActiveWindowedCollapse(reason);
     for (const transaction of Array.from(S.atomicPageCollapseTransactions.values())) {
       let current = validateCommittedAtomicPageCollapse(transaction);
-      if (!current.ok && typeof rebindCommittedAtomicPageCollapse === 'function') {
-        // Identity maintenance first: host element replacement inside or
-        // around a hidden range is the normal rematerialization case, not
-        // an invalidation of the user's committed collapse. (typeof-guarded:
-        // validator sandboxes evaluate extracted slices without the helper.)
-        const rebind = rebindCommittedAtomicPageCollapse(transaction);
-        if (rebind.ok) current = validateCommittedAtomicPageCollapse(transaction);
-      }
       if (!current.ok) {
         const pending = reconcilePendingTitleListMaterialization(transaction, reason);
         if (pending) {
@@ -6870,10 +7490,20 @@
         results.push({ ok: true, status: 'current', pageNum: transaction.pageNum });
         continue;
       }
-      results.push(expandPageWithRenderedBoundaries(transaction.pageNum, {
+      /* Observability only. The decisive validation reason is computed right
+         here and was then discarded from every returned surface, so a live
+         capture could tell that a page had been expanded but not which clause
+         decided it. The expansion call, its source and its behaviour are
+         unchanged; the reason simply travels with the entry the pass returns,
+         exactly as the pending branch above already does. */
+      const expanded = expandPageWithRenderedBoundaries(transaction.pageNum, {
         chatId: transaction.chatId,
         source: `${reason}:${current.reason}`,
-      }));
+      });
+      results.push({
+        ...expanded,
+        reason: current.reason == null ? null : String(current.reason).slice(0, 200),
+      });
     }
     for (const replayed of replayDeferredPageCollapseIntent(reason)) results.push(replayed);
     return results;
@@ -6999,6 +7629,19 @@
       firstWriteReached: raw.firstWriteReached === true,
       wrappersPlanned: Math.max(0, Number(raw.wrappersPlanned || 0) || 0),
       wrappersStamped: Math.max(0, Number(raw.wrappersStamped || 0) || 0),
+      /* Apply comparands. `wrappersStamped` alone reads as a partial result
+         because it counts only NEW writes: an obligation that already carries
+         the marker is satisfied without one. These record what the
+         all-or-nothing guard actually compared, so a reported rollback names
+         the branch and the two numbers that produced it. `applyBranch` is
+         empty when no apply ran, which is what distinguishes that from a
+         failed one. Primitive scalars only. */
+      applyBranch: String(raw.applyBranch || ''),
+      appliedOk: raw.appliedOk === true,
+      appliedHidden: Math.max(0, Number(raw.appliedHidden || 0) || 0),
+      appliedMutations: Math.max(0, Number(raw.appliedMutations || 0) || 0),
+      appliedStampedCount: Math.max(0, Number(raw.appliedStampedCount || 0) || 0),
+      comparisonExpectedCount: Math.max(0, Number(raw.comparisonExpectedCount || 0) || 0),
       titleRowsPrepared: Math.max(0, Number(raw.titleRowsPrepared || 0) || 0),
       syntheticListsInserted: Math.max(0, Number(raw.syntheticListsInserted || 0) || 0),
       rollbackPerformed: raw.rollbackPerformed === true,
@@ -8903,7 +9546,10 @@
   }
 
   function ensureTitleListSuffixContainer(transaction = null) {
-    if (!transaction?.titleListContainer || !transaction?.flowRoot) return null;
+    // The current root is a precondition, resolved now rather than remembered:
+    // a suffix has nowhere to belong if the page's flow is not live.
+    if (!transaction?.titleListContainer) return null;
+    if (collapsedPageFlowRootByIdentity(transaction.pageNum)?.isConnected !== true) return null;
     let suffix = getTitleListSuffixContainers(transaction.pageNum, transaction.chatId)[0] || null;
     if (!suffix) {
       try {
@@ -8957,9 +9603,76 @@
       && !!titleListCanonicalMemberForOpenState(transaction, state);
   }
 
+  /* Stage 2 Pass 5A — the page's CURRENT native projection surface.
+
+     Derived at point of use and never persisted. The canonical model decides
+     WHO belongs to this page; current identity resolution decides WHICH mounted
+     node stands for each of them right now; the DOM is consulted only
+     afterwards, and only for presentation mechanics. A member that is not
+     mounted is ordinary absence, a replaced member resolves to its current
+     node, and an identity that has become ambiguous is left out rather than
+     guessed at. */
+  function titleListCurrentProjectionNodes(transaction = null) {
+    const out = { ok: false, reason: 'projection-surface-unavailable', root: null, nodes: [] };
+    if (transaction?.atomicRenderedBoundaryPlan !== true) return out;
+    const root = collapsedPageFlowRootByIdentity(transaction.pageNum);
+    if (root?.isConnected !== true) return { ...out, reason: 'flow-root-unavailable' };
+    const nodes = [];
+    const admit = (node) => {
+      if (!node || node.isConnected !== true || node.parentElement !== root) return;
+      if (pageCollapseRangeH2OOwned(node) || nodes.includes(node)) return;
+      nodes.push(node);
+    };
+    for (const member of Array.isArray(transaction.titleRows) ? transaction.titleRows : []) {
+      for (const identity of [member?.questionId, member?.answerId]) {
+        const id = String(identity || '').trim();
+        if (!id) continue;
+        let surface = null;
+        try { surface = resolveRenderedTurnSurfaceByIdentity(id, root); } catch { surface = null; }
+        if (surface?.ok === true) admit(surface.directFlowWrapper);
+      }
+      // Question and answer surfaces are resolved separately: a logical turn is
+      // not a fixed number of native sections, so neither may be derived from
+      // the other or from ordinal arithmetic.
+      for (const role of ['user', 'assistant']) {
+        if (role === 'assistant' && member?.type !== 'answer') continue;
+        let sections = [];
+        try { sections = memberSectionCandidates(member, role); } catch { sections = []; }
+        if (sections.length !== 1) continue;
+        let direct = null;
+        try { direct = titleListDirectFlowChild(root, getTurnAnchorNode(sections[0])); } catch { direct = null; }
+        admit(direct);
+      }
+    }
+    // Presentation order only. DOM position never establishes membership.
+    const children = Array.from(root.children || []);
+    nodes.sort((a, b) => children.indexOf(a) - children.indexOf(b));
+    return { ok: true, reason: null, root, nodes };
+  }
+
+  /* Diagnostic count of the CURRENT canonical members carrying this page's
+     projection. Recomputed at point of use; nothing is retained. */
+  function titleListCurrentProjectedCount(transaction = null) {
+    const surface = titleListCurrentProjectionNodes(transaction);
+    if (!surface.ok) return 0;
+    const marker = String(transaction.pageNum);
+    return surface.nodes.filter(
+      (node) => node.getAttribute?.(ATTR_CHAT_PAGE_NATIVE_HIDDEN) === marker,
+    ).length;
+  }
+
   function titleListCurrentNativeMount(transaction = null, member = null) {
     const fail = (reason = 'canonical-mount-unavailable', anchors = []) => ({ ok: false, reason, anchors, member });
-    if (!transaction?.flowRoot || !member?.id) return fail('canonical-member-unavailable');
+    if (!transaction || !member?.id) return fail('canonical-member-unavailable');
+    // The current root is resolved at point of use, never carried.
+    const root = collapsedPageFlowRootByIdentity(transaction.pageNum);
+    if (root?.isConnected !== true) return fail('canonical-member-unavailable');
+    // Canonical page membership comes from the transaction's own scalar page
+    // scope — this is what the retired hostWrappers list stood in for.
+    const order = Math.max(0, Number(member?.turnNo || 0) || 0);
+    if (order && (order < transaction.pageStartOrder || order > transaction.pageEndOrder)) {
+      return fail('canonical-mount-not-in-current-page');
+    }
     const questionSections = memberSectionCandidates(member, 'user');
     const answerSections = member.type === 'answer' ? memberSectionCandidates(member, 'assistant') : [];
     if (questionSections.length > 1 || (member.type === 'answer' && answerSections.length > 1)) {
@@ -8972,12 +9685,12 @@
     const anchors = [];
     for (const section of requiredSections.filter(Boolean)) {
       const anchor = getTurnAnchorNode(section);
-      const direct = titleListDirectFlowChild(transaction.flowRoot, anchor);
+      const direct = titleListDirectFlowChild(root, anchor);
       if (
         !direct
         || direct?.isConnected !== true
-        || direct.parentElement !== transaction.flowRoot
-        || !transaction.hostWrappers.includes(direct)
+        || direct.parentElement !== root
+        || pageCollapseRangeH2OOwned(direct)
       ) return fail('canonical-mount-not-in-current-page', anchors);
       if (!anchors.includes(direct)) anchors.push(direct);
     }
@@ -9051,6 +9764,34 @@
     };
   }
 
+  /* Stage 2 Pass 5B — the SUCCESS half of the bounded materialization request.
+
+     'navigated' is the coordinator's only success token, and it is a statement
+     about NAVIGATION, not about presentation. It is correlated back to our own
+     outstanding request through exactly the fields the failure reader already
+     uses — no second token scheme, no extra persisted request object — and the
+     caller must still re-resolve the CURRENT exact target before anything
+     completes. A result that does not correlate is simply not ours.
+
+     Generation follows the established rule: an OLDER status is not ours,
+     while a newer one still can be, because coordinator cancellation advances
+     the same operation's generation and the exact canonical target is what
+     actually identifies it. */
+  function titleListCanonicalMaterializationSettled(state = null) {
+    if (!state?.materializationRequested) return null;
+    let navigation = null;
+    try { navigation = MM_SH()?.api?.rt?.getCompleteIndexNavigationStatus?.() || null; } catch {}
+    if (!navigation) return null;
+    if (String(navigation.status || '').trim() !== 'navigated') return null;
+    const expectedQId = String(state.materializationTargetQId || state.questionId || '').trim();
+    const targetQId = String(navigation.targetQId || '').trim();
+    if (expectedQId && targetQId && expectedQId !== targetQId) return null;
+    const expectedGeneration = Math.max(0, Number(state.materializationGeneration || 0) || 0);
+    const generation = Math.max(0, Number(navigation.generation || 0) || 0);
+    if (expectedGeneration && generation && generation < expectedGeneration) return null;
+    return { status: 'navigated', generation, targetQId };
+  }
+
   function clearTitleListNativeInPlaceProjection(transaction = null, options = {}) {
     if (!transaction) return { ok: true, status: 'inactive', mutations: 0 };
     const key = titleListOpenStateKey(transaction.pageNum, transaction.chatId);
@@ -9066,8 +9807,9 @@
       if (hadState) mutations += 1;
     }
     if (options?.rehide !== false) {
-      for (const node of transaction.hostWrappers || []) {
-        if (node?.isConnected !== true || node.parentElement !== transaction.flowRoot) continue;
+      // Current canonical members only, resolved now. A stale predecessor is
+      // never written and a DOM-only noncanonical node is never touched.
+      for (const node of titleListCurrentProjectionNodes(transaction).nodes) {
         if (node.getAttribute?.(ATTR_CHAT_PAGE_NATIVE_HIDDEN) === String(transaction.pageNum)) continue;
         try { node.setAttribute(ATTR_CHAT_PAGE_NATIVE_HIDDEN, String(transaction.pageNum)); mutations += 1; } catch {}
       }
@@ -9114,6 +9856,14 @@
         } catch {}
       }
     }
+    /* The success is correlated here, AFTER the open state has been re-read
+       from S.titleListOpenStatesByKey and proven current for this transaction
+       (chat, page, route, generation, effective fingerprint and canonical
+       member) by the checks above. A success belonging to an intent the user
+       has since closed or replaced never reaches this point. */
+    const settled = titleListCanonicalMaterializationSettled(state);
+    if (settled) state.materializationStatus = settled.status;
+    const materialization = settled ? settled.status : null;
     const initialMount = options?.currentMount?.member === member ? options.currentMount : null;
     const resolvedMount = titleListCurrentNativeMount(transaction, member);
     const initialStillCurrent = initialMount?.ok === true
@@ -9144,8 +9894,7 @@
       state.status = 'pending';
       mutations += restoreTitleListProjectionRows(transaction);
       const pendingEligible = new Set(mount.anchors || []);
-      for (const node of transaction.hostWrappers || []) {
-        if (node?.isConnected !== true || node.parentElement !== transaction.flowRoot) continue;
+      for (const node of titleListCurrentProjectionNodes(transaction).nodes) {
         if (pendingEligible.has(node)) {
           if (node.hasAttribute?.(ATTR_CHAT_PAGE_NATIVE_HIDDEN)) {
             try { node.removeAttribute(ATTR_CHAT_PAGE_NATIVE_HIDDEN); mutations += 1; } catch {}
@@ -9177,11 +9926,22 @@
           mutations: mutations + cleared.mutations,
         };
       }
-      return { ok: true, status: 'pending', mutations, anchors: 0, materializationRequested: state.materializationRequested === true };
+      /* Navigation succeeded and presentation did not. Those are different
+         claims: the exact target still does not resolve, so the interaction
+         stays pending rather than reporting a completion it cannot show. No
+         further request is issued — the existing one is still the only one. */
+      return {
+        ok: true,
+        status: 'pending',
+        mutations,
+        anchors: 0,
+        materializationRequested: state.materializationRequested === true,
+        materialization,
+      };
     }
     const visible = new Set(mount.anchors);
-    for (const node of transaction.hostWrappers || []) {
-      if (node?.isConnected !== true || node.parentElement !== transaction.flowRoot) continue;
+    const surface = titleListCurrentProjectionNodes(transaction);
+    for (const node of surface.nodes) {
       if (visible.has(node)) {
         if (node.hasAttribute?.(ATTR_CHAT_PAGE_NATIVE_HIDDEN)) {
           try { node.removeAttribute(ATTR_CHAT_PAGE_NATIVE_HIDDEN); mutations += 1; } catch {}
@@ -9206,17 +9966,37 @@
           mutations += 1;
         }
       }
-      const flowChildren = Array.from(transaction.flowRoot.children || []);
-      const orderedAnchors = mount.anchors.slice().sort(
-        (a, b) => flowChildren.indexOf(a) - flowChildren.indexOf(b)
-      );
+      /* Suffix placement, Pass 5A: derived from the CURRENT root and the
+         CURRENT ordered anchors, with a re-check immediately before the write.
+         The anchor set can change between derivation and mutation, and a
+         best-effort append relative to stale state is what put the suffix in
+         the wrong place; here the write is simply abandoned instead. */
+      const currentRoot = surface.ok ? surface.root : collapsedPageFlowRootByIdentity(transaction.pageNum);
+      const flowChildren = currentRoot?.isConnected === true
+        ? Array.from(currentRoot.children || [])
+        : [];
+      const orderedAnchors = mount.anchors
+        .filter((anchor) => anchor?.isConnected === true && anchor.parentElement === currentRoot)
+        .sort((a, b) => flowChildren.indexOf(a) - flowChildren.indexOf(b));
       const lastAnchor = orderedAnchors[orderedAnchors.length - 1] || null;
-      if (!lastAnchor || lastAnchor.parentElement !== transaction.flowRoot) {
+      if (
+        currentRoot?.isConnected !== true
+        || !lastAnchor
+        || lastAnchor.isConnected !== true
+        || lastAnchor.parentElement !== currentRoot
+      ) {
         const cleared = clearTitleListNativeInPlaceProjection(transaction, { rehide: true });
         return { ...cleared, status: 'canonical-mount-position-unavailable-cleared', mutations: mutations + cleared.mutations };
       }
-      if (suffix.parentElement !== transaction.flowRoot || suffix.previousElementSibling !== lastAnchor) {
-        transaction.flowRoot.insertBefore(suffix, lastAnchor.nextSibling);
+      /* Placement is compared by CURRENT position, recomputed after the row
+         moves above. `previousElementSibling` is a convenience the host is not
+         obliged to expose on every surface, and treating its absence as "wrong
+         place" made the pass re-insert on every reconcile instead of settling. */
+      const placedChildren = Array.from(currentRoot.children || []);
+      const anchorIndex = placedChildren.indexOf(lastAnchor);
+      const suffixIndex = placedChildren.indexOf(suffix);
+      if (suffix.parentElement !== currentRoot || anchorIndex < 0 || suffixIndex !== anchorIndex + 1) {
+        currentRoot.insertBefore(suffix, lastAnchor.nextSibling);
         mutations += 1;
       }
     } catch {
@@ -9225,7 +10005,14 @@
     }
     state.pending = false;
     state.status = 'open';
-    return { ok: true, status: 'open', mutations, anchors: mount.anchors.length, suffixRows: Math.max(0, rows.length - selectedIndex - 1) };
+    return {
+      ok: true,
+      status: 'open',
+      mutations,
+      anchors: mount.anchors.length,
+      suffixRows: Math.max(0, rows.length - selectedIndex - 1),
+      materialization,
+    };
   }
 
   function openTitleListNativeInPlace(transaction = null, member = null) {
@@ -9522,15 +10309,10 @@
       return { ok: true, status: 'inactive', pageNum: num, rows: 0, released };
     }
     if (transaction) {
+      // Validation is itself identity-based now, so a projection sync
+      // re-resolves replacement elements as part of asking the question. The
+      // separate rebind step it used to need is gone.
       let current = validateCommittedAtomicPageCollapse(transaction);
-      if (!current.ok && typeof rebindCommittedAtomicPageCollapse === 'function') {
-        // Same identity maintenance the reconcile path performs: a projection
-        // sync must re-resolve replacement elements before it concludes the
-        // committed collapse is gone, or a remount during sync releases a
-        // projection the user never asked to expand.
-        const rebind = rebindCommittedAtomicPageCollapse(transaction);
-        if (rebind.ok) current = validateCommittedAtomicPageCollapse(transaction);
-      }
       if (!current.ok) {
         const pending = reconcilePendingTitleListMaterialization(transaction, reason);
         if (pending) {
@@ -9544,7 +10326,7 @@
             titleOnly: {
               ok: true,
               status: 'pending',
-              hidden: transaction.hostWrappers.length,
+              hidden: titleListCurrentProjectedCount(transaction),
               mutations: Number(pending.mutations || 0),
             },
           };
@@ -9570,7 +10352,7 @@
         titleOnly: {
           ok: true,
           status: 'collapsed',
-          hidden: transaction.hostWrappers.length,
+          hidden: titleListCurrentProjectedCount(transaction),
           mutations: 0,
         },
       };
@@ -9611,7 +10393,7 @@
     return {
       ok: true,
       status: 'current',
-      hidden: transaction.hostWrappers.length,
+      hidden: titleListCurrentProjectedCount(transaction),
       mutations: 0,
     };
   }

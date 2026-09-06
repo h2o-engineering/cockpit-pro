@@ -1028,7 +1028,25 @@ await fixture('23 no recursion or observer re-entry is introduced', () => {
 
 await fixture('24 Stage 2C-2d final-page and control derivation survive', () => {
   ok(CORE_SOURCE.includes('exact-terminal-page-artifact'), 'final-page terminal-tail anchoring retained');
-  ok(PAGE_SOURCE.includes('if (!explicitExpansion) {\n        applyExpandedCollapseControlState(num, id);\n      }'), 'authoritative expanded-control derivation retained');
+  /* Structural rather than an exact source literal. The protected block moved
+     from the collapse wrapper into the windowed expansion that wrapper now
+     delegates to; the guard, the call and the derivation are identical and only
+     the indentation depth changed, so matching the literal reported a pure
+     re-indentation as a lost invariant. The three guarantees the literal stood
+     for are asserted directly, and each of them still fails if the guard is
+     dropped, the call is removed, or an unguarded duplicate appears. */
+  const expandedControlCalls = [...PAGE_SOURCE.matchAll(/applyExpandedCollapseControlState\(num,\s*id\)/g)];
+  equal(expandedControlCalls.length, 1, 'exactly one expanded-control invocation on the protected path');
+  ok(
+    /if\s*\(\s*!explicitExpansion\s*\)\s*\{\s*applyExpandedCollapseControlState\(num,\s*id\)\s*;\s*\}/.test(PAGE_SOURCE),
+    'authoritative expanded-control derivation retained under its !explicitExpansion guard',
+  );
+  ok(
+    expandedControlCalls.every((call) => /if\s*\(\s*!explicitExpansion\s*\)\s*\{\s*$/.test(
+      PAGE_SOURCE.slice(Math.max(0, call.index - 160), call.index),
+    )),
+    'no unguarded expanded-control invocation exists',
+  );
   equal((PAGE_SOURCE.match(/typeof applyExpandedCollapseControlState/g) || []).length, 0, 'no test-harness guard leaked');
   equal((PAGE_SOURCE.match(/function executeAtomicPageCollapseTransaction\(/g) || []).length, 1, 'one collapse transaction owner');
 });
