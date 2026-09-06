@@ -656,7 +656,14 @@ if (failures.length === 0) {
   assertContains(autoExportFile, "source: 'folder-metadata-operation'", 'explicit Desktop folder mutation schedules record lastChange');
   assertContains(autoExportFile, "status: missing.length ? 'auto-export-subscriptions-partially-wired' : 'auto-export-subscriptions-wired'", 'auto-export retryable partial subscription wiring');
   assertContains(folderSyncFile, 'exportDesktopLatestForChrome', 'Desktop folder.syncNow desktop-to-chrome export branch');
-  assertContains(folderSyncFile, "mode: 'auto'", 'Desktop sync folder default auto import mode');
+  /* The default (absent) config is deliberately unconfigured: a fresh Desktop
+   * identity with no persisted 'h2o:studio:sync:config:v1' must not auto-start
+   * the watcher or auto-import from the shared HOME-relative sync folder.
+   * Automatic import remains fully available to an explicitly persisted auto
+   * mode, which still resolves the default sync folder. Behavioral proof lives
+   * in validate-folder-sync-fresh-desktop-bootstrap-isolation.mjs. */
+  assertContains(folderSyncFile, "if (merged.mode === 'auto' && !merged.folderPath) merged.folderPath = SYNC_FOLDER_NAME;", 'Desktop explicit auto import mode resolves the default sync folder');
+  assertContains(folderSyncFile, "if ((cfg.mode === 'notify' || cfg.mode === 'auto') && cfg.folderPath) {", 'Desktop boot auto-starts the watcher for a configured notify/auto mode');
   assertContains(folderSyncFile, "supportedDirections: ['chrome-to-desktop', 'desktop-to-chrome']", 'Desktop folder syncNow bidirectional direction marker');
   assertContains(folderSyncFile, 'desktopWritesLatestJson: true', 'Desktop folder facade latest.json write marker');
   assertContains(folderActionsFile, 'scheduleDesktopLatestExport', 'folder metadata action auto-export scheduling hook');
