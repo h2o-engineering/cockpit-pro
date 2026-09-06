@@ -1,4 +1,4 @@
-// @version 1.0.0
+// @version 1.1.0
 //
 // L-EXTENSION-INTERNAL-CHAT regression: a mounted answer whose turn is already committed
 // must not be published as a second logical turn.
@@ -10,6 +10,12 @@
 // logical turns and logical membership followed the mounted window instead of
 // the conversation. These fixtures pin the suppression and, just as important,
 // pin the cross-gap protection it must not weaken.
+//
+// commitTurnDrafts() has since moved to canonical-membership-only commitment
+// (f2633474). The unmatched-live loop now hydrates an existing canonical record
+// or suppresses, and creates no logical member at all, so unowned live evidence
+// has no append path to reach. The source pins below assert that wall directly
+// instead of ordering a creation call that no longer exists.
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -26,17 +32,13 @@ const source = fs.readFileSync(SOURCE_PATH, "utf8");
 /* The production helpers are function declarations inside the module IIFE, so
    the `const` statement anchor used elsewhere does not apply. Brace-match the
    declaration instead and fail closed on an ambiguous or unterminated name. */
-function extractFunction(name) {
-  const prefix = `  function ${name}(`;
-  const start = source.indexOf(prefix);
-  if (start < 0) throw new Error(`function-anchor-missing:${name}`);
-  if (source.indexOf(prefix, start + 1) >= 0) throw new Error(`function-anchor-ambiguous:${name}`);
+function sliceBracedRegion(text, start) {
   let depth = 0;
   let seenBody = false;
   let quote = "";
   let escaped = false;
-  for (let index = start; index < source.length; index += 1) {
-    const ch = source[index];
+  for (let index = start; index < text.length; index += 1) {
+    const ch = text[index];
     if (quote) {
       if (escaped) escaped = false;
       else if (ch === "\\") escaped = true;
@@ -47,10 +49,59 @@ function extractFunction(name) {
     if (ch === "{") { depth += 1; seenBody = true; continue; }
     if (ch === "}") {
       depth -= 1;
-      if (seenBody && depth === 0) return source.slice(start, index + 1).trimStart();
+      if (seenBody && depth === 0) return text.slice(start, index + 1);
     }
   }
-  throw new Error(`function-boundary-invalid:${name}`);
+  return null;
+}
+
+function extractFunction(name) {
+  const prefix = `  function ${name}(`;
+  const start = source.indexOf(prefix);
+  if (start < 0) throw new Error(`function-anchor-missing:${name}`);
+  if (source.indexOf(prefix, start + 1) >= 0) throw new Error(`function-anchor-ambiguous:${name}`);
+  const region = sliceBracedRegion(source, start);
+  if (region === null) throw new Error(`function-boundary-invalid:${name}`);
+  return region.trimStart();
+}
+
+/* The no-new-logical-turn pin must be scoped to the unmatched-live loop itself.
+   A whole-file search would be worse than useless here: `createTurnRecord(` and
+   `nextRecords.push(` both appear legitimately in the canonical-drafts
+   membership path, so a global ban would condemn correct code and a global
+   absence check would pass vacuously. Brace-match the loop and test its body. */
+const UNMATCHED_LIVE_LOOP_ANCHOR = "for (const draft of unmatchedLiveDrafts) {";
+
+function extractUnmatchedLiveLoop(text = source) {
+  const start = text.indexOf(UNMATCHED_LIVE_LOOP_ANCHOR);
+  if (start < 0) throw new Error("unmatched-live-loop-anchor-missing");
+  if (text.indexOf(UNMATCHED_LIVE_LOOP_ANCHOR, start + 1) >= 0) {
+    throw new Error("unmatched-live-loop-anchor-ambiguous");
+  }
+  const region = sliceBracedRegion(text, start);
+  if (region === null) throw new Error("unmatched-live-loop-boundary-invalid");
+  return region;
+}
+
+// Operations that would publish a new logical member out of live evidence.
+const NEW_LOGICAL_MEMBER_OPERATIONS = [
+  "createTurnRecord(",
+  "nextRecords.push(",
+  "nextRecords.splice(",
+];
+
+function newLogicalMemberOperationsIn(region) {
+  return NEW_LOGICAL_MEMBER_OPERATIONS.filter((operation) => region.includes(operation));
+}
+
+/* Falsification harness: re-inject a creation path into a copy of the loop body
+   so the pin is proven capable of failing, not merely observed absent. */
+function sourceWithOperationInjectedIntoLoop(operation) {
+  const region = extractUnmatchedLiveLoop();
+  const start = source.indexOf(region);
+  const injected = region.replace(/\}$/, `  ${operation}draft);\n    }`);
+  if (injected === region) throw new Error("loop-injection-failed");
+  return source.slice(0, start) + injected + source.slice(start + region.length);
 }
 
 const EXTRACTED = [
@@ -152,24 +203,35 @@ record("unowned-assistant-is-not-rebound-to-preceding-question", () => {
   assert.equal(decision.basis, "unclaimed-answer-identity");
 });
 
-// TEST D — an unclaimed unpaired assistant keeps the established behavior: the
-// caller falls through to the existing append path.
-record("unclaimed-answer-identity-falls-through-to-append", () => {
+// TEST D — an unclaimed unpaired assistant yields no owner. Under
+// canonical-membership-only commitment there is no append path to fall through
+// to, so this evidence simply remains unappended.
+record("unclaimed-answer-identity-remains-unappended", () => {
   const decision = canonicalCommittedAnswerOwner([ownedRecord()], assistantOnlyDraft(UNOWNED_A));
   assert.equal(decision.record, null);
   assert.equal(decision.candidateCount, 0);
   assert.equal(decision.basis, "unclaimed-answer-identity");
+  assert.deepEqual(
+    newLogicalMemberOperationsIn(extractUnmatchedLiveLoop()),
+    [],
+    "unclaimed live evidence must have no creation path to reach",
+  );
 });
 
 // TEST E — ambiguity fails closed: more than one claimant must not be resolved
-// by picking one.
-record("ambiguous-answer-ownership-fails-closed", () => {
+// by picking one, and the ambiguous evidence remains unappended.
+record("ambiguous-answer-ownership-fails-closed-and-remains-unappended", () => {
   const first = ownedRecord();
   const second = ownedRecord({ turnId: `turn:${OTHER_Q}`, turnNo: 2, qId: OTHER_Q });
   const decision = canonicalCommittedAnswerOwner([first, second], assistantOnlyDraft());
   assert.equal(decision.record, null, "an owner must never be invented");
   assert.equal(decision.basis, "ambiguous-answer-owner");
   assert.equal(decision.candidateCount, 2);
+  assert.deepEqual(
+    newLogicalMemberOperationsIn(extractUnmatchedLiveLoop()),
+    [],
+    "ambiguous live evidence must have no creation path to reach",
+  );
 });
 
 // Scope guard — a draft that carries its own question is not this repair's
@@ -195,15 +257,44 @@ record("conflicting-question-identity-disqualifies-owner", () => {
   assert.equal(decision.record, null, "cross-question answer overlap must not bind");
 });
 
-// Source-level pins: ordering and the cross-gap machinery this repair relies on.
-record("append-loop-consults-owner-before-creating-a-turn", () => {
-  const loop = source.indexOf("for (const draft of unmatchedLiveDrafts) {");
-  assert.ok(loop > 0, "append loop must exist");
-  const suppression = source.indexOf("chatAtlasBranchTransitionSuppressesLiveAppend()", loop);
-  const ownerCheck = source.indexOf("canonicalCommittedAnswerOwner(nextRecords, draft)", loop);
-  const create = source.indexOf("createTurnRecord('', nextRecords.length + 1)", loop);
-  assert.ok(suppression > loop && suppression < ownerCheck, "branch-transition suppression must stay first");
-  assert.ok(ownerCheck > loop && ownerCheck < create, "ownership must be resolved before a turn is created");
+// Source-level pins: ordering, canonical-owner resolution, and the membership
+// wall the unmatched-live loop must not cross.
+record("unmatched-live-loop-resolves-owner-and-creates-no-turn", () => {
+  const loop = extractUnmatchedLiveLoop();
+  const suppression = loop.indexOf("chatAtlasBranchTransitionSuppressesLiveAppend()");
+  const ownerCheck = loop.indexOf("canonicalCommittedAnswerOwner(nextRecords, draft)");
+  const bind = loop.indexOf("bindLiveAnswerEvidenceToOwner(");
+  assert.ok(suppression >= 0, "branch-transition suppression must remain in the loop");
+  assert.ok(ownerCheck >= 0, "canonical owner must be resolved inside the loop");
+  assert.ok(bind >= 0, "the resolved owner must receive the live answer evidence");
+  assert.ok(suppression < ownerCheck, "branch-transition suppression must stay first");
+  assert.ok(ownerCheck < bind, "ownership must be resolved before evidence is bound");
+
+  // The membership wall: live evidence hydrates an existing canonical record and
+  // never publishes a logical member of its own.
+  assert.deepEqual(
+    newLogicalMemberOperationsIn(loop),
+    [],
+    "unmatched live evidence must create no logical turn",
+  );
+
+  /* Not vacuous: both banned operations DO exist in this file, in the
+     canonical-drafts membership path, which this pin must not condemn. Their
+     absence from the loop is therefore a scoped fact, not a global one. */
+  for (const operation of ["createTurnRecord(", "nextRecords.push("]) {
+    assert.ok(source.includes(operation), `${operation} must still exist in the canonical-drafts path`);
+    assert.ok(!loop.includes(operation), `${operation} must not appear in the unmatched-live loop`);
+  }
+
+  // Falsifiable: the same detector must fire when a creation path is inserted.
+  for (const operation of NEW_LOGICAL_MEMBER_OPERATIONS) {
+    const poisoned = extractUnmatchedLiveLoop(sourceWithOperationInjectedIntoLoop(operation));
+    assert.deepEqual(
+      newLogicalMemberOperationsIn(poisoned),
+      [operation],
+      `the pin must fail when ${operation} is inserted into the loop`,
+    );
+  }
 });
 
 record("cross-gap-unpaired-assistant-machinery-remains", () => {
