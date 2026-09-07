@@ -6,6 +6,12 @@ chatgpt+chrome legacy configs at the top of `config/`.
 
 ## What goes here
 
+Engineering ownership follows semantics: `L-RUNTIME-KERNEL-SCOPE-EXT` owns
+the production meaning of loader admission, dependency/readiness ordering,
+tiers/waves, scheduling, and module lifecycle. The configuration/build tooling
+that materializes loader artifacts remains Developer engineering where
+applicable. This documentation boundary does not change any loader config.
+
 When a new host+browser combo is added, its config files land at:
 
 ```

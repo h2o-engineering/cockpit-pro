@@ -27,8 +27,9 @@ This directory crosses three distinct current Lane boundaries:
   validation, software publication/promotion, delivery provenance,
   activation, rollback, and recovery.
 
-Common Cockpit runtime/kernel semantics remain with
-`L-COCKPIT-RUNTIME-KERNEL`; feature meaning remains with the applicable
+Studio bootstrap, module admission, dependency/readiness ordering,
+registration, activation, and lifecycle remain with
+`L-RUNTIME-KERNEL-SCOPE-STU`; feature meaning remains with the applicable
 feature Lane. Shared Desktop Tauri files are classified by the semantics of
 each change. Cross-Lane edits use one home semantic owner plus a temporary
 narrow lease rather than co-primary ownership.

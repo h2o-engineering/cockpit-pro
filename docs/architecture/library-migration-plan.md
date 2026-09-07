@@ -19,7 +19,8 @@ establish a standing Lane Owner. Current durable engineering ownership is
 Management.
 
 The Library Lane owns the shared business boundary this Plan is moving toward:
-catalog and Chat Registry semantics, Index/read models, search/browse/recents,
+catalog and Chat Registry semantics, Index/read models, search/ranking/filters/
+snippets/browse/recents,
 Explorer/Insights, folders/categories/labels/tags/projects, organizational
 relationships and bindings, Library navigation/actions, and shared Library
 contracts/core. Studio being the preferred current Library UI does not make
@@ -38,6 +39,12 @@ Adjacent ownership remains separate:
   mean.
 - Studio Reader owns consumption of an opened conversation, and Studio
   Authoring owns authored notes/highlights/editing semantics.
+- Cockpit Knowledge Model owns semantic cross-item/fragment references,
+  anchors, provenance, backlinks, and semantic relationships. Library retains
+  only organizational relationships and catalog/search envelopes.
+- Studio Source Documents owns external/reference document versions and
+  extraction; Studio Canvas owns spatial composition. Their future records may
+  be cataloged by Library without transferring content ownership.
 
 This alignment does not change the Plan's historical phases, code disposition,
 storage decisions, or implementation state.

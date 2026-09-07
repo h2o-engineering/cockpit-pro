@@ -9,6 +9,9 @@ Define shared route, page-host, registry, and shell boundaries used by H2O inter
 - Library Core owns shared registries for owners, services, pages, routes, and views.
 - Feature modules own their data and UI. Core only coordinates registration, route dispatch, page hosting, and shared shell utilities.
 - Core route parsing must accept registered or reserved H2O views and reject unknown views.
+- These Library page/service registries are not executable module admission.
+  `L-RUNTIME-KERNEL-SCOPE-EXT` owns Extension bootstrap/module lifecycle and
+  `L-RUNTIME-KERNEL-SCOPE-STU` owns Studio bootstrap/module lifecycle.
 
 ## Route Contract
 - H2O page URLs use `h2o_flsc=1`, `h2o_flsc_view=<view>`, and optional `h2o_flsc_id=<id>`.

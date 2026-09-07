@@ -30,9 +30,10 @@ This Lane boundary does not absorb adjacent semantics:
 
 - `L-STUDIO-APPLICATION-SHELL` owns application-frame and Desktop UI placement
   geometry, including where host-backed controls are mounted.
-- `L-COCKPIT-RUNTIME-KERNEL` owns common Cockpit runtime/kernel semantics;
-  Host Integration adapts those contracts to Studio without co-primary kernel
-  ownership.
+- `L-RUNTIME-KERNEL-SCOPE-STU` owns Studio bootstrap, module admission,
+  dependency/readiness ordering, runtime/service registration, activation,
+  readiness, and lifecycle. Host Integration adapts stable ports to the Studio
+  environment without co-primary Runtime ownership.
 - `L-DEVELOPER-BUILD-DELIVERY-SCOPE-STU` owns how Studio host artifacts are
   built, packaged, staged, promoted, validated, activated, and recovered.
 - `L-COCKPIT-LIBRARY` owns Library business meaning, Saved Chats Storage owns

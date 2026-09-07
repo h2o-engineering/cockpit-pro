@@ -2,6 +2,16 @@
 
 Established in Phase 8G-2 (2026-05-19).
 
+## Engineering Lane Boundary
+
+This subtree contains build-time extension generators and packaging mechanics,
+which remain Developer engineering responsibilities where applicable. The
+generated Extension loader's admission, dependency/readiness ordering,
+tiers/waves, scheduling, activation, and module-lifecycle semantics belong to
+`L-RUNTIME-KERNEL-SCOPE-EXT`. Generator location does not transfer production
+runtime semantics to Build tooling, and generated runtime behavior does not
+make Runtime the owner of packaging mechanics.
+
 Each subdirectory hosts the build pipeline for one extension product:
 
 ```

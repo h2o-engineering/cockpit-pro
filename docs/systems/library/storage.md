@@ -8,11 +8,18 @@ Define Library storage ownership and persistence boundaries.
 ## Lane Boundary
 
 `L-COCKPIT-LIBRARY` owns Library catalog, registry, Index/read-model,
-organization, relationship, and action semantics represented by these keys.
+organization, organizational-relationship, and action semantics represented
+by these keys.
 `L-STORAGE-SAVED-CHATS` owns durable saved-chat/archive representation,
 serialization, retention, recovery, and durability; it does not absorb Library
 meaning merely because Library records are persisted. Cross-surface transport
 and convergence remain with `L-PLATFORM-SYNC`.
+
+Semantic cross-item or cross-fragment relationships, anchors, and provenance
+belong to `L-COCKPIT-KNOWLEDGE-MODEL`, even when a Library envelope indexes
+them. Generic binary payloads target `L-STORAGE-BINARY-ASSETS`; the current
+saved-chat CAS remains under the Saved Chats incumbent implementation boundary
+until an explicit extraction Mission.
 
 ## Library Workspace Storage
 - Library Workspace owns `h2o:prm:cgx:library:ui:v1` for UI preferences such as active workspace tab, query, and view mode.

@@ -5,6 +5,12 @@
 
 This contract exists to stop circular redesigns where one patch violates rules an earlier patch established. **This document is the source of truth for product behavior — not the current runtime implementation.** Where the runtime disagrees with this contract, the runtime is wrong (see “Forbidden Regression Patterns / Runtime Failures To Prove Against”).
 
+**Engineering Lane boundary:** `L-RUNTIME-KERNEL-SCOPE-EXT` owns Extension
+module admission, bootstrap, ordering, readiness, activation, and lifecycle
+infrastructure. This file governs feature/mechanism semantics owned by their
+applicable feature Lanes. Its physical location under `src-runtime-base/` does
+not transfer those semantics to Runtime.
+
 A failing debug snapshot is **not** automatically a runtime failure. A snapshot is evidence only when its classification is correct (see §8F): a stacked/rehosted title bar counted as an in-flow duplicate, or an absent active-flash reported as a missing-active-style failure, is a **debug false positive**, not a contract violation. Prove the classification before declaring a failure.
 
 ---

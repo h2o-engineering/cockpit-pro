@@ -20,8 +20,10 @@ The five contracts that govern Studio development are in this folder. Read in or
   structural composition, Host Integration owns its environment adapters,
   Cockpit Library owns cross-surface Library semantics, and Build & Delivery
   owns Studio software packaging/artifact delivery. Reader, Renderer,
-  Authoring, Saved Chats Storage, Platform Sync, and Cockpit Runtime Kernel
-  retain their separate semantic boundaries.
+  Authoring, Canvas, Source Documents, Knowledge Model, Binary Assets, Saved
+  Chats Storage, Platform Sync, and Studio Runtime retain separate semantic
+  boundaries. The latter four newly admitted capability boundaries do not imply
+  that future modules or CAS extraction have already been implemented.
 - Studio code must not call `chrome.*` directly. Go through `H2O.Studio.platform.*`.
 - Studio code must not query live chatgpt.com DOM. Consume normalized records via the CaptureSource interface.
 - Studio persistence goes through `H2O.Studio.store`. No scattered `chrome.storage` / `localStorage` / `IndexedDB` calls in feature code.
@@ -84,6 +86,12 @@ src-surfaces-base/studio/
 ```
 
 ## How Studio Boots Today
+
+Bootstrap, module admission, dependency/readiness ordering, activation, and
+lifecycle are owned by `L-RUNTIME-KERNEL-SCOPE-STU`. The current explicit
+script-tag sequence remains unchanged by this documentation adoption; future
+contribution modules should enter through stable Runtime contracts rather than
+each extending the global bootstrap surface manually.
 
 1. Service worker (`bg.js`) opens `chrome-extension://<id>/src-surfaces-base/studio/studio.html` in a panel/window.
 2. `studio.html` loads `studio.js` plus the 30+ `S*.Studio.js` modules in numeric order via `<script>` tags.

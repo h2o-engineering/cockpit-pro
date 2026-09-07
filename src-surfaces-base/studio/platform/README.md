@@ -8,9 +8,10 @@ Engineering Lane: `L-STUDIO-HOST-INTEGRATION` owns the environment-selection,
 host messaging, IPC/command, filesystem, clipboard, and runtime-adapter
 semantics in this folder. `selectors.contract.js` is colocated for proximity
 but serves Reader/Renderer contracts; colocation does not transfer its feature
-semantics. Application Shell owns placement geometry, Cockpit Runtime Kernel
-owns common runtime/kernel semantics, and Build & Delivery owns packaging and
-artifact-delivery mechanics. Shared bridge files use temporary narrow leases
+semantics. Application Shell owns placement geometry,
+`L-RUNTIME-KERNEL-SCOPE-STU` owns Studio bootstrap, module admission,
+readiness, registration, activation, and lifecycle, and Build & Delivery owns
+packaging and artifact-delivery mechanics. Shared bridge files use temporary narrow leases
 when another Lane must edit them; there is no co-primary ownership.
 
 ## What This Folder Is

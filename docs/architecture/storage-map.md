@@ -12,6 +12,19 @@ representation, serialization, retention, recovery, and durability.
 `L-PLATFORM-SYNC` owns cross-surface propagation and convergence. Persistence
 or transport does not transfer Library business semantics.
 
+`L-STORAGE-BINARY-ASSETS` owns the admitted generic shared binary/CAS target
+authority: immutable payloads, hash identity, deduplication, generic verified
+put/get, `AssetRef`, MIME/size metadata, streaming, and shared binary
+durability. This documentation round does not extract the current saved-chat
+CAS. `L-STORAGE-SAVED-CHATS` remains the safety-sensitive incumbent owner of
+its current CAS implementation and saved-chat package/dependency semantics
+until an explicitly authorized extraction Mission.
+
+Source Documents owns document versions, parsing, extraction, and page
+structure over generic source-file bytes. Canvas owns placement and meaning of
+binary assets used as Canvas elements. Storage location alone does not transfer
+those semantics to Binary Assets.
+
 ## Library Storage
 - `h2o:prm:cgx:library:ui:v1` belongs to Library Workspace.
 - `h2o:prm:cgx:library-workspace:sidebar-layout:v1` belongs to Library Workspace.

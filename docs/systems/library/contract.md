@@ -20,7 +20,8 @@ This page should not duplicate the content of those documents. When a contract a
 
 `L-COCKPIT-LIBRARY` owns the durable cross-surface Library Product capability:
 Library workspace/business behavior, catalog and Chat Registry semantics,
-Library Index/read models, search, browse/recents, Explorer/Insights semantics,
+Library Index/read models, search, ranking, filters, snippets, browse/recents,
+Explorer/Insights semantics,
 folders, categories, labels, tags, projects, organizational relationships and
 bindings, Library-specific navigation/actions, and shared Library contracts and
 core logic.
@@ -41,9 +42,23 @@ The adjacent boundaries are explicit:
   sidebar slots are structurally mounted in Studio.
 - `L-STUDIO-READER` owns consumption of an opened conversation.
 - `L-STUDIO-AUTHORING` owns authored notes, highlights, and editing semantics.
+- `L-COCKPIT-KNOWLEDGE-MODEL` owns semantic cross-item and cross-fragment
+  references, anchors, provenance, backlinks, and semantic relationships.
+- `L-STUDIO-SOURCE-DOCUMENTS` owns external/reference document structure,
+  versions, parsing, and extraction; `L-STUDIO-CANVAS` owns Canvas spatial
+  composition and Canvas-local relations.
 
-Library owns what a Library entry, relationship, route, or action means; the
-Application Shell owns where its Studio entry or route is structurally mounted.
+Library owns what a catalog entry, organizational relationship, search result,
+route, or action means; the Application Shell owns where its Studio entry or
+route is structurally mounted. Item-to-folder/project/category/label/tag
+bindings are Library relationships. Relations such as `supports`,
+`contradicts`, or `derived-from` between exact items or fragments belong to
+Knowledge Model.
+
+Generic Library item kinds may include `captured_chat`, `editable_chat`,
+`native_note`, `source_document`, `canvas`, and future kinds. Library owns the
+catalog/search/discovery envelope only; content semantics remain with the
+applicable owner.
 A narrow cross-Lane edit to `studio.html`, `studio.css`, `studio.js`, Ribbon,
 Dock, or sidebar composition uses a temporary lease and does not create
 co-primary ownership.

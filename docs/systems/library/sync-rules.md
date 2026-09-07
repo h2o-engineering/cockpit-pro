@@ -7,12 +7,17 @@ Define allowed data-flow direction between Library surfaces, source scanners, an
 
 ## Lane Boundary
 
-`L-COCKPIT-LIBRARY` owns what Library records, relationships, Index views, and
-actions mean. `L-PLATFORM-SYNC` owns propagation, reconciliation, conflict
+`L-COCKPIT-LIBRARY` owns what Library records, organizational relationships,
+Index views, and actions mean. `L-PLATFORM-SYNC` owns propagation, reconciliation, conflict
 handling, and convergence between Product surfaces. A module named “Library
 Sync” may carry the Platform Sync mechanism, but its name does not give Sync
 ownership of Library business semantics. Durable saved-chat/archive
 representation remains with `L-STORAGE-SAVED-CHATS`.
+
+Knowledge Model defines semantic Anchor/reference/relationship meaning. Canvas,
+Source Documents, Library, and Storage define their respective records. Each
+owner supplies an approved sync projection or adapter; Platform Sync owns how
+those projections propagate and converge, not their Domain semantics.
 
 ## Data Flow
 - Native Recents DOM/cache -> Library Index -> Library Workspace Recents, Explorer, Analytics.

@@ -13,13 +13,22 @@ This document supersedes scattered storage assumptions inside `src-surfaces-base
 ## Lane Boundary
 
 This façade does not make all persisted semantics one Lane. Cockpit Library
-owns Library catalog, Index, organization, relationship, and action meaning.
+owns Library catalog, Index, organization, organizational-relationship, and
+action meaning. Cockpit Knowledge Model owns semantic references, anchors,
+provenance, and cross-item/fragment relationships. Studio Canvas owns Canvas
+spatial/content semantics and Studio Source Documents owns external/reference
+document versions, parsing, and extraction.
 Saved Chats Storage owns durable archive/saved-chat representation,
 serialization, retention, recovery, and durability. Platform Sync owns
 cross-surface propagation and convergence. Studio Host Integration owns the
 concrete MV3/Tauri/OS storage bridge, not the business meaning of records that
 pass through it. Classify ownership by the semantic operation, not by the fact
 that bytes are persisted or a module uses the word “publication.”
+
+`L-STORAGE-BINARY-ASSETS` owns the generic shared binary/CAS target authority.
+The existing mature saved-chat CAS implementation remains under
+`L-STORAGE-SAVED-CHATS` until an explicit extraction Mission transfers proven
+generic primitives. This contract does not claim or implement that extraction.
 
 ## The Façade: `H2O.Studio.store`
 

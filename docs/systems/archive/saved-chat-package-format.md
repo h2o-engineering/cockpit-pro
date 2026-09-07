@@ -14,6 +14,23 @@ Related:
 - [Saved Chat Package v3 Contract](saved-chat-package-v3.md) — normative M02 v3 contract; implementation pending
 - [Chat Saving Architecture — Phase B Closure Note](chat-saving-phase-b-closure.md)
 
+## Current Lane Authority Overlay
+
+```text
+AUTHORITY_TARGET=L-STORAGE-BINARY-ASSETS
+CURRENT_SAFETY_SENSITIVE_INCUMBENT_IMPLEMENTATION=L-STORAGE-SAVED-CHATS
+CAS_EXTRACTION_STATUS=NOT_PERFORMED
+```
+
+The accepted historical Phase C/CAS decisions below remain accurate for the
+incumbent saved-chat implementation. The current durable architecture now
+assigns generic shared binary/CAS responsibility to
+`L-STORAGE-BINARY-ASSETS`, while `L-STORAGE-SAVED-CHATS` retains saved-chat
+package/dependency semantics and the mature incumbent CAS implementation until
+an explicit extraction Mission transfers proven reusable primitives. This
+documentation adoption neither changes the implementation nor rewrites the
+historical Phase C evidence.
+
 ## Purpose
 
 This is the **versioned umbrella** for the H2O Studio saved-chat package format. It

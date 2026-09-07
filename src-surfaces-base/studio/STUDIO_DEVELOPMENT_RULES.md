@@ -72,13 +72,20 @@ the owner:
 - `L-STUDIO-HOST-INTEGRATION` owns `H2O.Studio.platform.*`, MV3/Tauri adapter
   selection, messaging/IPC, filesystem, clipboard, and host runtime bridges.
 - `L-COCKPIT-LIBRARY` owns Library catalog/index/search/browse/organization
-  meaning and shared Library business contracts; Platform Sync owns
+  meaning and organizational bindings; `L-COCKPIT-KNOWLEDGE-MODEL` owns
+  semantic cross-item/fragment references, anchors, and provenance; Platform Sync owns
   propagation/convergence and Saved Chats Storage owns archive durability.
+- `L-STUDIO-CANVAS` owns spatial Canvas semantics;
+  `L-STUDIO-SOURCE-DOCUMENTS` owns external/reference document versions,
+  parsing, and extraction; `L-STORAGE-BINARY-ASSETS` owns the generic binary
+  storage target authority without claiming the current saved-chat CAS has
+  already been extracted.
 - `L-DEVELOPER-BUILD-DELIVERY-SCOPE-STU` owns Studio build, package, stage,
   software/artifact publication, promotion, delivery provenance, activation,
   rollback, recovery, and delivery validation.
-- `L-COCKPIT-RUNTIME-KERNEL` retains common Cockpit runtime/kernel semantics;
-  Host Integration only adapts them to Studio's environment.
+- `L-RUNTIME-KERNEL-SCOPE-STU` owns Studio bootstrap, module admission,
+  dependency/readiness ordering, registration, activation, and lifecycle;
+  Host Integration only adapts stable ports to Studio's environment.
 
 `studio.html`, `studio.css`, `studio.js`, `S0Y1a` Studio Ribbon, shared
 Dock/Ribbon surfaces, `platform.tauri.js`, and Desktop Tauri files are shared

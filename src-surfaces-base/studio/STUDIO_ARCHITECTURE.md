@@ -14,8 +14,10 @@ Studio is a **portable workspace application surface** for captured chats. It is
 
 Studio's long-term role is closer to Notion / OneNote / Obsidian than to a userscript:
 
-- a library of captured and imported chats
-- a structured knowledge database (folders, projects, categories, labels, tags)
+- a Library catalog of captured/imported chats and future Product item kinds
+- structured organization (folders, projects, categories, labels, tags)
+- future semantic references/provenance, source documents, and spatial Canvas
+  capabilities under their own Lane boundaries
 - a reader that re-renders chats with visual parity to ChatGPT but full Studio control over the DOM
 - a workspace for activities over saved chats: MiniMap navigation, inline highlights, quote tracking, answer/question wash, timestamps, answer numbering, insights
 - a host for future workflows over saved knowledge
@@ -31,11 +33,15 @@ owner.
 | Lane | Primary responsibility here | Boundary |
 |---|---|---|
 | `L-STUDIO-APPLICATION-SHELL` | Top-level application frame, route/view containers, app navigation shell, global scroll roots, Desktop chrome/safe-area composition, sidebar/rail/stage/topbar structure, and Ribbon/Dock host placement | Owns where features mount, not what feature actions or records mean |
-| `L-STUDIO-HOST-INTEGRATION` | `H2O.Studio.platform.*`, environment selection, MV3/Tauri adapters, messaging/IPC, filesystem, clipboard, and host runtime bridges | Adapts Studio ports to host APIs; does not own shared Runtime Kernel semantics or Shell geometry |
-| `L-COCKPIT-LIBRARY` | Cross-surface Library catalog, Chat Registry, Index/read models, search/browse/recents, insights, organization, relationships, bindings, and Library actions/contracts | Owns Library meaning; not archive durability, sync convergence, or Studio mount geometry |
+| `L-STUDIO-HOST-INTEGRATION` | `H2O.Studio.platform.*`, environment selection, MV3/Tauri adapters, messaging/IPC, filesystem, clipboard, and host runtime bridges | Adapts Studio ports to host APIs; does not own Studio Runtime lifecycle or Shell geometry |
+| `L-RUNTIME-KERNEL-SCOPE-STU` | Studio bootstrap, module admission, dependency/readiness ordering, runtime/service registration, activation, disposal, health, and lifecycle | Owns how accepted Studio modules become operational; not Shell geometry, host adaptation, build packaging, or feature meaning |
+| `L-COCKPIT-LIBRARY` | Cross-surface Library catalog, Chat Registry, Index/read models, search/ranking/filters/snippets/browse/recents, insights, organization, organizational bindings, and Library actions/contracts | Owns Library catalog/search/discovery meaning; not semantic fragment relationships, content meaning, archive durability, sync convergence, or Studio mount geometry |
+| `L-COCKPIT-KNOWLEDGE-MODEL` | Shared semantic references, anchors, provenance, backlinks, cross-item/fragment relationships, and semantic projections/contracts | Owns how exact things/fragments refer semantically; not Library organization or Renderer implementation |
+| `L-STUDIO-CANVAS` | Canvas document model, spatial composition, visual-local relations, Canvas persistence, and Canvas engine behavior | Shell owns mount/pane geometry; Knowledge Model owns Product-semantic relations; Binary Assets owns generic bytes |
+| `L-STUDIO-SOURCE-DOCUMENTS` | External/reference source-document versions, parsing, extraction, page geometry, OCR/document metadata, and document projections | Authoring owns native authored content; Binary Assets owns generic file bytes; Reader/Renderer own consumption/rendering |
 | `L-DEVELOPER-BUILD-DELIVERY-SCOPE-STU` | Studio build, package, stage, software/artifact publication, promotion, delivery provenance, activation, rollback, recovery, and Desktop bundles | Owns delivery mechanics, not runtime feature semantics or saved-chat “publication” |
-| `L-COCKPIT-RUNTIME-KERNEL` | Common Cockpit runtime/kernel semantics | Host Integration may adapt the kernel to Studio but does not share primary kernel ownership |
 | `L-STORAGE-SAVED-CHATS` | Durable saved-chat/archive representation, serialization, retention, recovery, and durability | Does not own Library discovery/organization meaning |
+| `L-STORAGE-BINARY-ASSETS` | Generic immutable binary payloads, content/hash identity, deduplication, `AssetRef`, streaming, and shared CAS mechanics | Current saved-chat CAS implementation stays incumbent under Saved Chats until an explicit extraction Mission |
 | `L-PLATFORM-SYNC` | Cross-surface propagation, conflict handling, and convergence | Does not own Library business semantics |
 | `L-STUDIO-READER`, `L-STUDIO-RENDERER`, `L-STUDIO-AUTHORING` | Opened-conversation consumption, content projection, and authoring semantics respectively | May use Shell-owned structural slots through temporary narrow leases |
 
@@ -49,11 +55,12 @@ ownership.
 
 | Layer | Owns | Does NOT own |
 |---|---|---|
-| **Studio Product surface** | Hosts Shell, Library, Reader, Renderer, Authoring, and Host Integration implementations according to the Lane boundaries above | A single umbrella Lane; capturing live ChatGPT chats; user auth/identity; service-worker-only behaviors |
+| **Studio Product surface** | Hosts Shell, Runtime, Library, Reader, Renderer, Authoring, and Host Integration implementations according to the Lane boundaries above | A single umbrella Lane; capturing live ChatGPT chats; user auth/identity; service-worker-only behaviors |
 | **Browser Capture Extension** (current native content scripts on chatgpt.com) | Observing chatgpt.com DOM. Snapshotting turns. Streaming new turns. Writing snapshots to the archive bridge. | Workspace UI. Knowledge organization. User-facing chat reader. |
-| **Platform Adapter / Host Integration** (see `STUDIO_PLATFORM_ADAPTER_GUIDE.md`) | Host messaging, capture intake bridge, file I/O, env detection, runtime URL resolution, and concrete MV3/Tauri adaptation | Domain logic, UI geometry, common Cockpit Runtime Kernel semantics |
+| **Platform Adapter / Host Integration** (see `STUDIO_PLATFORM_ADAPTER_GUIDE.md`) | Host messaging, capture intake bridge, file I/O, env detection, runtime URL resolution, and concrete MV3/Tauri adaptation | Domain logic, UI geometry, Studio module admission/readiness/lifecycle |
+| **Studio Runtime** | Bootstrap, module admission, dependency/readiness ordering, runtime/service registration, activation, disposal, health, and failure/recovery semantics | Shell geometry, host adaptation, build/package mechanics, or feature semantics |
 | **Storage Adapter** (concrete implementation behind the StudioStore façade) | Persistence implementation: today IndexedDB + localStorage + `chrome.storage.local`; tomorrow SQLite via `tauri-plugin-sql` | Library business semantics; schema meaning; UI components |
-| **Shared Library contracts/core** | Library record/catalog/index/organization meaning and pure normalizers used across surfaces | Storage durability backend, sync transport/convergence, or surface UI geometry |
+| **Shared Library contracts/core** | Library record/catalog/index/organization/search meaning and pure normalizers used across surfaces | Semantic fragment relationships, content meaning, storage durability backend, sync transport/convergence, or surface UI geometry |
 | **Identity Surface** (`src-surfaces-base/identity/`) | Auth UI and token state. | Studio cannot perform auth directly; it consumes `H2O.Identity` state via events only. |
 
 ## Current Source Responsibility Map
@@ -77,8 +84,13 @@ boundaries:
 - **Host Integration** — the `platform/` adapters and Studio-specific host
   bridge surfaces. Archive/storage semantics behind a bridge retain their
   Saved Chats Storage boundary.
-- **Cockpit Runtime Kernel** — common bus/runtime primitives consumed through
-  Studio variants; environment-specific adaptation stays with Host Integration.
+- **Studio Runtime** — current/future bootstrap, module admission, readiness,
+  runtime/service registration, activation, and lifecycle primitives consumed
+  by Studio modules; environment-specific adaptation stays with Host Integration.
+- **Knowledge Model / Canvas / Source Documents / Binary Assets** — current
+  ownership boundaries for future shared semantic-reference, spatial Canvas,
+  external source-document, and generic binary capabilities. This document
+  does not claim those future modules or the Saved Chat CAS extraction exist.
 
 Studio does **not** own `src-surfaces-base/desk/` (live chatgpt.com decoration), `src-surfaces-base/identity/`, the service worker (`bg.js`), or content scripts (`loader.js`).
 
@@ -123,6 +135,9 @@ Studio feature code in both pictures is **the same code**. Only the adapters und
 4. **Messaging inside Studio uses `H2O.events`.** Direct extension messaging (`chrome.runtime.sendMessage`) is allowed only inside the Platform Adapter, never in feature code. Cross-surface sync goes through the Library Sync façade, which is itself adapter-backed.
 5. **Replay DOM uses ChatGPT-compatible data attributes.** Selectors are centralized; feature code uses named selector constants rather than literal CSS strings.
 6. **The Tauri-readiness checklist (`STUDIO_DEVELOPMENT_RULES.md`) is consulted before adding any new feature.**
+7. **Studio modules enter through the Runtime boundary.** New contribution
+   modules should register through stable admission/readiness/lifecycle
+   contracts rather than each extending global bootstrap manually.
 
 ## Why This Matters Now (Not Later)
 
