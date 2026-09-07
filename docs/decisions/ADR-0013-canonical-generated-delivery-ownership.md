@@ -2,8 +2,22 @@
 
 - Status: Proposed foundation; live enforcement not enabled
 - Date: 2026-07-29
-- Lane: Canonical generated delivery
+- Current Lane: `L-DEVELOPER-BUILD-DELIVERY-SCOPE-STU`
+- Former canonical Lane ID: `L-STUDIO-INFRASTRUCTURE` (legacy provenance)
 - Scope: Cross-worktree publication ownership, inspection, and proof
+
+## Current Lane Alignment
+
+Studio software/artifact generation, staging, publication/promotion,
+provenance receipts, activation, retained generations, rollback/recovery, and
+delivery validation belong to the continuing Studio Build & Delivery
+Engineering Lane. The identity normalization preserves this ADR and its
+historical evidence; it does not create a residual Studio Infrastructure Lane
+or change the proposed enforcement state recorded here.
+
+Saved-chat data/package publication is outside this ADR's software-delivery
+meaning and remains with Saved Chats Storage or Platform Sync according to the
+semantic operation.
 
 ## Context
 

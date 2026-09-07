@@ -60,6 +60,32 @@ Q: Does it need to know if the user is signed in?
 You are now free to write feature code in pure DOM + H2O.events + H2O.Studio.store.
 ```
 
+## Lane Boundary Check
+
+Classify the semantic responsibility before treating a shared Studio file as
+the owner:
+
+- `L-STUDIO-APPLICATION-SHELL` owns application-frame composition, app-level
+  route/view containers, navigation shell, global scroll roots, Desktop
+  chrome/safe-area structure, sidebar/rail/stage/topbar structure, and
+  Ribbon/Dock host-placement geometry.
+- `L-STUDIO-HOST-INTEGRATION` owns `H2O.Studio.platform.*`, MV3/Tauri adapter
+  selection, messaging/IPC, filesystem, clipboard, and host runtime bridges.
+- `L-COCKPIT-LIBRARY` owns Library catalog/index/search/browse/organization
+  meaning and shared Library business contracts; Platform Sync owns
+  propagation/convergence and Saved Chats Storage owns archive durability.
+- `L-DEVELOPER-BUILD-DELIVERY-SCOPE-STU` owns Studio build, package, stage,
+  software/artifact publication, promotion, delivery provenance, activation,
+  rollback, recovery, and delivery validation.
+- `L-COCKPIT-RUNTIME-KERNEL` retains common Cockpit runtime/kernel semantics;
+  Host Integration only adapts them to Studio's environment.
+
+`studio.html`, `studio.css`, `studio.js`, `S0Y1a` Studio Ribbon, shared
+Dock/Ribbon surfaces, `platform.tauri.js`, and Desktop Tauri files are shared
+hotspots. Give each change one home semantic owner. When another Lane must
+touch a hotspot, use a temporary narrow lease for the exact files/slot and do
+not claim co-primary ownership.
+
 ## Allowed Patterns
 
 Feature code under `src-surfaces-base/studio/` may freely use:

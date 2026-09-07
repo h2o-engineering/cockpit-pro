@@ -22,29 +22,63 @@ Studio's long-term role is closer to Notion / OneNote / Obsidian than to a users
 
 Today Studio runs inside an MV3 extension page (`studio.html`). Tomorrow it should be able to run inside a Tauri WebView on macOS with no rewrite of feature code — only swaps in the platform/storage/capture adapters.
 
+## Engineering Lane Boundaries
+
+Studio is a Product surface shared by several Engineering Lanes; physical
+location under `src-surfaces-base/studio/` does not make one Lane the umbrella
+owner.
+
+| Lane | Primary responsibility here | Boundary |
+|---|---|---|
+| `L-STUDIO-APPLICATION-SHELL` | Top-level application frame, route/view containers, app navigation shell, global scroll roots, Desktop chrome/safe-area composition, sidebar/rail/stage/topbar structure, and Ribbon/Dock host placement | Owns where features mount, not what feature actions or records mean |
+| `L-STUDIO-HOST-INTEGRATION` | `H2O.Studio.platform.*`, environment selection, MV3/Tauri adapters, messaging/IPC, filesystem, clipboard, and host runtime bridges | Adapts Studio ports to host APIs; does not own shared Runtime Kernel semantics or Shell geometry |
+| `L-COCKPIT-LIBRARY` | Cross-surface Library catalog, Chat Registry, Index/read models, search/browse/recents, insights, organization, relationships, bindings, and Library actions/contracts | Owns Library meaning; not archive durability, sync convergence, or Studio mount geometry |
+| `L-DEVELOPER-BUILD-DELIVERY-SCOPE-STU` | Studio build, package, stage, software/artifact publication, promotion, delivery provenance, activation, rollback, recovery, and Desktop bundles | Owns delivery mechanics, not runtime feature semantics or saved-chat “publication” |
+| `L-COCKPIT-RUNTIME-KERNEL` | Common Cockpit runtime/kernel semantics | Host Integration may adapt the kernel to Studio but does not share primary kernel ownership |
+| `L-STORAGE-SAVED-CHATS` | Durable saved-chat/archive representation, serialization, retention, recovery, and durability | Does not own Library discovery/organization meaning |
+| `L-PLATFORM-SYNC` | Cross-surface propagation, conflict handling, and convergence | Does not own Library business semantics |
+| `L-STUDIO-READER`, `L-STUDIO-RENDERER`, `L-STUDIO-AUTHORING` | Opened-conversation consumption, content projection, and authoring semantics respectively | May use Shell-owned structural slots through temporary narrow leases |
+
+The principal shared shell hotspots are `studio.html`, `studio.css`,
+`studio.js`, `S0Y1a` Studio Ribbon, and the shared Dock/Ribbon surfaces. Each
+change has one semantic home owner. Cross-Lane edits use a temporary narrow
+lease for the exact structural slot; shared files do not imply co-primary
+ownership.
+
 ## Ownership Map
 
 | Layer | Owns | Does NOT own |
 |---|---|---|
-| **Studio** | Workspace UI, library view, reader/replay, local operations over saved chats, knowledge workflows (MiniMap, Highlights, Wash, Quote Tracker, Answer Numbers, Timestamps, Title Bar), Library Workspace/Index/Insights/Sync, command bar plugins for library |  Capturing live ChatGPT chats. Native-host runtime. User auth/identity. Service-worker–only behaviors. |
+| **Studio Product surface** | Hosts Shell, Library, Reader, Renderer, Authoring, and Host Integration implementations according to the Lane boundaries above | A single umbrella Lane; capturing live ChatGPT chats; user auth/identity; service-worker-only behaviors |
 | **Browser Capture Extension** (current native content scripts on chatgpt.com) | Observing chatgpt.com DOM. Snapshotting turns. Streaming new turns. Writing snapshots to the archive bridge. | Workspace UI. Knowledge organization. User-facing chat reader. |
-| **Platform Adapter** (new layer, see `STUDIO_PLATFORM_ADAPTER_GUIDE.md`) | Storage, messaging, capture intake, file I/O, env detection, runtime URL resolution. | Domain logic. UI. |
-| **Storage Adapter** (concrete implementation behind the StudioStore façade) | Persistence implementation: today IndexedDB + localStorage + `chrome.storage.local`; tomorrow SQLite via `tauri-plugin-sql`. | Schema definitions (those live in shared domain models). |
-| **Shared Domain Models** (`@h2o-studio/types`, `@h2o-studio/core`) | Record shapes for chat, turn, snapshot, project, folder, label, tag, category, capture, import; normalizers and migrations. | Storage backend choice. UI components. |
+| **Platform Adapter / Host Integration** (see `STUDIO_PLATFORM_ADAPTER_GUIDE.md`) | Host messaging, capture intake bridge, file I/O, env detection, runtime URL resolution, and concrete MV3/Tauri adaptation | Domain logic, UI geometry, common Cockpit Runtime Kernel semantics |
+| **Storage Adapter** (concrete implementation behind the StudioStore façade) | Persistence implementation: today IndexedDB + localStorage + `chrome.storage.local`; tomorrow SQLite via `tauri-plugin-sql` | Library business semantics; schema meaning; UI components |
+| **Shared Library contracts/core** | Library record/catalog/index/organization meaning and pure normalizers used across surfaces | Storage durability backend, sync transport/convergence, or surface UI geometry |
 | **Identity Surface** (`src-surfaces-base/identity/`) | Auth UI and token state. | Studio cannot perform auth directly; it consumes `H2O.Identity` state via events only. |
 
-## What Studio Owns
+## Current Source Responsibility Map
 
-Concretely, Studio owns these modules under `src-surfaces-base/studio/`:
+The current modules under `src-surfaces-base/studio/` participate in these
+boundaries:
 
-- **Workspace runtime** — `S0F0a` Library Surface Host, `S0F1a` Library Core, `S0F1b` Library Workspace, `S0F1c` Library Index, `S0F1d` Library Insights, `S0F1e` Library Store, `S0F1f` Library Maintenance, `S0F1g` Chat Registry, `S0F1h` Library Sync.
-- **Knowledge features** — `S0F2a` Projects, `S0F3a` Folders, `S0F4a` Categories, `S0F5a` Tags, `S0F6a` Labels.
-- **Reader decorations** — `S1A1a–S1A1f` MiniMap, `S1A2a` Answer Wash, `S1A3a` Highlight Dots, `S2A1a` Question Wrapper, `S2B1a` Quote Tracker, `S2C1a` Question Wash, `S1C1a` Turn Title Bar, `S2Z1a`/`S1Z1a` Timestamps, `S1X1a` Answer Numbers, `S3H1a` Highlights Engine, `S9D1a` Auto Emoji Title.
-- **Reader shell** — `studio.html`, `studio.js`, `studio.css`.
-- **Studio-side bus & primitives** — `S0A1a` H2O Core (Studio variant), `S0A2a` Observer Hub (Studio variant).
-- **Studio-side capture host** — `S0D3a` Transcript Archive Engine, `S0D3e` Transcript Studio Host.
-- **Command palette** — `S0X1a` Command Bar, `S0X1b` Library Commands.
-- **Sidebar** — `S0Z1f`/`S0Z1g`.
+- **Cockpit Library** — `S0F0a` Library Surface Host; `S0F1a` Library
+  Core; `S0F1b` Library Workspace; `S0F1c` Library Index; `S0F1d` Library
+  Insights; `S0F1f` Library Maintenance; `S0F1g` Chat Registry; Library
+  contracts/core; `S0F2a` Projects; `S0F3a` Folders; `S0F4a` Categories;
+  `S0F5a` Tags; `S0F6a` Labels; and Library-specific command/sidebar
+  semantics. `S0F1h` transport/convergence behavior remains Platform Sync.
+- **Application Shell** — structural composition in `studio.html`, `studio.js`,
+  and `studio.css`, including route/view containers, sidebar/rail, stage,
+  topbar, scroll roots, and Ribbon/Dock host placement.
+- **Reader / Renderer / Authoring** — reader navigation and consumption,
+  replay/content projection, decorations, and authored knowledge semantics
+  according to their respective Charters. Placement inside a Shell slot does
+  not transfer semantic ownership.
+- **Host Integration** — the `platform/` adapters and Studio-specific host
+  bridge surfaces. Archive/storage semantics behind a bridge retain their
+  Saved Chats Storage boundary.
+- **Cockpit Runtime Kernel** — common bus/runtime primitives consumed through
+  Studio variants; environment-specific adaptation stays with Host Integration.
 
 Studio does **not** own `src-surfaces-base/desk/` (live chatgpt.com decoration), `src-surfaces-base/identity/`, the service worker (`bg.js`), or content scripts (`loader.js`).
 

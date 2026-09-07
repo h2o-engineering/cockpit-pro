@@ -4,6 +4,15 @@ Status: Active (skeleton)
 Owns: `H2O.Studio.platform` namespace, MV3 adapter implementation, selectors contract.
 Contracts: see `src-surfaces-base/studio/STUDIO_PLATFORM_ADAPTER_GUIDE.md` (full surface area) and `STUDIO_PORTABILITY_CONTRACT.md` (rules).
 
+Engineering Lane: `L-STUDIO-HOST-INTEGRATION` owns the environment-selection,
+host messaging, IPC/command, filesystem, clipboard, and runtime-adapter
+semantics in this folder. `selectors.contract.js` is colocated for proximity
+but serves Reader/Renderer contracts; colocation does not transfer its feature
+semantics. Application Shell owns placement geometry, Cockpit Runtime Kernel
+owns common runtime/kernel semantics, and Build & Delivery owns packaging and
+artifact-delivery mechanics. Shared bridge files use temporary narrow leases
+when another Lane must edit them; there is no co-primary ownership.
+
 ## What This Folder Is
 
 The one place Studio code is allowed to touch platform APIs (`chrome.*`, `localStorage`, `indexedDB`, file dialogs, Tauri IPC, …). Everything else in `src-surfaces-base/studio/` calls through `H2O.Studio.platform.*` and `H2O.Studio.SELECTORS`.

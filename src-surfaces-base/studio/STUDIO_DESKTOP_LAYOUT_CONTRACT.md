@@ -16,6 +16,31 @@ The core model is:
 - Showing or hiding a ribbon menu strip must never push the app layout up or down.
 - Expanding a visible ribbon body is different: the measured body height must become real reserved layout height so sidebar and right-pane content move down together instead of being covered by a dropdown overlay.
 
+## Structural Lane Owner
+
+`L-STUDIO-APPLICATION-SHELL` is the home semantic owner of this structural
+contract. Its boundary includes `.wbShell`, `.wbStage`,
+`.wbSide--sidebar`, `.wbRail`, `.wbTop`, `.wbMain`, app-level route/view
+containers, global scroll roots, Desktop chrome/top-safe-area composition, and
+Ribbon/Dock host-placement geometry. This ownership statement does not change
+any layout rule below.
+
+Feature Lanes retain the meaning and behavior of the content mounted inside
+these structures. Reader owns opened-conversation consumption, Renderer owns
+content projection, Authoring owns authored actions, and Cockpit Library owns
+Library entries/routes/actions. A feature change that must touch a Shell-owned
+selector or container uses a temporary narrow lease for the exact structural
+slot and preserves this contract; it does not create co-primary ownership.
+
+`L-STUDIO-HOST-INTEGRATION` owns the Tauri/MV3/OS adapter semantics behind
+Desktop host APIs, while Application Shell owns their UI placement geometry.
+`L-DEVELOPER-BUILD-DELIVERY-SCOPE-STU` owns generation, staging, packaging,
+delivery, and validation of the resulting Studio software artifacts. Shared
+files such as `studio.html`, `studio.css`, `studio.js`, `S0Y1a` Studio Ribbon,
+Dock/Ribbon shell modules, `platform.tauri.js`, and Desktop Tauri files are
+classified by the semantics of each change, not assigned wholesale to one
+Lane.
+
 ## Change Control Gate
 
 The Desktop Studio interface structure is protected. Do not change the Desktop window layout, titlebar/chrome structure, ribbon placement, sidebar top section, route topbar rules, page scroll roots, or Desktop zoom handling without explicit user permission for that specific step.

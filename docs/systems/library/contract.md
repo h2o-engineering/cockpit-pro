@@ -16,12 +16,45 @@ The contract on this page defines **surface ownership and route invariants**. Th
 
 This page should not duplicate the content of those documents. When a contract assertion needs detail (e.g., "what exactly is in a Chat Registry record"), link out to the record-shapes spec rather than restating it here.
 
-## Owners
-- `0F1b Library Workspace` owns the Library dashboard surface, Library search field, workspace tabs, first-row route shortcuts, sidebar Library entry, and Library UI preferences.
+## Engineering Lane Ownership
+
+`L-COCKPIT-LIBRARY` owns the durable cross-surface Library Product capability:
+Library workspace/business behavior, catalog and Chat Registry semantics,
+Library Index/read models, search, browse/recents, Explorer/Insights semantics,
+folders, categories, labels, tags, projects, organizational relationships and
+bindings, Library-specific navigation/actions, and shared Library contracts and
+core logic.
+
+The primary Domain is `COCKPIT` because the capability is shared by Product
+surfaces and its purpose is being the Library. It is not `PLATFORM` merely
+because more than one surface consumes it. Surface implementations and adapters
+may remain Extension- or Studio-specific while consuming the Library-owned
+contracts.
+
+The adjacent boundaries are explicit:
+
+- `L-STORAGE-SAVED-CHATS` owns durable archive representation, saved-chat
+  serialization, retention, recovery, and durability.
+- `L-PLATFORM-SYNC` owns propagation, conflict handling, and convergence
+  mechanics between surfaces.
+- `L-STUDIO-APPLICATION-SHELL` owns where Library routes, containers, and
+  sidebar slots are structurally mounted in Studio.
+- `L-STUDIO-READER` owns consumption of an opened conversation.
+- `L-STUDIO-AUTHORING` owns authored notes, highlights, and editing semantics.
+
+Library owns what a Library entry, relationship, route, or action means; the
+Application Shell owns where its Studio entry or route is structurally mounted.
+A narrow cross-Lane edit to `studio.html`, `studio.css`, `studio.js`, Ribbon,
+Dock, or sidebar composition uses a temporary lease and does not create
+co-primary ownership.
+
+## Component Owners Within the Library Lane
+
+- `0F1b Library Workspace` owns the Library dashboard behavior, Library search field, workspace tabs, first-row route shortcuts, sidebar Library-entry semantics, and Library UI preferences. Application Shell retains the structural mount geometry.
 - `0F1c Library Index` owns the normalized known-chat read model used by Library Workspace, Explorer, Analytics, Recents, and source diagnostics.
 - `0F1d Library Insights` owns rendering for Explorer and Analytics only. It must consume Library Index APIs and must not scan ChatGPT DOM or own persistent chat data.
-- Folders, Labels, Categories, Tags, and Projects own their own catalogs, list pages, detail pages, popups, and storage. Library Workspace may route to those pages but must not duplicate their page ownership.
-- `0F1a Library Core` owns shared route, page-host, registry, and shell services. Library feature owners register with Core; Core does not own feature data.
+- Folders, Labels, Categories, Tags, and Projects are Library-owned subdomains whose components own their catalogs, list pages, detail pages, popups, and business relationships. Persistence remains behind the applicable storage boundary. Library Workspace may route to those pages but must not duplicate their page ownership.
+- `0F1a Library Core` owns Library route semantics, page-host registration, and Library service registries. Library feature owners register with Core; Core does not own feature data or Studio application-shell geometry.
 
 ## Library Workspace Invariants
 - The canonical second-row workspace tab order is `Dashboard`, `Analytics`, `Explorer`, `Recents`, `Saved`, `Organize`.

@@ -8,6 +8,22 @@ Companion: `STUDIO_ARCHITECTURE.md`, `STUDIO_PLATFORM_ADAPTER_GUIDE.md`, `STUDIO
 
 State the rules that keep Studio portable from MV3 extension → Tauri desktop app with the smallest possible rewrite. These rules are binding on all Studio feature code (`src-surfaces-base/studio/`) effective immediately. They do not require touching existing call sites except as opportunistic clean-ups; new code must comply.
 
+## Lane Boundary
+
+The portable host seam is owned by `L-STUDIO-HOST-INTEGRATION`. Feature code
+depends on stable Studio ports/contracts; Host Integration selects and binds
+the Tauri, MV3, PWA, mock, browser, or operating-system adapter. Common Cockpit
+runtime/kernel semantics remain with `L-COCKPIT-RUNTIME-KERNEL` and are not
+co-owned by the Studio adapter Lane.
+
+Portability does not collapse other boundaries: Application Shell owns Studio
+structural composition and host-placement geometry; feature Lanes own feature
+semantics; Cockpit Library owns Library business contracts; Platform Sync owns
+cross-surface convergence; Saved Chats Storage owns durable archive
+representation; and Build & Delivery owns software packaging and artifact
+delivery. A cross-boundary edit to `studio.js`, a platform module, or Desktop
+Tauri source uses one semantic home owner plus a temporary narrow lease.
+
 ## Migration Targets Studio Must Stay Compatible With
 
 | Target | Hosted by | Storage backend | Messaging | Capture source |

@@ -16,10 +16,20 @@ The five contracts that govern Studio development are in this folder. Read in or
 ## TL;DR
 
 - Studio is a **workspace over saved chats**, not a chatgpt.com DOM decorator. The decoration engines (MiniMap, Highlights, Wash, etc.) run against Studio's own replay DOM inside `studio.html`.
+- Studio is not one umbrella Engineering Lane. Application Shell owns its
+  structural composition, Host Integration owns its environment adapters,
+  Cockpit Library owns cross-surface Library semantics, and Build & Delivery
+  owns Studio software packaging/artifact delivery. Reader, Renderer,
+  Authoring, Saved Chats Storage, Platform Sync, and Cockpit Runtime Kernel
+  retain their separate semantic boundaries.
 - Studio code must not call `chrome.*` directly. Go through `H2O.Studio.platform.*`.
 - Studio code must not query live chatgpt.com DOM. Consume normalized records via the CaptureSource interface.
 - Studio persistence goes through `H2O.Studio.store`. No scattered `chrome.storage` / `localStorage` / `IndexedDB` calls in feature code.
 - Studio messaging goes through `H2O.events`. Cross-surface signaling goes through `H2O.Studio.platform.broadcast`.
+- Shared hotspots such as `studio.html`, `studio.css`, `studio.js`, Ribbon,
+  Dock, platform adapters, and Desktop Tauri files use one home semantic owner
+  plus temporary narrow leases for cross-Lane work; they do not have
+  co-primary ownership.
 
 ## File Layout
 

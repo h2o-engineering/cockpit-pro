@@ -13,6 +13,26 @@ The goal of M1 is to prove **the existing Studio UI boots inside Tauri
 on macOS with no fatal errors**. No import pipeline, no SQLite, no live
 ChatGPT capture — those are M2 and beyond.
 
+## Engineering Lane Ownership
+
+This directory crosses three distinct current Lane boundaries:
+
+- `L-STUDIO-APPLICATION-SHELL` owns Desktop application-frame, chrome,
+  safe-area, route-container, and Ribbon/Dock placement geometry.
+- `L-STUDIO-HOST-INTEGRATION` owns Studio-to-Tauri commands/plugins,
+  filesystem/clipboard/runtime bridges, environment selection, and the
+  host-facing adapter semantics.
+- `L-DEVELOPER-BUILD-DELIVERY-SCOPE-STU` owns `build-tools/`, Desktop
+  application packaging, dist staging, DMG/bundle generation, artifact
+  validation, software publication/promotion, delivery provenance,
+  activation, rollback, and recovery.
+
+Common Cockpit runtime/kernel semantics remain with
+`L-COCKPIT-RUNTIME-KERNEL`; feature meaning remains with the applicable
+feature Lane. Shared Desktop Tauri files are classified by the semantics of
+each change. Cross-Lane edits use one home semantic owner plus a temporary
+narrow lease rather than co-primary ownership.
+
 ---
 
 ## Architecture
@@ -335,9 +355,12 @@ apps/studio/desktop/dist/   (this app's Tauri frontendDist; gitignored)
 Tauri renders dist/studio.html in a native window
 ```
 
-So: editing Studio UI = edit `src-surfaces-base/studio/` at the repo root. Editing
-the desktop shell = edit `src-tauri/` and/or `build-tools/prepare-dist.mjs`
-here.
+So: editing Studio UI = edit `src-surfaces-base/studio/` at the repo root.
+Desktop application-frame geometry follows the Application Shell boundary;
+Tauri commands/plugins and environment bridges follow Host Integration; and
+`build-tools/prepare-dist.mjs`, staging, and packaging follow Build & Delivery.
+`src-tauri/` is a shared hotspot whose home owner depends on the semantics of
+the exact change.
 
 ### Quick verification
 

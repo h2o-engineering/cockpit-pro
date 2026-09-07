@@ -5,6 +5,21 @@ Phase: **1a — passive shell only**.
 A OneNote-inspired tabbed action bar that sits above the Studio reader. Surfaces
 edit/format/organize/view/export actions for the **currently opened chat**.
 
+## Engineering Lane boundary
+
+`L-STUDIO-APPLICATION-SHELL` owns the Ribbon host's structural placement and
+geometry, including its relationship to Desktop chrome, `.wbShell`,
+`.wbStage`, `.wbTop`, and the top safe area. The Lane does not own the meaning
+of Ribbon actions.
+
+Studio Authoring owns authoring/editing action semantics, Cockpit Library owns
+Library organization/action semantics, Reader owns opened-conversation
+consumption behavior, and Host Integration owns any Tauri/MV3 bridge behind a
+host-backed action. `S0Y1a` Studio Ribbon, `studio.html`, `studio.css`, and
+`studio.js` are shared hotspots: cross-Lane work uses one home semantic owner
+plus a temporary narrow lease for the exact Ribbon slot or action wiring. No
+shared file creates co-primary ownership.
+
 ## What this folder owns
 
 - `ribbon-keys.js` — frozen constants (storage key strings, event names, tab ids,

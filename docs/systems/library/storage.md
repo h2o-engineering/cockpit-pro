@@ -5,6 +5,15 @@ Status: Active
 Purpose:
 Define Library storage ownership and persistence boundaries.
 
+## Lane Boundary
+
+`L-COCKPIT-LIBRARY` owns Library catalog, registry, Index/read-model,
+organization, relationship, and action semantics represented by these keys.
+`L-STORAGE-SAVED-CHATS` owns durable saved-chat/archive representation,
+serialization, retention, recovery, and durability; it does not absorb Library
+meaning merely because Library records are persisted. Cross-surface transport
+and convergence remain with `L-PLATFORM-SYNC`.
+
 ## Library Workspace Storage
 - Library Workspace owns `h2o:prm:cgx:library:ui:v1` for UI preferences such as active workspace tab, query, and view mode.
 - Library Workspace owns `h2o:prm:cgx:library-workspace:sidebar-layout:v1` for Library sidebar section order and visibility.

@@ -11,6 +11,37 @@ Consolidate the Library system so **Studio is the primary Library application UI
 
 This is **not a file-copy migration**. Moving `src-runtime-base/0F3a` into `src-surfaces-base/studio/` would relocate DOM-injection code into a context where it cannot run. The migration is by **responsibility** (pure logic vs DOM vs storage), not by file path.
 
+## Current Lane Governance Alignment
+
+This Plan's “Library team” owner label is local Plan wording; it does not
+establish a standing Lane Owner. Current durable engineering ownership is
+`L-COCKPIT-LIBRARY`, with `LANE_OWNER=NOT_ESTABLISHED` in Cockpit Pro
+Management.
+
+The Library Lane owns the shared business boundary this Plan is moving toward:
+catalog and Chat Registry semantics, Index/read models, search/browse/recents,
+Explorer/Insights, folders/categories/labels/tags/projects, organizational
+relationships and bindings, Library navigation/actions, and shared Library
+contracts/core. Studio being the preferred current Library UI does not make
+Library a Studio-domain capability; Extension and Studio implementations are
+surface consumers/adapters of the shared Cockpit capability.
+
+Adjacent ownership remains separate:
+
+- Saved Chats Storage owns durable archive representation, serialization,
+  retention, recovery, and durability.
+- Platform Sync owns cross-surface propagation, conflict handling, and
+  convergence; “Library Sync” module names do not transfer Library meaning to
+  Sync or convergence mechanics to Library.
+- Studio Application Shell owns the structural route/sidebar/container slots
+  in which Studio Library UI mounts; Library owns what those routes and actions
+  mean.
+- Studio Reader owns consumption of an opened conversation, and Studio
+  Authoring owns authored notes/highlights/editing semantics.
+
+This alignment does not change the Plan's historical phases, code disposition,
+storage decisions, or implementation state.
+
 ## What stays native, what becomes shared, what becomes Studio
 
 | Concern | Stays native (adapter) | Moves to shared logic | Becomes Studio UI |

@@ -10,6 +10,41 @@ Define the **one** thin layer through which Studio feature code reaches the host
 
 The adapter is the single port-time surface. Get it right and the rest of Studio is platform-agnostic by construction.
 
+## Engineering Lane Ownership
+
+`L-STUDIO-HOST-INTEGRATION` is the home semantic owner of
+`H2O.Studio.platform.*`, environment-adapter selection, Studio host messaging,
+IPC/command bridges, filesystem and clipboard bridges, host runtime APIs,
+Tauri command/plugin integration, and MV3/browser adaptation.
+
+The required dependency direction is:
+
+```text
+feature code
+  → stable Studio ports/contracts
+  → Studio Host Integration
+  → Tauri / MV3 / browser / operating-system host APIs
+```
+
+This Lane boundary does not absorb adjacent semantics:
+
+- `L-STUDIO-APPLICATION-SHELL` owns application-frame and Desktop UI placement
+  geometry, including where host-backed controls are mounted.
+- `L-COCKPIT-RUNTIME-KERNEL` owns common Cockpit runtime/kernel semantics;
+  Host Integration adapts those contracts to Studio without co-primary kernel
+  ownership.
+- `L-DEVELOPER-BUILD-DELIVERY-SCOPE-STU` owns how Studio host artifacts are
+  built, packaged, staged, promoted, validated, activated, and recovered.
+- `L-COCKPIT-LIBRARY` owns Library business meaning, Saved Chats Storage owns
+  durable archive representation, and `L-PLATFORM-SYNC` owns cross-surface
+  propagation/convergence. Their calls through an adapter do not transfer
+  semantic ownership to Host Integration.
+
+`platform/index.js`, `platform.tauri.js`, the MV3 adapter, `studio.js`, and
+relevant Desktop Tauri files are shared hotspots. Cross-Lane changes use a
+temporary narrow lease for the exact bridge surface; shared files do not imply
+co-primary ownership.
+
 ## Naming
 
 The namespace is `H2O.Studio.platform`. It hangs off the existing `H2O` global to fit the repo's convention (see `S0A1a` H2O Core). Sub-namespaces and method names use lowerCamelCase. Adapter modules live in `src-surfaces-base/studio/platform/` (to be created) with one file per concern.

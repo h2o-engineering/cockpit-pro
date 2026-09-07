@@ -10,6 +10,17 @@ Define the single, portable façade through which Studio persists data, the cano
 
 This document supersedes scattered storage assumptions inside `src-surfaces-base/studio/` and is consistent with the existing repo storage rules in `docs/architecture/storage-map.md` and `docs/systems/library/storage.md` (it adds the portability layer those docs do not address).
 
+## Lane Boundary
+
+This façade does not make all persisted semantics one Lane. Cockpit Library
+owns Library catalog, Index, organization, relationship, and action meaning.
+Saved Chats Storage owns durable archive/saved-chat representation,
+serialization, retention, recovery, and durability. Platform Sync owns
+cross-surface propagation and convergence. Studio Host Integration owns the
+concrete MV3/Tauri/OS storage bridge, not the business meaning of records that
+pass through it. Classify ownership by the semantic operation, not by the fact
+that bytes are persisted or a module uses the word “publication.”
+
 ## The Façade: `H2O.Studio.store`
 
 All Studio feature persistence routes through one object: `H2O.Studio.store`. The façade has two parts:

@@ -15,6 +15,21 @@ Define **where Dock Panel feature state lives**, **who is allowed to write it**,
 
 Native and Studio both render user-facing feature UI (highlights, notes, bookmarks, navigator, context). The Dock Panel is the surface for those features. The Command Bar is the surface for system / diagnostic actions. This contract preserves that split: nothing here moves user-feature actions into the Command Bar, and nothing here moves system actions into the Dock Panel.
 
+## Shell Placement vs Feature Semantics
+
+`L-STUDIO-APPLICATION-SHELL` owns the Dock host's structural placement and
+geometry within `.wbShell`, `.wbRail`, `.wbSide--sidebar`, and `.wbStage`.
+That boundary covers the mount slot, panel/rail composition, application-level
+visibility geometry, and preservation of global scroll/layout invariants.
+
+The feature Lane for each Dock tab retains its data, action, and rendering
+semantics. Studio Authoring retains authored notes/highlights/editing semantics;
+Reader retains opened-conversation consumption; Cockpit Library retains
+Library actions and organizational meaning. A feature may receive a temporary
+narrow lease to change the Shell-owned Dock slot, but the lease does not create
+co-primary structural ownership. Conversely, Shell placement does not transfer
+feature meaning to Application Shell.
+
 ## Core rules
 
 ### Rule 1 — Studio is a reader, not a capturer
