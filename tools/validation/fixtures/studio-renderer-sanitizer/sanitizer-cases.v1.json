@@ -1,0 +1,1056 @@
+{
+  "schema": "h2o.renderer.sanitizer-v2-cases",
+  "schemaVersion": 1,
+  "policyId": "h2o.renderer.html-sanitizer-policy",
+  "policyVersion": 1,
+  "note": "Renderer sanitizer v2 security/policy evidence. Expectations are substring-based on purpose: exact serialization is a browser/engine detail, while the security property (what survives and what must be gone) is the contract. Distinct from v1-compatibility-cases.json, which pins exact v1 projector output bytes and is not a v2 corpus.",
+  "cases": [
+    {
+      "id": "pos-paragraph-heading",
+      "kind": "positive",
+      "requirement": "paragraphs and headings survive",
+      "input": "<h2>Title</h2><p>Body <strong>bold</strong> and <em>italic</em>.</p>",
+      "expect": {
+        "mustContain": [
+          "<h2>",
+          "Title",
+          "<p>",
+          "<strong>",
+          "<em>"
+        ],
+        "mustNotContain": [],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "pos-lists",
+      "kind": "positive",
+      "requirement": "ordered and unordered lists survive",
+      "input": "<ul><li>one</li><li>two</li></ul><ol start=\"3\"><li>three</li></ol>",
+      "expect": {
+        "mustContain": [
+          "<ul>",
+          "<li>",
+          "one",
+          "<ol",
+          "three"
+        ],
+        "mustNotContain": [],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "pos-definition-list",
+      "kind": "positive",
+      "requirement": "definition lists survive",
+      "input": "<dl><dt>Term</dt><dd>Definition</dd></dl>",
+      "expect": {
+        "mustContain": [
+          "<dl>",
+          "<dt>",
+          "Term",
+          "<dd>",
+          "Definition"
+        ],
+        "mustNotContain": [],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "pos-blockquote",
+      "kind": "positive",
+      "requirement": "blockquote with allowed cite survives",
+      "input": "<blockquote cite=\"https://example.test/src\"><p>Quoted</p></blockquote>",
+      "expect": {
+        "mustContain": [
+          "<blockquote",
+          "cite=\"https://example.test/src\"",
+          "Quoted"
+        ],
+        "mustNotContain": [],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "pos-pre-code",
+      "kind": "positive",
+      "requirement": "pre/code survive with text intact",
+      "input": "<pre><code>const x = 1 &lt; 2;</code></pre>",
+      "expect": {
+        "mustContain": [
+          "<pre>",
+          "<code>",
+          "const x = 1"
+        ],
+        "mustNotContain": [],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "pos-table",
+      "kind": "positive",
+      "requirement": "tables with spans survive",
+      "input": "<table><caption>Cap</caption><thead><tr><th scope=\"col\">H</th></tr></thead><tbody><tr><td colspan=\"2\">C</td></tr></tbody></table>",
+      "expect": {
+        "mustContain": [
+          "<table>",
+          "<caption>",
+          "<th",
+          "scope=\"col\"",
+          "<td",
+          "colspan=\"2\""
+        ],
+        "mustNotContain": [],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "pos-allowed-link",
+      "kind": "positive",
+      "requirement": "https link with target/rel survives",
+      "input": "<p><a href=\"https://example.test/a\" target=\"_blank\" rel=\"noopener\">link</a></p>",
+      "expect": {
+        "mustContain": [
+          "href=\"https://example.test/a\"",
+          "target=\"_blank\"",
+          "rel=\"noopener\"",
+          "link"
+        ],
+        "mustNotContain": [],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "pos-mailto-tel",
+      "kind": "positive",
+      "requirement": "mailto and tel links survive",
+      "input": "<a href=\"mailto:a@b.test\">mail</a><a href=\"tel:+15550100\">call</a>",
+      "expect": {
+        "mustContain": [
+          "mailto:a@b.test",
+          "tel:+15550100"
+        ],
+        "mustNotContain": [],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "pos-relative-link",
+      "kind": "positive",
+      "requirement": "scheme-less relative and fragment links survive",
+      "input": "<a href=\"/docs/page\">rel</a><a href=\"#section\">frag</a>",
+      "expect": {
+        "mustContain": [
+          "href=\"/docs/page\"",
+          "href=\"#section\""
+        ],
+        "mustNotContain": [],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "pos-image-https",
+      "kind": "positive",
+      "requirement": "https image with alt/dimensions survives",
+      "input": "<img src=\"https://example.test/i.png\" alt=\"Alt\" width=\"64\" height=\"48\">",
+      "expect": {
+        "mustContain": [
+          "src=\"https://example.test/i.png\"",
+          "alt=\"Alt\"",
+          "width=\"64\""
+        ],
+        "mustNotContain": [],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "pos-image-data-raster",
+      "kind": "positive",
+      "requirement": "raster data image survives",
+      "input": "<img src=\"data:image/png;base64,iVBORw0KGgo=\" alt=\"px\">",
+      "expect": {
+        "mustContain": [
+          "data:image/png;base64",
+          "alt=\"px\""
+        ],
+        "mustNotContain": [],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "pos-dir-lang",
+      "kind": "positive",
+      "requirement": "dir and lang are preserved",
+      "input": "<p dir=\"rtl\" lang=\"ar\">نص</p>",
+      "expect": {
+        "mustContain": [
+          "dir=\"rtl\"",
+          "lang=\"ar\""
+        ],
+        "mustNotContain": [],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "pos-semantic-formatting",
+      "kind": "positive",
+      "requirement": "semantic inline formatting survives",
+      "input": "<p><mark>m</mark><del>d</del><ins>i</ins><sub>s</sub><sup>p</sup><abbr title=\"t\">a</abbr><code>c</code></p>",
+      "expect": {
+        "mustContain": [
+          "<mark>",
+          "<del>",
+          "<ins>",
+          "<sub>",
+          "<sup>",
+          "<abbr",
+          "<code>"
+        ],
+        "mustNotContain": [],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "pos-figure-details",
+      "kind": "positive",
+      "requirement": "figure and details survive",
+      "input": "<figure><img src=\"https://example.test/f.png\" alt=\"f\"><figcaption>Cap</figcaption></figure><details open><summary>S</summary><p>B</p></details>",
+      "expect": {
+        "mustContain": [
+          "<figure>",
+          "<figcaption>",
+          "<details",
+          "<summary>"
+        ],
+        "mustNotContain": [],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "pos-class-preserved",
+      "kind": "positive",
+      "requirement": "provider class is preserved under profile",
+      "input": "<p class=\"prose-token\">x</p>",
+      "expect": {
+        "mustContain": [
+          "class=\"prose-token\""
+        ],
+        "mustNotContain": [],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-script-element",
+      "kind": "negative",
+      "requirement": "script element and its contents removed",
+      "input": "<p>a</p><script>alert(1)</script><p>b</p>",
+      "expect": {
+        "mustContain": [
+          "a",
+          "b"
+        ],
+        "mustNotContain": [
+          "<script",
+          "alert(1)"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-style-element",
+      "kind": "negative",
+      "requirement": "style element and its contents removed",
+      "input": "<p>a</p><style>body{background:url(javascript:alert(1))}</style>",
+      "expect": {
+        "mustContain": [
+          "a"
+        ],
+        "mustNotContain": [
+          "<style",
+          "javascript:"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-event-handlers",
+      "kind": "negative",
+      "requirement": "inline event handlers removed",
+      "input": "<p onclick=\"alert(1)\" OnMouseOver=\"steal()\">t</p><img src=\"x\" onerror=\"alert(1)\" alt=\"a\">",
+      "expect": {
+        "mustContain": [
+          "t"
+        ],
+        "mustNotContain": [
+          "onclick",
+          "onmouseover",
+          "OnMouseOver",
+          "onerror",
+          "alert(1)",
+          "steal()"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-iframe-srcdoc",
+      "kind": "negative",
+      "requirement": "iframe and srcdoc removed",
+      "input": "<iframe src=\"https://evil.test\" srcdoc=\"&lt;script&gt;alert(1)&lt;/script&gt;\"></iframe><p>k</p>",
+      "expect": {
+        "mustContain": [
+          "k"
+        ],
+        "mustNotContain": [
+          "<iframe",
+          "srcdoc"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-object-embed",
+      "kind": "negative",
+      "requirement": "object and embed removed",
+      "input": "<object data=\"x.swf\"></object><embed src=\"y.swf\"><p>k</p>",
+      "expect": {
+        "mustContain": [
+          "k"
+        ],
+        "mustNotContain": [
+          "<object",
+          "<embed",
+          ".swf"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-form-surface",
+      "kind": "negative",
+      "requirement": "form and its controls removed",
+      "input": "<form action=\"/steal\"><input name=\"a\"><button formaction=\"/x\">go</button></form><p>k</p>",
+      "expect": {
+        "mustContain": [
+          "k"
+        ],
+        "mustNotContain": [
+          "<form",
+          "<input",
+          "<button",
+          "formaction",
+          "action=\"/steal\""
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-base-meta",
+      "kind": "negative",
+      "requirement": "base and meta removed",
+      "input": "<base href=\"https://evil.test/\"><meta http-equiv=\"refresh\" content=\"0\"><p>k</p>",
+      "expect": {
+        "mustContain": [
+          "k"
+        ],
+        "mustNotContain": [
+          "<base",
+          "<meta",
+          "http-equiv"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-javascript-uri",
+      "kind": "negative",
+      "requirement": "javascript URI attribute removed, no placeholder",
+      "input": "<a href=\"javascript:alert(1)\">go</a>",
+      "expect": {
+        "mustContain": [
+          "go"
+        ],
+        "mustNotContain": [
+          "javascript:",
+          "href=\"#\"",
+          "alert(1)"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-javascript-uri-obfuscated",
+      "kind": "negative",
+      "requirement": "whitespace/case obfuscated javascript URI removed",
+      "input": "<a href=\"  JaVaScRiPt&#58;alert(1)\">go</a>",
+      "expect": {
+        "mustContain": [
+          "go"
+        ],
+        "mustNotContain": [
+          "javascript",
+          "JaVaScRiPt",
+          "alert(1)"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-vbscript-uri",
+      "kind": "negative",
+      "requirement": "vbscript URI removed",
+      "input": "<a href=\"vbscript:msgbox(1)\">go</a>",
+      "expect": {
+        "mustContain": [
+          "go"
+        ],
+        "mustNotContain": [
+          "vbscript",
+          "msgbox"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-data-text-html",
+      "kind": "negative",
+      "requirement": "data:text/html URI removed",
+      "input": "<a href=\"data:text/html;base64,PHNjcmlwdD4=\">go</a>",
+      "expect": {
+        "mustContain": [
+          "go"
+        ],
+        "mustNotContain": [
+          "data:text/html",
+          "PHNjcmlwdD4"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-data-svg-image",
+      "kind": "negative",
+      "requirement": "data:image/svg+xml image src removed",
+      "input": "<img src=\"data:image/svg+xml;base64,PHN2Zz48c2NyaXB0Pjwvc2NyaXB0Pjwvc3ZnPg==\" alt=\"s\">",
+      "expect": {
+        "mustContain": [],
+        "mustNotContain": [
+          "svg+xml",
+          "PHN2Zz"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-h2o-custom-scheme",
+      "kind": "negative",
+      "requirement": "digit-bearing h2o scheme rejected",
+      "input": "<a href=\"h2o://internal/secret\">go</a>",
+      "expect": {
+        "mustContain": [
+          "go"
+        ],
+        "mustNotContain": [
+          "h2o://",
+          "internal/secret"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-h2oapp-custom-scheme",
+      "kind": "negative",
+      "requirement": "digit-bearing h2oapp scheme rejected",
+      "input": "<a href=\"h2oapp://open\">go</a>",
+      "expect": {
+        "mustContain": [
+          "go"
+        ],
+        "mustNotContain": [
+          "h2oapp://"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-x2y-custom-scheme",
+      "kind": "negative",
+      "requirement": "arbitrary digit-bearing scheme rejected",
+      "input": "<a href=\"x2y:payload\">go</a>",
+      "expect": {
+        "mustContain": [
+          "go"
+        ],
+        "mustNotContain": [
+          "x2y:",
+          "payload"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-local-schemes",
+      "kind": "negative",
+      "requirement": "file/tauri/asset/chrome-extension schemes rejected",
+      "input": "<a href=\"file:///etc/passwd\">a</a><a href=\"tauri://localhost/x\">b</a><a href=\"asset://x\">c</a><a href=\"chrome-extension://abcd/x\">d</a>",
+      "expect": {
+        "mustContain": [
+          "a",
+          "b",
+          "c",
+          "d"
+        ],
+        "mustNotContain": [
+          "file://",
+          "tauri://",
+          "asset://",
+          "chrome-extension://"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-protocol-relative",
+      "kind": "negative",
+      "requirement": "protocol-relative URL rejected",
+      "input": "<a href=\"//evil.test/x\">go</a>",
+      "expect": {
+        "mustContain": [
+          "go"
+        ],
+        "mustNotContain": [
+          "//evil.test"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-id-clobbering",
+      "kind": "negative",
+      "requirement": "incoming id is stripped",
+      "input": "<div id=\"body\"><p id=\"attributes\">x</p></div>",
+      "expect": {
+        "mustContain": [
+          "x"
+        ],
+        "mustNotContain": [
+          "id=\"body\"",
+          "id=\"attributes\"",
+          "id="
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-name-clobbering",
+      "kind": "negative",
+      "requirement": "incoming name is stripped",
+      "input": "<img name=\"getElementById\" src=\"https://example.test/i.png\" alt=\"i\">",
+      "expect": {
+        "mustContain": [],
+        "mustNotContain": [
+          "name=\"getElementById\"",
+          "name="
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-form-name-collision",
+      "kind": "negative",
+      "requirement": "form/name clobbering surface removed entirely",
+      "input": "<form name=\"attributes\"><input name=\"nodeName\"></form><p>k</p>",
+      "expect": {
+        "mustContain": [
+          "k"
+        ],
+        "mustNotContain": [
+          "<form",
+          "<input",
+          "name="
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-custom-element",
+      "kind": "negative",
+      "requirement": "custom elements rejected",
+      "input": "<my-widget data-x=\"1\">inner</my-widget><p>k</p>",
+      "expect": {
+        "mustContain": [
+          "k"
+        ],
+        "mustNotContain": [
+          "<my-widget",
+          "data-x"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-data-h2o-spoof",
+      "kind": "negative",
+      "requirement": "incoming data-h2o-* identity removed",
+      "input": "<p data-h2o-turn-id=\"spoof\" data-h2o-message=\"1\" data-other=\"z\">t</p>",
+      "expect": {
+        "mustContain": [
+          "t"
+        ],
+        "mustNotContain": [
+          "data-h2o-turn-id",
+          "data-h2o-message",
+          "data-other",
+          "spoof"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-svg-script",
+      "kind": "negative",
+      "requirement": "SVG subtree with script removed",
+      "input": "<svg><script>alert(1)</script><circle r=\"1\"/></svg><p>k</p>",
+      "expect": {
+        "mustContain": [
+          "k"
+        ],
+        "mustNotContain": [
+          "<svg",
+          "<script",
+          "alert(1)",
+          "<circle"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-svg-foreignobject",
+      "kind": "negative",
+      "requirement": "SVG foreignObject attack removed",
+      "input": "<svg><foreignObject><iframe src=\"javascript:alert(1)\"></iframe></foreignObject></svg><p>k</p>",
+      "expect": {
+        "mustContain": [
+          "k"
+        ],
+        "mustNotContain": [
+          "<svg",
+          "foreignObject",
+          "<iframe",
+          "javascript:"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-svg-animate-href",
+      "kind": "negative",
+      "requirement": "SVG animate href attack removed",
+      "input": "<svg><a><animate attributeName=\"href\" values=\"javascript:alert(1)\"/></a></svg><p>k</p>",
+      "expect": {
+        "mustContain": [
+          "k"
+        ],
+        "mustNotContain": [
+          "<svg",
+          "<animate",
+          "javascript:"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-mathml-attack",
+      "kind": "negative",
+      "requirement": "MathML subtree removed",
+      "input": "<math><maction actiontype=\"statusline#\" xlink:href=\"javascript:alert(1)\">x</maction></math><p>k</p>",
+      "expect": {
+        "mustContain": [
+          "k"
+        ],
+        "mustNotContain": [
+          "<math",
+          "<maction",
+          "javascript:",
+          "xlink"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-mathml-annotation",
+      "kind": "negative",
+      "requirement": "MathML annotation-xml mutation vector removed",
+      "input": "<math><annotation-xml encoding=\"text/html\"><p onclick=\"alert(1)\">x</p></annotation-xml></math><p>k</p>",
+      "expect": {
+        "mustContain": [
+          "k"
+        ],
+        "mustNotContain": [
+          "<math",
+          "annotation-xml",
+          "onclick",
+          "alert(1)"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-style-attribute",
+      "kind": "negative",
+      "requirement": "style attribute is not trusted presentation authority",
+      "input": "<p style=\"position:fixed;top:0;background:url(javascript:alert(1))\">t</p>",
+      "expect": {
+        "mustContain": [
+          "t"
+        ],
+        "mustNotContain": [
+          "style=",
+          "position:fixed",
+          "javascript:"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-mutation-xss-noscript",
+      "kind": "negative",
+      "requirement": "noscript mutation vector neutralized",
+      "input": "<noscript><p title=\"</noscript><img src=x onerror=alert(1)>\">t</p></noscript><p>k</p>",
+      "expect": {
+        "mustContain": [
+          "k"
+        ],
+        "mustNotContain": [
+          "<noscript",
+          "onerror",
+          "alert(1)"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-mutation-xss-mglyph",
+      "kind": "negative",
+      "requirement": "mglyph/mtext namespace confusion neutralized",
+      "input": "<math><mtext><mglyph><style><img src=x onerror=alert(1)></style></mglyph></mtext></math><p>k</p>",
+      "expect": {
+        "mustContain": [
+          "k"
+        ],
+        "mustNotContain": [
+          "<math",
+          "<mglyph",
+          "<style",
+          "onerror",
+          "alert(1)"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-malformed-unclosed",
+      "kind": "negative",
+      "requirement": "malformed unclosed markup degrades safely",
+      "input": "<p>one<div>two<span>three<script>alert(1)",
+      "expect": {
+        "mustContain": [
+          "one",
+          "two",
+          "three"
+        ],
+        "mustNotContain": [
+          "<script",
+          "alert(1)"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-malformed-broken-attr",
+      "kind": "negative",
+      "requirement": "broken attribute quoting cannot smuggle a handler",
+      "input": "<p class=\"a onclick=alert(1)>text</p>",
+      "expect": {
+        "mustContain": [],
+        "mustNotContain": [
+          "onclick",
+          "alert(1)"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-nested-encoded-script",
+      "kind": "negative",
+      "requirement": "entity-encoded script markup is not resurrected",
+      "input": "<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>",
+      "expect": {
+        "mustContain": [],
+        "mustNotContain": [
+          "<script>alert(1)</script>"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-template-element",
+      "kind": "negative",
+      "requirement": "template element removed",
+      "input": "<template><img src=x onerror=alert(1)></template><p>k</p>",
+      "expect": {
+        "mustContain": [
+          "k"
+        ],
+        "mustNotContain": [
+          "<template",
+          "onerror",
+          "alert(1)"
+        ],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-link-element",
+      "kind": "negative",
+      "requirement": "link element removed",
+      "input": "<link rel=\"stylesheet\" href=\"https://evil.test/x.css\"><p>k</p>",
+      "expect": {
+        "mustContain": [
+          "k"
+        ],
+        "mustNotContain": [
+          "<link",
+          "stylesheet"
+        ],
+        "idempotent": true
+      }
+    }
+  ],
+  "urlCases": [
+    {
+      "id": "url-https-link",
+      "context": "link",
+      "input": "https://example.test/a",
+      "allowed": true,
+      "reason": "scheme-allowed"
+    },
+    {
+      "id": "url-http-link",
+      "context": "link",
+      "input": "http://example.test/a",
+      "allowed": true,
+      "reason": "scheme-allowed"
+    },
+    {
+      "id": "url-mailto-link",
+      "context": "link",
+      "input": "mailto:a@b.test",
+      "allowed": true,
+      "reason": "scheme-allowed"
+    },
+    {
+      "id": "url-tel-link",
+      "context": "link",
+      "input": "tel:+15550100",
+      "allowed": true,
+      "reason": "scheme-allowed"
+    },
+    {
+      "id": "url-relative-link",
+      "context": "link",
+      "input": "/docs/page",
+      "allowed": true,
+      "reason": "relative"
+    },
+    {
+      "id": "url-fragment-link",
+      "context": "link",
+      "input": "#section",
+      "allowed": true,
+      "reason": "relative"
+    },
+    {
+      "id": "url-javascript",
+      "context": "link",
+      "input": "javascript:alert(1)",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-javascript-spaced",
+      "context": "link",
+      "input": "  JaVaScRiPt:alert(1)",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-vbscript",
+      "context": "link",
+      "input": "vbscript:msgbox(1)",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-file",
+      "context": "link",
+      "input": "file:///etc/passwd",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-filesystem",
+      "context": "link",
+      "input": "filesystem:https://a.test/x",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-chrome",
+      "context": "link",
+      "input": "chrome://settings",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-chrome-extension",
+      "context": "link",
+      "input": "chrome-extension://abcd/x",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-tauri",
+      "context": "link",
+      "input": "tauri://localhost/x",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-asset",
+      "context": "link",
+      "input": "asset://x",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-ipc",
+      "context": "link",
+      "input": "ipc://x",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-ws",
+      "context": "link",
+      "input": "ws://a.test",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-wss",
+      "context": "link",
+      "input": "wss://a.test",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-ftp",
+      "context": "link",
+      "input": "ftp://a.test/f",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-h2o",
+      "context": "link",
+      "input": "h2o://internal/secret",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-h2oapp",
+      "context": "link",
+      "input": "h2oapp://open",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-x2y",
+      "context": "link",
+      "input": "x2y:payload",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-unknown-alpha",
+      "context": "link",
+      "input": "weirdscheme:payload",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-protocol-relative",
+      "context": "link",
+      "input": "//evil.test/x",
+      "allowed": false,
+      "reason": "protocol-relative"
+    },
+    {
+      "id": "url-data-text-html-link",
+      "context": "link",
+      "input": "data:text/html,<script>",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-image-https",
+      "context": "image",
+      "input": "https://example.test/i.png",
+      "allowed": true,
+      "reason": "scheme-allowed"
+    },
+    {
+      "id": "url-image-data-png",
+      "context": "image",
+      "input": "data:image/png;base64,iVBORw0KGgo=",
+      "allowed": true,
+      "reason": "data-image-raster"
+    },
+    {
+      "id": "url-image-data-jpeg",
+      "context": "image",
+      "input": "data:image/jpeg;base64,/9j/4AAQ=",
+      "allowed": true,
+      "reason": "data-image-raster"
+    },
+    {
+      "id": "url-image-data-svg",
+      "context": "image",
+      "input": "data:image/svg+xml;base64,PHN2Zz4=",
+      "allowed": false,
+      "reason": "data-uri-not-allowed"
+    },
+    {
+      "id": "url-image-data-text-html",
+      "context": "image",
+      "input": "data:text/html,x",
+      "allowed": false,
+      "reason": "data-uri-not-allowed"
+    },
+    {
+      "id": "url-image-javascript",
+      "context": "image",
+      "input": "javascript:alert(1)",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-empty",
+      "context": "link",
+      "input": "",
+      "allowed": false,
+      "reason": "empty"
+    }
+  ]
+}

@@ -49,9 +49,9 @@ Accepted architecture:
 - a thin real-DOM sanitization adapter;
 - a pinned mature DOM-aware sanitizer engine.
 
-Current selected implementation candidate: **DOMPurify 3.4.15**. It is not
-vendored, installed, or depended on yet; dependency, licence and repository
-admission are preflighted in the implementation prompt, not here.
+Selected engine: **DOMPurify 3.4.15**, now vendored byte-verbatim under
+`vendor/dompurify/` with `PIN.json` and the elected Apache-2.0 `LICENSE`. See
+*Engine admission* below.
 
 ## 5. Policy / engine versioning
 
@@ -99,7 +99,73 @@ There is no flag day. Storage stays on v1 across every step above; any future
 change to shared v1 semantics remains cross-Lane gated with
 `L-STORAGE-SAVED-CHATS`.
 
+## Engine admission (scoped, not global policy)
+
+DOMPurify 3.4.15 has been admitted **for this Renderer sanitizer only**.
+
+Byte-verbatim vendoring was chosen because this Studio source surface has no
+bundler: modules are admitted as explicit files and loaded as classic scripts.
+Vendoring the exact `dist/purify.js`, pinned by SHA-256, is the form of
+admission this surface can actually verify.
+
+**This does not establish a repository-wide dependency policy.** The adjacent
+`@supabase/supabase-js` model is a declared npm dependency consumed through a
+different bundling mechanism; it is unaffected and is not being displaced.
+Neither model is being promoted here to a global canonical governance rule -
+this is a derived, surface-specific split, and describing it otherwise would
+overstate it.
+
+Ownership for this engine:
+
+- **Renderer** owns selection, use, policy, and security regression evidence.
+- **Build & Delivery** owns any later admission of these bytes into produced
+  artifacts. Nothing under `vendor/` enters a delivery allowlist at this
+  checkpoint.
+- **Security-advisory ownership is provisionally Renderer-scoped**, because
+  repository-wide advisory ownership is unassigned. That is a gap being covered
+  locally, not a claim on the general responsibility.
+
+Integrity is enforced by
+`tools/validation/studio/validate-studio-sanitizer-v2-vendor-pin.mjs`: the
+pinned SHA-256, the exact `PIN.json` field set, the preserved upstream licence
+banner, a single engine copy, and no package dependency. Pinning the SHA of this
+vendored third-party artifact is the opposite of the v1 obligation above, which
+is behavioral and deliberately not SHA-pinned.
+
 ## Trusted Types
 
-Trusted Types is an architectural seam for later v2/sink work. It is recorded
-here as direction only and is not implemented at this checkpoint.
+Trusted Types is an architectural seam for later v2/sink work. It is **not
+implemented** at this checkpoint: no policy is created, no
+`require-trusted-types-for` is added, and no CSP is modified. v2 works correctly
+without it.
+
+Hazards proven against 3.4.15, recorded so later work does not rediscover them:
+
+- a caller-owned policy needs both `createHTML` and `createScriptURL`;
+- the engine's internal policy creation can fail silently under enforcement and
+  return an empty string;
+- duplicate engine instances become dangerous under enforcement, which is why
+  the adapter captures the UMD singleton instead of constructing a second
+  instance via `DOMPurify(window)`;
+- fragment output does not require a `TrustedHTML` string sink.
+
+## Known engine behaviours this adapter defends against
+
+Proven against 3.4.15 and enforced by validators, not by code review alone:
+
+- **`setConfig()` is never called.** After `setConfig()`, per-call config is
+  silently ignored, which can turn a requested `RETURN_DOM_FRAGMENT` into a
+  String result without throwing. The complete frozen policy-derived config is
+  passed to `sanitize()` on every call.
+- **`ALLOW_UNKNOWN_PROTOCOLS: false` is not the protocol boundary.** The engine
+  default retains digit-bearing schemes such as `h2o:`, `h2oapp:` and `x2y:`
+  while stripping alphabetic unknown ones. The policy classifier is the source
+  of truth for contextual URI decisions; `ALLOWED_URI_REGEXP` is a scheme-aware
+  backstop written to stay compatible with ordinary non-URI attribute values
+  such as `target`.
+- **Rejected URI attributes are removed**, never rewritten to `#`, which would
+  falsely present as a real link.
+- **Fragments come from a foreign inert document.**
+  `fragment.ownerDocument !== document` is valid and safe; modern insertion
+  adopts it. The adapter checks the node type and never requires ownership by
+  the live document.
