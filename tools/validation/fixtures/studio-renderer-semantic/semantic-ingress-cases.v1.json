@@ -1,0 +1,324 @@
+{
+  "schema": "h2o.renderer.semantic-ingress-fixtures",
+  "schemaVersion": 1,
+  "note": "Surface-neutral semantic ingress conformance cases. `expect` is the conformance projection of the produced transient Render IR v1 conversation, so Web/Studio and Mobile implementations can assert against identical data. Render keys are intentionally absent: they are projection-local and transient, never a conformance contract.",
+  "cases": [
+    {
+      "id": "current-user-plain-text",
+      "requirement": "current normalized Studio user message -> Render IR",
+      "sourceKind": "normalizedStudioSnapshot",
+      "input": {
+        "chatId": "chat-1",
+        "snapshotId": "snap-1",
+        "messages": [
+          { "order": 0, "role": "user", "text": "What is H2O?", "messageId": "m-1", "turnId": "t-1", "dir": "", "attachments": [] }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "ownerRef": { "type": "h2o.studio.chatSnapshot", "id": "chat-1", "version": "snap-1" },
+        "messages": [
+          {
+            "role": "user",
+            "dir": "auto",
+            "ownerRef": { "type": "h2o.studio.message", "id": "m-1", "anchor": "t-1" },
+            "blocks": [
+              { "kind": "paragraph", "children": [ { "kind": "text", "text": "What is H2O?" } ] }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "current-assistant-plain-text-rtl",
+      "requirement": "current normalized Studio assistant message -> Render IR, direction preserved",
+      "sourceKind": "normalizedStudioSnapshot",
+      "input": {
+        "chatId": "chat-1",
+        "snapshotId": "snap-1",
+        "messages": [
+          { "order": 0, "role": "assistant", "text": "H2O is a platform.", "messageId": "m-2", "turnId": "", "dir": "rtl", "attachments": [] }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "ownerRef": { "type": "h2o.studio.chatSnapshot", "id": "chat-1", "version": "snap-1" },
+        "messages": [
+          {
+            "role": "assistant",
+            "dir": "rtl",
+            "ownerRef": { "type": "h2o.studio.message", "id": "m-2" },
+            "blocks": [
+              { "kind": "paragraph", "children": [ { "kind": "text", "text": "H2O is a platform." } ] }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "current-four-canonical-roles",
+      "requirement": "user / assistant / system / tool preservation",
+      "sourceKind": "normalizedStudioSnapshot",
+      "input": {
+        "chatId": "chat-roles",
+        "snapshotId": "snap-roles",
+        "messages": [
+          { "role": "user", "text": "u", "messageId": "r-1", "dir": "", "attachments": [] },
+          { "role": "assistant", "text": "a", "messageId": "r-2", "dir": "", "attachments": [] },
+          { "role": "system", "text": "s", "messageId": "r-3", "dir": "", "attachments": [] },
+          { "role": "tool", "text": "t", "messageId": "r-4", "dir": "", "attachments": [] }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "ownerRef": { "type": "h2o.studio.chatSnapshot", "id": "chat-roles", "version": "snap-roles" },
+        "messages": [
+          { "role": "user", "dir": "auto", "ownerRef": { "type": "h2o.studio.message", "id": "r-1" }, "blocks": [ { "kind": "paragraph", "children": [ { "kind": "text", "text": "u" } ] } ] },
+          { "role": "assistant", "dir": "auto", "ownerRef": { "type": "h2o.studio.message", "id": "r-2" }, "blocks": [ { "kind": "paragraph", "children": [ { "kind": "text", "text": "a" } ] } ] },
+          { "role": "system", "dir": "auto", "ownerRef": { "type": "h2o.studio.message", "id": "r-3" }, "blocks": [ { "kind": "paragraph", "children": [ { "kind": "text", "text": "s" } ] } ] },
+          { "role": "tool", "dir": "auto", "ownerRef": { "type": "h2o.studio.message", "id": "r-4" }, "blocks": [ { "kind": "paragraph", "children": [ { "kind": "text", "text": "t" } ] } ] }
+        ]
+      }
+    },
+    {
+      "id": "current-user-message-with-owner-attachment",
+      "requirement": "owner attachment survives as semantic image content in owner order",
+      "sourceKind": "normalizedStudioSnapshot",
+      "input": {
+        "chatId": "chat-att",
+        "snapshotId": "snap-att",
+        "messages": [
+          {
+            "role": "user",
+            "text": "See this",
+            "messageId": "m-att",
+            "dir": "",
+            "attachments": [
+              { "kind": "image", "thumbnailSrc": "https://example.test/t.png", "originalSrc": "https://example.test/o.png", "alt": "Diagram", "width": 640, "height": 480, "captureStatus": "linked" }
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "ownerRef": { "type": "h2o.studio.chatSnapshot", "id": "chat-att", "version": "snap-att" },
+        "messages": [
+          {
+            "role": "user",
+            "dir": "auto",
+            "ownerRef": { "type": "h2o.studio.message", "id": "m-att" },
+            "blocks": [
+              { "kind": "paragraph", "children": [ { "kind": "text", "text": "See this" } ] },
+              { "kind": "image", "src": "https://example.test/o.png", "thumbnailSrc": "https://example.test/t.png", "alt": "Diagram", "width": 640, "height": 480, "captureStatus": "linked" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "current-unknown-role-fails-closed",
+      "requirement": "unknown role fails closed and is never coerced to assistant",
+      "sourceKind": "normalizedStudioSnapshot",
+      "input": {
+        "chatId": "chat-bad",
+        "snapshotId": "snap-bad",
+        "messages": [
+          { "role": "moderator", "text": "nope", "messageId": "m-bad", "dir": "", "attachments": [] }
+        ]
+      },
+      "expect": { "ok": false, "errorMatch": "unsupported role: moderator" }
+    },
+    {
+      "id": "v3-text-content",
+      "requirement": "Saved-Chat v3 text content[] -> Render IR",
+      "sourceKind": "savedChatSnapshotV3",
+      "input": {
+        "schema": "h2o.savedChatSnapshot",
+        "schemaVersion": 3,
+        "chatId": "chat-v3",
+        "snapshotId": "snap-v3",
+        "messages": [
+          { "id": "m0", "role": "user", "turnIndex": 0, "content": [ { "type": "text", "text": "hello" } ], "assetRefs": [] }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "ownerRef": { "type": "h2o.savedChat.snapshot", "id": "chat-v3", "version": "snap-v3" },
+        "messages": [
+          {
+            "role": "user",
+            "dir": "auto",
+            "ownerRef": { "type": "h2o.savedChat.message", "id": "m0" },
+            "blocks": [ { "kind": "paragraph", "children": [ { "kind": "text", "text": "hello" } ] } ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "v3-sanitized-html-content",
+      "requirement": "Saved-Chat v3 sanitized HTML -> controlled opaque semantic representation",
+      "sourceKind": "savedChatSnapshotV3",
+      "input": {
+        "schema": "h2o.savedChatSnapshot",
+        "schemaVersion": 3,
+        "chatId": "chat-v3h",
+        "snapshotId": "snap-v3h",
+        "messages": [
+          { "id": "m1", "role": "assistant", "turnIndex": 1, "content": [ { "type": "html", "html": "<p>Sanitized</p>", "sanitized": true } ], "assetRefs": [] }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "ownerRef": { "type": "h2o.savedChat.snapshot", "id": "chat-v3h", "version": "snap-v3h" },
+        "messages": [
+          {
+            "role": "assistant",
+            "dir": "auto",
+            "ownerRef": { "type": "h2o.savedChat.message", "id": "m1" },
+            "blocks": [
+              { "kind": "opaqueProviderBlock", "opaqueKind": "ownerSanitizedHtml", "mediaType": "text/html", "ownerSanitized": true, "html": "<p>Sanitized</p>" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "v3-ordered-multipart-text-and-html",
+      "requirement": "ordered multipart text + HTML preservation, one owner part -> one IR block",
+      "sourceKind": "savedChatSnapshotV3",
+      "input": {
+        "schema": "h2o.savedChatSnapshot",
+        "schemaVersion": 3,
+        "chatId": "chat-multi",
+        "snapshotId": "snap-multi",
+        "messages": [
+          {
+            "id": "m2",
+            "role": "assistant",
+            "parentId": "m1",
+            "turnIndex": 2,
+            "content": [
+              { "type": "text", "text": "first" },
+              { "type": "html", "html": "<p>second</p>", "sanitized": true },
+              { "type": "text", "text": "third" }
+            ],
+            "assetRefs": []
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "ownerRef": { "type": "h2o.savedChat.snapshot", "id": "chat-multi", "version": "snap-multi" },
+        "messages": [
+          {
+            "role": "assistant",
+            "dir": "auto",
+            "ownerRef": { "type": "h2o.savedChat.message", "id": "m2", "anchor": "m1" },
+            "blocks": [
+              { "kind": "paragraph", "children": [ { "kind": "text", "text": "first" } ] },
+              { "kind": "opaqueProviderBlock", "opaqueKind": "ownerSanitizedHtml", "mediaType": "text/html", "ownerSanitized": true, "html": "<p>second</p>" },
+              { "kind": "paragraph", "children": [ { "kind": "text", "text": "third" } ] }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "v3-unsupported-future-content-type",
+      "requirement": "unsupported future content follows the explicit controlled opaque policy",
+      "sourceKind": "savedChatSnapshotV3",
+      "input": {
+        "schema": "h2o.savedChatSnapshot",
+        "schemaVersion": 3,
+        "chatId": "chat-future",
+        "snapshotId": "snap-future",
+        "messages": [
+          {
+            "id": "m3",
+            "role": "tool",
+            "turnIndex": 3,
+            "content": [ { "type": "futureWidget", "widgetId": "w-9", "payload": { "a": 1 } } ],
+            "assetRefs": []
+          }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "ownerRef": { "type": "h2o.savedChat.snapshot", "id": "chat-future", "version": "snap-future" },
+        "messages": [
+          {
+            "role": "tool",
+            "dir": "auto",
+            "ownerRef": { "type": "h2o.savedChat.message", "id": "m3" },
+            "blocks": [
+              {
+                "kind": "opaqueProviderBlock",
+                "opaqueKind": "unsupportedOwnerContent",
+                "ownerContentType": "futureWidget",
+                "ownerContent": { "type": "futureWidget", "widgetId": "w-9", "payload": { "a": 1 } }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "v3-unsanitized-html-fails-closed",
+      "requirement": "HTML not marked sanitized is never promoted to trusted content",
+      "sourceKind": "savedChatSnapshotV3",
+      "input": {
+        "schema": "h2o.savedChatSnapshot",
+        "schemaVersion": 3,
+        "chatId": "chat-unsafe",
+        "snapshotId": "snap-unsafe",
+        "messages": [
+          { "id": "m4", "role": "assistant", "turnIndex": 4, "content": [ { "type": "html", "html": "<p>raw</p>" } ], "assetRefs": [] }
+        ]
+      },
+      "expect": { "ok": false, "errorMatch": "not marked sanitized" }
+    },
+    {
+      "id": "v3-legacy-scalar-content-fails-closed",
+      "requirement": "v3 legacy duplicated scalar bodies are refused, not read",
+      "sourceKind": "savedChatSnapshotV3",
+      "input": {
+        "schema": "h2o.savedChatSnapshot",
+        "schemaVersion": 3,
+        "chatId": "chat-legacy",
+        "snapshotId": "snap-legacy",
+        "messages": [
+          { "id": "m5", "role": "user", "turnIndex": 5, "contentText": "legacy", "content": [ { "type": "text", "text": "legacy" } ], "assetRefs": [] }
+        ]
+      },
+      "expect": { "ok": false, "errorMatch": "legacy scalar content" }
+    },
+    {
+      "id": "v3-unknown-role-fails-closed",
+      "requirement": "unknown role fails closed on the Saved-Chat v3 path too",
+      "sourceKind": "savedChatSnapshotV3",
+      "input": {
+        "schema": "h2o.savedChatSnapshot",
+        "schemaVersion": 3,
+        "chatId": "chat-v3role",
+        "snapshotId": "snap-v3role",
+        "messages": [
+          { "id": "m6", "role": "narrator", "turnIndex": 6, "content": [ { "type": "text", "text": "x" } ], "assetRefs": [] }
+        ]
+      },
+      "expect": { "ok": false, "errorMatch": "unsupported role: narrator" }
+    },
+    {
+      "id": "v3-wrong-schema-version-fails-closed",
+      "requirement": "v1/v2 packages are never ingested through the v3 path",
+      "sourceKind": "savedChatSnapshotV3",
+      "input": {
+        "schema": "h2o.savedChatSnapshot",
+        "schemaVersion": 2,
+        "chatId": "chat-v2",
+        "snapshotId": "snap-v2",
+        "messages": []
+      },
+      "expect": { "ok": false, "errorMatch": "schemaVersion must be 3" }
+    }
+  ]
+}
