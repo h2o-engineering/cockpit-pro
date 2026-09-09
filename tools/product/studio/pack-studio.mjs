@@ -1296,6 +1296,18 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   // flag-gated + opt-in, default off). Keep parallel to
   // ARCHIVE_WORKBENCH_OUT_FILES below.
   "reader-notes/annotation-report.studio.js",
+
+  // Renderer sanitizer v2 (M03 P1 S1A) — DELIVERY-ONLY admission. These four
+  // files ship inside the produced artifact but are deliberately UNUSED: no
+  // studio.html <script> tag references them and no runtime consumer exists.
+  // Current rich replay stays on v1 (platform/html-sanitizer.js). The vendored
+  // engine is byte-verbatim DOMPurify 3.4.15; its LICENSE ships beside it as an
+  // Apache-2.0 condition. PIN.json is source/build provenance and is NOT
+  // delivered. Keep parallel to ARCHIVE_WORKBENCH_OUT_FILES below.
+  "renderer/safety/sanitizer-policy.v1.js",
+  "renderer/safety/vendor/dompurify/purify.js",
+  "renderer/safety/html-sanitizer.v2.js",
+  "renderer/safety/vendor/dompurify/LICENSE",
 ]);
 export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   "studio.html",
@@ -1671,6 +1683,12 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
 
   // Reader & Notes — NV1 annotation report consumer — see SOURCE_FILES.
   "reader-notes/annotation-report.studio.js",
+
+  // Renderer sanitizer v2 (M03 P1 S1A) — delivered but UNUSED — see SOURCE_FILES.
+  "renderer/safety/sanitizer-policy.v1.js",
+  "renderer/safety/vendor/dompurify/purify.js",
+  "renderer/safety/html-sanitizer.v2.js",
+  "renderer/safety/vendor/dompurify/LICENSE",
 ]);
 
 function ensureDir(dirPath) {
