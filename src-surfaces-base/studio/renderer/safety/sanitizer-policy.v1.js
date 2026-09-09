@@ -12,7 +12,10 @@
  *
  * Policy version and engine version are deliberately independent: a policy
  * change must be reviewable without an engine bump, and an engine bump must
- * not silently move policy.
+ * not silently move policy. The ".v1" in this filename is the module-contract
+ * version, following render-ir.v1.js and saved-chat-package-v1.tauri.js; the
+ * security policy it carries is versioned separately by POLICY_VERSION, which
+ * is 2 as of the pre-wiring URL hardening.
  *
  * Posture: this is not a "preserve as much provider HTML as possible" policy.
  * Truthful content degradation is preferred over unsafe fidelity. CSP is
@@ -25,7 +28,7 @@
   if (Renderer.sanitizerPolicy && Renderer.sanitizerPolicy.__installed) return;
 
   const POLICY_ID = "h2o.renderer.html-sanitizer-policy";
-  const POLICY_VERSION = 1;
+  const POLICY_VERSION = 2;
   const API_VERSION = "0.1.0-m03-s1a";
 
   /* One profile is implemented. The parameter exists so a later replayCompat
@@ -92,9 +95,13 @@
     "img.src": URI_CONTEXT_IMAGE,
   });
 
+  /* Image sources are https-only (plus the constrained raster data: form
+   * below). Plain http image loads are mixed content and a passive tracking
+   * channel, and the initial content profile has no need of them. Link href
+   * policy is a separate decision and still admits http. */
   const ALLOWED_SCHEMES = Object.freeze({
     [URI_CONTEXT_LINK]: Object.freeze(["https", "http", "mailto", "tel"]),
-    [URI_CONTEXT_IMAGE]: Object.freeze(["https", "http", "data"]),
+    [URI_CONTEXT_IMAGE]: Object.freeze(["https", "data"]),
   });
 
   /*
@@ -233,9 +240,18 @@
       return freezeDeep({ ok: false, reason: "protocol-relative", scheme: "", context: contextName });
     }
 
+    /*
+     * Neither of these carries a scheme, and both are refused anyway. A
+     * fragment-only value would drive Studio hash routing, and a schemeless
+     * relative value would resolve against the application origin: opaque
+     * provider/owner HTML must acquire neither same-origin navigation nor
+     * application-routing capability.
+     */
+    if (normalized.startsWith("#")) {
+      return freezeDeep({ ok: false, reason: "fragment-not-allowed", scheme: "", context: contextName });
+    }
     if (!SCHEME_PATTERN.test(normalized)) {
-      /* No scheme at all: a relative path or fragment. */
-      return freezeDeep({ ok: true, reason: "relative", scheme: "", context: contextName });
+      return freezeDeep({ ok: false, reason: "relative-not-allowed", scheme: "", context: contextName });
     }
 
     const scheme = schemeOf(normalized);

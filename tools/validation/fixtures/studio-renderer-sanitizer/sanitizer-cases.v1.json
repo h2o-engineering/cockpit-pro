@@ -2,8 +2,8 @@
   "schema": "h2o.renderer.sanitizer-v2-cases",
   "schemaVersion": 1,
   "policyId": "h2o.renderer.html-sanitizer-policy",
-  "policyVersion": 1,
-  "note": "Renderer sanitizer v2 security/policy evidence. Expectations are substring-based on purpose: exact serialization is a browser/engine detail, while the security property (what survives and what must be gone) is the contract. Distinct from v1-compatibility-cases.json, which pins exact v1 projector output bytes and is not a v2 corpus.",
+  "policyVersion": 2,
+  "note": "Renderer sanitizer v2 security/policy evidence at policyVersion 2 (pre-wiring URL hardening: schemeless relative, fragment-only and http image sources all fail closed). Expectations are substring-based on purpose: exact serialization is a browser/engine detail, while the security property (what survives and what must be gone) is the contract. Distinct from v1-compatibility-cases.json, which pins exact v1 projector output bytes and is not a v2 corpus.",
   "cases": [
     {
       "id": "pos-paragraph-heading",
@@ -135,16 +135,28 @@
       }
     },
     {
-      "id": "pos-relative-link",
-      "kind": "positive",
-      "requirement": "scheme-less relative and fragment links survive",
-      "input": "<a href=\"/docs/page\">rel</a><a href=\"#section\">frag</a>",
+      "id": "neg-relative-and-fragment-links",
+      "kind": "negative",
+      "requirement": "schemeless relative and fragment-only hrefs are removed so opaque HTML gains no same-origin navigation or hash-routing capability",
+      "input": "<a href=\"/docs/page\">rel</a><a href=\"./local\">dot</a><a href=\"../up\">up</a><a href=\"foo.html\">file</a><a href=\"#section\">frag</a><a href=\"#/saved\">route</a>",
       "expect": {
         "mustContain": [
-          "href=\"/docs/page\"",
-          "href=\"#section\""
+          "rel",
+          "dot",
+          "up",
+          "file",
+          "frag",
+          "route"
         ],
-        "mustNotContain": [],
+        "mustNotContain": [
+          "href=\"/docs/page\"",
+          "href=\"./local\"",
+          "href=\"../up\"",
+          "href=\"foo.html\"",
+          "href=\"#section\"",
+          "href=\"#/saved\"",
+          "href="
+        ],
         "idempotent": true
       }
     },
@@ -174,6 +186,22 @@
           "alt=\"px\""
         ],
         "mustNotContain": [],
+        "idempotent": true
+      }
+    },
+    {
+      "id": "neg-image-http-source",
+      "kind": "negative",
+      "requirement": "plain http image sources are refused; https and raster data: remain accepted",
+      "input": "<img src=\"http://example.test/i.png\" alt=\"insecure\"><img src=\"https://example.test/ok.png\" alt=\"secure\">",
+      "expect": {
+        "mustContain": [
+          "alt=\"secure\"",
+          "src=\"https://example.test/ok.png\""
+        ],
+        "mustNotContain": [
+          "http://example.test/i.png"
+        ],
         "idempotent": true
       }
     },
@@ -860,15 +888,71 @@
       "id": "url-relative-link",
       "context": "link",
       "input": "/docs/page",
-      "allowed": true,
-      "reason": "relative"
+      "allowed": false,
+      "reason": "relative-not-allowed"
     },
     {
       "id": "url-fragment-link",
       "context": "link",
       "input": "#section",
-      "allowed": true,
-      "reason": "relative"
+      "allowed": false,
+      "reason": "fragment-not-allowed"
+    },
+    {
+      "id": "url-relative-dot",
+      "context": "link",
+      "input": "./some-local-path",
+      "allowed": false,
+      "reason": "relative-not-allowed"
+    },
+    {
+      "id": "url-relative-dotdot",
+      "context": "link",
+      "input": "../foo",
+      "allowed": false,
+      "reason": "relative-not-allowed"
+    },
+    {
+      "id": "url-relative-root",
+      "context": "link",
+      "input": "/settings",
+      "allowed": false,
+      "reason": "relative-not-allowed"
+    },
+    {
+      "id": "url-relative-bare-file",
+      "context": "link",
+      "input": "foo.html",
+      "allowed": false,
+      "reason": "relative-not-allowed"
+    },
+    {
+      "id": "url-fragment-plain",
+      "context": "link",
+      "input": "#fragment",
+      "allowed": false,
+      "reason": "fragment-not-allowed"
+    },
+    {
+      "id": "url-fragment-route-saved",
+      "context": "link",
+      "input": "#/saved",
+      "allowed": false,
+      "reason": "fragment-not-allowed"
+    },
+    {
+      "id": "url-fragment-route-read",
+      "context": "link",
+      "input": "#/read/test",
+      "allowed": false,
+      "reason": "fragment-not-allowed"
+    },
+    {
+      "id": "url-fragment-route-library",
+      "context": "link",
+      "input": "#/library/all",
+      "allowed": false,
+      "reason": "fragment-not-allowed"
     },
     {
       "id": "url-javascript",
@@ -1009,6 +1093,20 @@
       "input": "https://example.test/i.png",
       "allowed": true,
       "reason": "scheme-allowed"
+    },
+    {
+      "id": "url-image-http",
+      "context": "image",
+      "input": "http://example.test/i.png",
+      "allowed": false,
+      "reason": "scheme-not-allowed"
+    },
+    {
+      "id": "url-image-relative",
+      "context": "image",
+      "input": "/assets/i.png",
+      "allowed": false,
+      "reason": "relative-not-allowed"
     },
     {
       "id": "url-image-data-png",

@@ -59,6 +59,35 @@ Policy version and sanitizer-engine version are **distinct and independently
 versioned**. A policy change must be explicit and testable on its own, without
 an engine bump, and an engine bump must not silently move policy.
 
+Current state: **policyVersion 2**, engine **DOMPurify 3.4.15** (unchanged).
+
+The `.v1` in `sanitizer-policy.v1.js` is the *module-contract* version, matching
+`render-ir.v1.js` and `saved-chat-package-v1.tauri.js`; the security policy the
+module carries is versioned separately by `POLICY_VERSION`. The two are not
+expected to move together.
+
+### policyVersion 2 - pre-wiring URL hardening
+
+Three admission rules were tightened before any wiring. Each narrows what
+opaque provider/owner HTML can reach, and none is a behavioural change to
+already-admitted content:
+
+- **Schemeless relative URLs fail closed** (`./x`, `../x`, `/x`, `x.html`).
+  They would resolve against the application origin, so admitting them would
+  hand opaque HTML same-origin navigation capability.
+- **Fragment-only URLs fail closed** (`#x`, `#/saved`, `#/read/...`). Studio
+  routing is hash-driven, so admitting them would let provider content trigger
+  application routing.
+- **Image sources are https or constrained raster `data:` only.** `http:` is
+  removed from image admission as mixed content and a passive tracking channel.
+  Link `href` policy was deliberately *not* narrowed alongside it and still
+  admits `http:`.
+
+Retained unchanged: protocol-relative (`//host`) rejection, and rejection of
+`h2o:`, `h2oapp:`, `x2y:`, `file:`, `filesystem:`, `chrome:`,
+`chrome-extension:`, `tauri:`, `asset:`, `ipc:`, `ws:`, `wss:`, `ftp:` and every
+unknown scheme. Rejected URI attributes are removed, never rewritten.
+
 ## 6. Owner-sanitized HTML
 
 Saved-Chat `sanitized: true` is an **ingress admission signal**, not a Renderer
@@ -131,6 +160,21 @@ pinned SHA-256, the exact `PIN.json` field set, the preserved upstream licence
 banner, a single engine copy, and no package dependency. Pinning the SHA of this
 vendored third-party artifact is the opposite of the v1 obligation above, which
 is behavioral and deliberately not SHA-pinned.
+
+## Performance gate (not satisfied here)
+
+Performance acceptance is **not** part of this unwired foundation, and nothing
+in it should be read as clearing v2 for production load.
+
+Whole-transcript synchronous sanitization must not be assumed acceptable. A
+bounded spike observed roughly **22-28 ms for ~265 KB in Chromium**, scaling
+roughly linearly. Those figures are *evidence from one spike on one machine* -
+they are not permanent budgets, and they have not been reviewed as such.
+
+A dedicated performance gate is required **before rich replay switches to v2**.
+Defining it, and the budgets it enforces, belongs to that work; no performance
+framework is created at this checkpoint. The policy's `maxInputBytes` is a
+safety guard against absurd input, not a performance budget.
 
 ## Trusted Types
 

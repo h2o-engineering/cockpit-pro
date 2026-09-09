@@ -22,6 +22,11 @@ const policySource = fs.readFileSync(path.join(REPO_ROOT, POLICY_REL), 'utf8');
 const adapterSource = fs.readFileSync(path.join(REPO_ROOT, ADAPTER_REL), 'utf8');
 const corpus = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, CASES_REL), 'utf8'));
 
+/* Bumped from 1 by the pre-wiring URL hardening: schemeless relative,
+ * fragment-only and http image sources now fail closed. A policy-semantic
+ * change must be explicit, so the version moves with it. */
+const EXPECTED_POLICY_VERSION = 2;
+
 /* Source assertions must read code, not prose: both modules discuss the engine
  * and the DOM in comments, so a bare substring search would pass on a
  * disclaimer alone. */
@@ -75,7 +80,7 @@ check('policy loads and operates with no window, document or engine present', ()
   assert.equal(typeof sandbox.window, 'undefined');
   assert.equal(typeof sandbox.document, 'undefined');
   assert.equal(policy.policyId, 'h2o.renderer.html-sanitizer-policy');
-  assert.equal(policy.policyVersion, 1);
+  assert.equal(policy.policyVersion, EXPECTED_POLICY_VERSION);
   assert.doesNotMatch(policyCode, /document\.|window\.|querySelector|createElement|DOMPurify|innerHTML|outerHTML/);
 });
 
@@ -94,13 +99,13 @@ check('policy is frozen and deterministic', () => {
 });
 
 check('policy version and engine version are not conflated', () => {
-  assert.equal(policy.policyVersion, 1);
+  assert.equal(policy.policyVersion, EXPECTED_POLICY_VERSION);
   assert.equal(sanitizer.policyVersion, policy.policyVersion);
   assert.equal(sanitizer.engine, 'dompurify');
   assert.equal(sanitizer.engineVersion, '3.4.15');
   assert.notEqual(String(sanitizer.engineVersion), String(sanitizer.policyVersion));
   const d = sanitizer.diagnose();
-  assert.equal(d.policyVersion, 1);
+  assert.equal(d.policyVersion, EXPECTED_POLICY_VERSION);
   assert.equal(d.engineVersion !== undefined, true);
   assert.notEqual(d.policyId, d.engine);
 });
@@ -149,6 +154,39 @@ check('URI classifier matches every corpus URL case including digit-bearing sche
   }
   for (const denied of policy.deniedSchemes) {
     assert.equal(policy.classifyUrl(`${denied}:payload`, 'link').ok, false, `${denied}: must not be admitted in a link context`);
+  }
+});
+
+check('pre-wiring hardening: relative, fragment and http image sources fail closed', () => {
+  assert.equal(corpus.policyVersion, policy.policyVersion, 'corpus policyVersion drifted from the policy');
+  /* A. schemeless relative values gain no same-origin navigation capability. */
+  for (const value of ['./some-local-path', '../foo', '/settings', 'foo.html', 'docs/page']) {
+    const verdict = policy.classifyUrl(value, 'link');
+    assert.equal(verdict.ok, false, `${value} must fail closed`);
+    assert.equal(verdict.reason, 'relative-not-allowed');
+  }
+  /* B. fragment-only values cannot reach Studio hash routing. */
+  for (const value of ['#fragment', '#/saved', '#/read/test', '#/library/all']) {
+    const verdict = policy.classifyUrl(value, 'link');
+    assert.equal(verdict.ok, false, `${value} must fail closed`);
+    assert.equal(verdict.reason, 'fragment-not-allowed');
+  }
+  /* C. image sources are https or constrained raster data: only. */
+  assert.equal(policy.allowedSchemes.image.includes('http'), false, 'http must not be an image scheme');
+  assert.deepEqual([...policy.allowedSchemes.image], ['https', 'data']);
+  assert.equal(policy.classifyUrl('http://example.test/i.png', 'image').ok, false);
+  assert.equal(policy.classifyUrl('https://example.test/i.png', 'image').ok, true);
+  assert.equal(policy.classifyUrl('data:image/png;base64,iVBORw0KGgo=', 'image').ok, true);
+  assert.equal(policy.classifyUrl('data:image/svg+xml,x', 'image').ok, false);
+  /* D. protocol-relative rejection is retained. */
+  assert.equal(policy.classifyUrl('//evil.example', 'link').reason, 'protocol-relative');
+  /* Link href policy was deliberately NOT narrowed alongside images. */
+  assert.equal(policy.classifyUrl('http://example.test/a', 'link').ok, true);
+  /* No admission path survives that returns a permissive "relative" verdict. */
+  for (const context of ['link', 'image']) {
+    for (const value of ['/x', './x', '#x']) {
+      assert.notEqual(policy.classifyUrl(value, context).reason, 'relative');
+    }
   }
 });
 

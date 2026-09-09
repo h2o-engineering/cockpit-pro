@@ -24,9 +24,21 @@ const REPO_ROOT = path.resolve(path.dirname(__filename), '..', '..', '..');
 const SAFETY_DIR = path.join(REPO_ROOT, 'src-surfaces-base/studio/renderer/safety');
 const CASES_PATH = path.join(REPO_ROOT, 'tools/validation/fixtures/studio-renderer-sanitizer/sanitizer-cases.v1.json');
 
+/*
+ * Strict mode. By default an unavailable browser oracle SKIPs and exits 0, so a
+ * developer without Playwright is not blocked and Tier 1 still runs. CI and
+ * acceptance runs set H2O_REQUIRE_SANITIZER_TIER2=1, where the same condition
+ * is a hard failure: an absent oracle must never be mistaken for evidence.
+ */
+const STRICT = /^(1|true|yes)$/i.test(String(process.env.H2O_REQUIRE_SANITIZER_TIER2 || ''));
+
 function skip(reason) {
   console.log(`SKIP ${reason}`);
   console.log('SKIP is not PASS: the real-browser oracle did not run.');
+  if (STRICT) {
+    console.error('FAIL H2O_REQUIRE_SANITIZER_TIER2 is set: the real-browser oracle is required and could not run.');
+    process.exit(1);
+  }
   process.exit(0);
 }
 
@@ -135,7 +147,8 @@ try {
     assert.equal(boot.installed, true, 'sanitizer v2 did not install in the browser');
     assert.equal(boot.supported, true, 'engine reported unsupported in a real browser');
     assert.equal(boot.diagnose.engineVersion, '3.4.15');
-    assert.equal(boot.diagnose.policyVersion, 1);
+    assert.equal(boot.diagnose.policyVersion, corpus.policyVersion, 'browser policyVersion must match the corpus');
+    assert.equal(boot.diagnose.policyVersion, 2);
     assert.equal(boot.diagnose.usesSetConfig, false);
     assert.equal(boot.diagnose.trustedTypes, 'not-implemented');
   });
@@ -253,7 +266,7 @@ try {
     assert.deepEqual(pageErrors, [], `page errors: ${pageErrors.join(' | ')}`);
   });
 
-  console.log(`PASS ${checks.length} (browser: chromium, cases: ${corpus.cases.length}, urls: ${corpus.urlCases.length})`);
+  console.log(`PASS ${checks.length} (browser: chromium, cases: ${corpus.cases.length}, urls: ${corpus.urlCases.length}, policyVersion: ${corpus.policyVersion}${STRICT ? ', strict' : ''})`);
 } catch (error) {
   console.error(error && error.message ? error.message : error);
   exitCode = 1;
