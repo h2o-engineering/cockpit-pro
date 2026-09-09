@@ -4,14 +4,16 @@
  * inspector card, mounted adjacent to the read-only Archive Health diagnostics
  * card. It lets a human select one already-written `.h2ochat` package from the
  * known archive/packages directory and verify it:
- *   - reuses the existing Desktop diagnostics validation
- *     (H2O.Studio.ingestion.validateSavedChatPackageV1) for the authoritative
- *     manifest / required-file / hash / asset checks,
+ *   - M10 P3.5a: package validity now comes from the TRUSTED Rust authority via
+ *     H2O.Studio.ingestion.readSavedChatArchiveIntegrityV1(), with the canonical
+ *     occupant partition shared from archiveHealthMapping. The legacy JavaScript
+ *     archive verifier is no longer consulted, and there is no fallback to it,
  *   - reads manifest.json (identity) and chat.md (title + a short, ESCAPED text
- *     preview) read-only via the existing bounded archive fs scope,
- *   - maps the result to a granular status:
- *     verified / corrupted / missing-files / hash-mismatch / unsupported-version /
- *     read-error.
+ *     preview) read-only via the existing bounded archive fs scope. These reads
+ *     are PREVIEW ONLY and never decide package validity,
+ *   - maps the trusted verdict to a granular status:
+ *     verified / incomplete / unreadable / identity-mismatch / hash-mismatch /
+ *     unsupported-encoding / corrupted / read-error.
  *
  * Boundaries (H.2 — read-only):
  *   - Desktop/Tauri only. On Chrome the diagnostics API is absent, so the card is
@@ -30,7 +32,6 @@
  *   isDesktopCapable() -> boolean
  *   listPackages() -> Promise<[{ packagePath, packageDirName, status }]>
  *   inspectPackage({ packagePath }) -> Promise<inspection result>
- *   mapInspectStatus(diag, readError) -> status string (pure)
  *   renderArchiveInspectorCard(container, options)
  *   mountArchiveInspectorCard(healthContainer, options)
  *
@@ -72,16 +73,36 @@
   }
 
   function getIngestion() { return (H2O.Studio && H2O.Studio.ingestion) || {}; }
-  function getValidateFn() {
+  /* M10 P3.5a: archive package truth comes from the trusted Rust authority.
+   * The Inspector reads the trusted envelope DIRECTLY — not through the Archive
+   * Health facade — because it needs per-package facts, not Health aggregation.
+   * There is no fallback to the legacy archive verifier. */
+  function getTrustedIntegrityFn() {
     var ing = getIngestion();
-    return (typeof ing.validateSavedChatPackageV1 === 'function') ? ing.validateSavedChatPackageV1 : null;
+    return (typeof ing.readSavedChatArchiveIntegrityV1 === 'function')
+      ? ing.readSavedChatArchiveIntegrityV1 : null;
   }
-  function getListFn() {
-    var ing = getIngestion();
-    return (typeof ing.listSavedChatArchivePackagesV1 === 'function') ? ing.listSavedChatArchivePackagesV1 : null;
+  function getPartitionFn() {
+    var mapping = (H2O.Studio && H2O.Studio.archiveHealthMapping) || null;
+    return (mapping && typeof mapping.partitionOccupants === 'function')
+      ? mapping.partitionOccupants : null;
+  }
+  /* The canonical version triple, from the trusted construction family. */
+  var SCHEMA_VERSION_BY_FAMILY = { v1: 1, v2: 2, v3: 3 };
+  var PAYLOAD_VERSION_BY_FAMILY = { v1: null, v2: 2, v3: 3 };
+  /* PRESENTATION ONLY. The trusted occupant carries the contentHash as bare
+   * canonical hex; every outward Inspector consumer (exporter, relink's
+   * expectedDigest comparison, the export/share contract) has always read the
+   * `sha256-` prefixed form. This formats the already-trusted value and does not
+   * hash, re-hash, canonicalize or compare anything — trusted Rust remains the
+   * sole contentHash authority. */
+  function prefixedHash(value) {
+    var text = cleanString(value).toLowerCase();
+    if (!text) return '';
+    return text.indexOf('sha256-') === 0 ? text : 'sha256-' + text;
   }
   function isDesktopCapable() {
-    return detectTauri() && !!getValidateFn() && !!getListFn();
+    return detectTauri() && !!getTrustedIntegrityFn() && !!getPartitionFn();
   }
 
   function getInvoke() {
@@ -160,14 +181,21 @@
     pickFirst: 'Load and select a package first.',
   };
 
+  /* M10 P3.5a final taxonomy. Every label below a verified package is derived
+   * from TRUSTED Rust classification, so each renders as a problem rather than a
+   * benign warning — `unsupported-encoding` moved from warn to block for exactly
+   * that reason. `missing-files` and `unsupported-version` are RETIRED: the
+   * canonical Partial reason means missing OR unreadable required members, and a
+   * version-triple refusal is a trusted integrity refusal, not a support gap. */
   var STATUS_PRESENTATION = {
-    'verified': { tone: 'ok', label: 'Verified', note: 'Required files present, file hashes match the manifest, and the schema/payload version is supported.' },
-    'corrupted': { tone: 'block', label: 'Corrupted', note: 'The package failed integrity validation (a manifest/asset blocker). It is not safe to import.' },
-    'missing-files': { tone: 'block', label: 'Missing files', note: 'One or more files required by this package version are missing.' },
-    'hash-mismatch': { tone: 'block', label: 'Hash mismatch', note: 'A recomputed file hash does not match the manifest (or contentHash mismatched). The package content does not verify.' },
-    'unsupported-version': { tone: 'warn', label: 'Unsupported version', note: 'The package schemaVersion/payloadVersion pair is unsupported.' },
-    'unsupported-encoding': { tone: 'warn', label: 'Unsupported encoding', note: 'The package declares an encoding that this Desktop version cannot decode and verify.' },
-    'read-error': { tone: 'neutral', label: 'Read error', note: 'The package could not be read or is outside the archive packages directory.' },
+    'verified': { tone: 'ok', label: 'Verified', note: 'Trusted verification accepted this package: its stored bytes match the identity it is stored under.' },
+    'corrupted': { tone: 'block', label: 'Corrupted', note: 'Trusted verification refused this package. It is not safe to import.' },
+    'incomplete': { tone: 'block', label: 'Incomplete', note: 'A required member of this package is missing or could not be read, so it could not be verified.' },
+    'unreadable': { tone: 'block', label: 'Unreadable', note: 'Trusted verification could not read this package at all.' },
+    'identity-mismatch': { tone: 'block', label: 'Identity mismatch', note: 'The package verified, but its proven identity disagrees with the name it is stored under.' },
+    'hash-mismatch': { tone: 'block', label: 'Hash mismatch', note: 'A recomputed hash does not match the identity recorded for this package. The content does not verify.' },
+    'unsupported-encoding': { tone: 'block', label: 'Unsupported encoding', note: 'The package declares a snapshot encoding this format does not admit.' },
+    'read-error': { tone: 'neutral', label: 'Read error', note: 'The package could not be read, is outside the archive packages directory, or trusted integrity was unavailable.' },
   };
 
   var PILL_TONES = {
@@ -189,26 +217,53 @@
     return asArray(diag && diag.blockers).map(function (b) { return cleanString(b && b.code); }).filter(Boolean);
   }
 
-  /* Pure: map the read-only validator diagnostic + a read error into the
-   * inspector's granular status vocabulary (most-specific first). */
-  function mapInspectStatus(diag, readError) {
+  /* The EXACT trusted blocker codes that mean "a recomputed hash disagreed".
+   * Exact membership only — a `/sha|hash/i` heuristic would invent causality
+   * from codes that merely mention a hash. */
+  var HASH_MISMATCH_CODES = [
+    'generation-content-hash-mismatch',
+    'generation-member-sha-mismatch',
+    'generation-asset-sha-mismatch',
+    'generation-v3-gzip-decoded-sha-mismatch',
+    'generation-v3-identity-logical-sha-mismatch',
+  ];
+  var ENCODING_INVALID_CODE = 'generation-v3-snapshot-encoding-invalid';
+
+  /* Pure: map ONE trusted occupant (plus a local read error) into the
+   * inspector's presentation vocabulary. Deterministic and total.
+   *
+   * INTERNAL. The trusted archive path is the only caller, and the symbol is
+   * deliberately not exported. P3.5.6B kept a public legacy-diagnostic mapper
+   * beside it as temporary M08 compatibility; P3.6b migrated portable import to
+   * trusted native verification, so that bridge is gone and this is the only
+   * mapper the Inspector has.
+   *
+   * Package validity is decided entirely by trusted Rust; this only chooses how
+   * to name the trusted verdict. It never derives causality the trusted facts do
+   * not support, which is why the canonical `Partial` reason becomes
+   * `incomplete` rather than `missing-files`, and why a version-triple refusal
+   * falls through to `corrupted` rather than claiming an unsupported version. */
+  function mapTrustedInspectStatus(occupant, readError) {
     if (readError) return 'read-error';
-    var d = safeObject(diag);
-    var codes = blockerCodes(d);
-    var hashChecks = safeObject(d.hashChecks);
-    var assetChecks = safeObject(d.assetChecks);
-    if (codes.some(function (c) { return /^(manifest|snapshot|markdown|html)-missing$/.test(c); })) return 'missing-files';
-    if (hashChecks.contentHashOk === false || hashChecks.snapshotShaOk === false
-        || asArray(assetChecks.hashMismatches).length
-        || codes.some(function (c) { return /sha|hash/i.test(c); })) return 'hash-mismatch';
-    /* M03 T04: gzip v3 is decoded and verified by the governed codec inside
-     * diagnostics, so the pre-M03 gzip-not-enabled blocker no longer exists. Only a
-     * genuinely unsupported encoding value maps to unsupported-encoding; every
-     * governed integrity failure falls through to the hash/corrupted branches. */
-    if (codes.indexOf('snapshot-encoding-invalid') >= 0) return 'unsupported-encoding';
-    if (!isVersionSupported(d.schemaVersion, d.payloadVersion)) return 'unsupported-version';
-    if (cleanString(d.status) === 'blocked' || codes.length) return 'corrupted';
-    return 'verified';
+    var o = safeObject(occupant);
+    var klass = cleanString(o.class);
+    if (klass === 'verified-generation' || klass === 'legacy-package') return 'verified';
+    if (klass !== 'indeterminate') return 'read-error';
+
+    var reason = cleanString(o.reason);
+    if (reason === 'partial') return 'incomplete';
+    if (reason === 'unreadable') return 'unreadable';
+    if (reason === 'identity-mismatch') return 'identity-mismatch';
+
+    var codes = blockerCodes(o);
+    for (var i = 0; i < codes.length; i += 1) {
+      if (HASH_MISMATCH_CODES.indexOf(codes[i]) >= 0) return 'hash-mismatch';
+      if (codes[i] === ENCODING_INVALID_CODE) return 'unsupported-encoding';
+    }
+    /* Everything else the trusted authority refused: corrupt without a granular
+     * blocker, an unexpected outcome, an incoherent version triple, or an
+     * admission-adapter refusal that carries no granular code. */
+    return 'corrupted';
   }
 
   function titleFromMarkdown(md) {
@@ -226,20 +281,23 @@
 
   /* Read-only: list packages already in the archive (reuses the diagnostics
    * inventory). Returns [{ packagePath, packageDirName, status }]. */
-  function listPackages(options) {
-    var listFn = getListFn();
-    if (!detectTauri() || !listFn) return Promise.resolve([]);
+  function listPackages() {
+    var readFn = getTrustedIntegrityFn();
+    var partition = getPartitionFn();
+    if (!detectTauri() || !readFn || !partition) return Promise.resolve([]);
     return Promise.resolve()
-      .then(function () { return listFn(safeObject(options)); })
-      .then(function (res) {
-        var rows = Array.isArray(res) ? res : asArray(res && res.packages);
-        return rows.map(function (row) {
-          var r = safeObject(row);
-          var packagePath = cleanString(r.packagePath) || joinPath(PACKAGE_ROOT, cleanString(r.packageDirName));
+      .then(function () { return readFn(); })
+      .then(function (envelope) {
+        /* Reserved infrastructure and non-package strays are excluded by the
+         * canonical partition; the Inspector never re-implements it. */
+        var occupants = asArray(partition(safeObject(envelope).occupants).packageOccupants);
+        return occupants.map(function (occupant) {
+          var o = safeObject(occupant);
+          var packagePath = cleanString(o.path);
           return {
             packagePath: packagePath,
-            packageDirName: cleanString(r.packageDirName) || packageDirNameForPath(packagePath),
-            status: cleanString(r.status),
+            packageDirName: cleanString(o.name) || packageDirNameForPath(packagePath),
+            status: mapTrustedInspectStatus(o, null),
           };
         }).filter(function (o) { return !!o.packagePath && packagePathIsScoped(o.packagePath); });
       })
@@ -269,27 +327,44 @@
     if (!packagePath) return Promise.resolve(emptyInspection(null, 'read-error', 'no package path'));
     if (!isDesktopCapable()) return Promise.resolve(emptyInspection(packagePath, 'read-error', 'desktop-only'));
     if (!packagePathIsScoped(packagePath)) return Promise.resolve(emptyInspection(packagePath, 'read-error', 'path-not-scoped'));
-    var validateFn = getValidateFn();
+    var readFn = getTrustedIntegrityFn();
+    var partition = getPartitionFn();
+    if (!readFn || !partition) return Promise.resolve(emptyInspection(packagePath, 'read-error', 'trusted archive integrity unavailable'));
 
-    var diag = null;
+    var occupant = null;
+    var envelopeComplete = null;
     var manifest = null;
     var markdown = '';
     var readError = null;
 
     return Promise.resolve()
-      .then(function () { return validateFn({ packagePath: packagePath }); })
-      .then(function (res) { diag = safeObject(res); })
+      .then(function () { return readFn(); })
+      .then(function (envelope) {
+        var env = safeObject(envelope);
+        envelopeComplete = env.complete === true;
+        var occupants = asArray(partition(env.occupants).packageOccupants);
+        for (var i = 0; i < occupants.length; i += 1) {
+          if (cleanString(safeObject(occupants[i]).path) === packagePath) { occupant = safeObject(occupants[i]); break; }
+        }
+        /* Not present in the trusted enumeration: there is no trusted verdict to
+         * show, so this is a local read failure, never `verified`. */
+        if (!occupant) readError = 'not-in-trusted-archive';
+      }, function () { readError = 'archive-integrity-unavailable'; })
+      /* Direct reads below are PREVIEW ONLY. They never decide validity. */
       .then(function () { return readPackageTextFile(packagePath, 'manifest.json').then(function (t) { manifest = safeParseJson(t); }, function () { manifest = null; }); })
       .then(function () { return readPackageTextFile(packagePath, 'chat.md').then(function (t) { markdown = String(t || '').slice(0, MARKDOWN_READ_CAP); }, function () { markdown = ''; }); })
       .then(function () {
-        var d = safeObject(diag);
-        var hashChecks = safeObject(d.hashChecks);
+        var d = safeObject(occupant);
         var m = safeObject(manifest);
-        /* read-error only when the validator itself gave nothing AND we could not read the manifest */
-        if (!cleanString(d.status) && !manifest) readError = 'read-failed';
-        var status = mapInspectStatus(d, readError);
-        var schemaVersion = isFiniteNumber(d.schemaVersion) ? d.schemaVersion : (isFiniteNumber(m.schemaVersion) ? m.schemaVersion : null);
-        var payloadVersion = (d.payloadVersion != null) ? d.payloadVersion : (m.payloadVersion != null ? m.payloadVersion : null);
+        var status = mapTrustedInspectStatus(d, readError);
+        var family = cleanString(d.constructionFamily);
+        var schemaVersion = Object.prototype.hasOwnProperty.call(SCHEMA_VERSION_BY_FAMILY, family)
+          ? SCHEMA_VERSION_BY_FAMILY[family]
+          : (isFiniteNumber(m.schemaVersion) ? m.schemaVersion : null);
+        var payloadVersion = Object.prototype.hasOwnProperty.call(PAYLOAD_VERSION_BY_FAMILY, family)
+          ? PAYLOAD_VERSION_BY_FAMILY[family]
+          : (m.payloadVersion != null ? m.payloadVersion : null);
+        var trustedHash = prefixedHash(d.contentHash);
         return {
           ok: status === 'verified',
           status: status,
@@ -303,9 +378,10 @@
              * manifest's own claim is shown separately and never substituted
              * for it: a package that lies about its identity must not be able
              * to display a borrowed one. */
-            contentHash: cleanString(hashChecks.expectedContentHash),
+            contentHash: trustedHash,
             manifestClaimedContentHash: cleanString(m.contentHash),
-            contentHashVerified: hashChecks.contentHashOk === true,
+            /* Trusted verification recomputed and accepted this identity. */
+            contentHashVerified: status === 'verified' && !!trustedHash,
             schemaVersion: schemaVersion,
             payloadVersion: payloadVersion,
             /* Recorded by the writer; presentation metadata only — never
@@ -314,22 +390,33 @@
             /* M05 §D verified classification (legacy | generation | mismatch |
              * unclassified). Derived from verified identity, never a filename
              * parse. */
-            nameClassification: cleanString(d.nameClassification) || 'unclassified',
+            nameClassification: (function () {
+              var k = cleanString(d.class);
+              if (k === 'verified-generation') return 'generation';
+              if (k === 'legacy-package') return 'legacy';
+              return cleanString(d.reason) === 'identity-mismatch' ? 'mismatch' : 'unclassified';
+            })(),
             packageKind: (function () {
-              var c = cleanString(d.nameClassification);
-              return c === 'generation' ? 'generation' : (c === 'legacy' ? 'legacy' : 'unusable');
+              var k = cleanString(d.class);
+              return k === 'verified-generation' ? 'generation' : (k === 'legacy-package' ? 'legacy' : 'unusable');
             })(),
             messageCount: isFiniteNumber(m.messageCount) ? m.messageCount : null,
           },
           checks: {
-            manifestPresent: d.manifestPresent !== false,
-            snapshotPresent: d.snapshotPresent !== false,
-            markdownPresent: d.markdownPresent !== false,
-            htmlPresent: d.htmlPresent !== false,
-            assetsDirPresent: d.assetsDirPresent === true,
-            contentHashOk: hashChecks.contentHashOk === true,
-            hashMismatchCount: asArray(safeObject(d.assetChecks).hashMismatches).length,
+            /* Member presence is not a trusted fact: canonical `Partial` means
+             * missing OR unreadable, so claiming per-file presence would invent
+             * specificity. These reflect the PREVIEW reads only. */
+            manifestPresent: !!manifest,
+            snapshotPresent: null,
+            markdownPresent: !!markdown,
+            htmlPresent: null,
+            assetsDirPresent: Array.isArray(d.assetShas) && d.assetShas.length > 0,
+            contentHashOk: status === 'verified' && !!trustedHash,
+            hashMismatchCount: status === 'hash-mismatch' ? 1 : 0,
             supportedVersion: isVersionSupported(schemaVersion, payloadVersion),
+            /* Enumeration completeness, so the card cannot imply the archive was
+             * fully enumerated when it was not. */
+            archiveEnumerationComplete: envelopeComplete,
           },
           preview: previewFromMarkdown(markdown),
           blockers: blockerCodes(d),
@@ -523,7 +610,6 @@
     isDesktopCapable: isDesktopCapable,
     listPackages: listPackages,
     inspectPackage: inspectPackage,
-    mapInspectStatus: mapInspectStatus,
     renderArchiveInspectorCard: renderArchiveInspectorCard,
     mountArchiveInspectorCard: mountArchiveInspectorCard,
   };

@@ -22,6 +22,7 @@ fn gen_in(chat: &str, tag: u8, family: ConstructionFamily) -> ClassifiedOccupant
         name: format!("{chat}.g{h}.h2ochat"),
         class: OccupantClass::VerifiedGeneration(VerifiedPackage {
             chat_id: chat.to_string(),
+            snapshot_id: "snap-fixture".to_string(),
             content_hash: h,
             construction_family: family,
             snapshot_encoding: "identity".into(),
@@ -290,6 +291,7 @@ fn the_preview_carries_every_protection_reason() {
         name: "chat_a.h2ochat".into(),
         class: OccupantClass::LegacyPackage(VerifiedPackage {
             chat_id: "chat_a".into(),
+            snapshot_id: "snap-fixture".to_string(),
             content_hash: hash(70),
             construction_family: ConstructionFamily::V1,
             snapshot_encoding: "identity".into(),
@@ -308,6 +310,7 @@ fn the_preview_carries_every_protection_reason() {
         name: format!("chat_a.g{}.h2ochat", hash(60)),
         class: OccupantClass::VerifiedGeneration(VerifiedPackage {
             chat_id: "chat_a".into(),
+            snapshot_id: "snap-fixture".to_string(),
             content_hash: hash(60),
             construction_family: ConstructionFamily::V1,
             snapshot_encoding: "identity".into(),
@@ -326,7 +329,10 @@ fn the_preview_carries_every_protection_reason() {
     occupants.push(ClassifiedOccupant {
         path: "archive/packages/broken.h2ochat".into(),
         name: "broken.h2ochat".into(),
-        class: OccupantClass::Indeterminate { reason: IndeterminateReason::Corrupt },
+        class: OccupantClass::Indeterminate {
+            reason: IndeterminateReason::Corrupt,
+            verifier_blocker: None,
+        },
     });
 
     // All four trusted DB protection classes, on the two otherwise-candidate ones.
@@ -470,7 +476,10 @@ fn indeterminate(name: &str, reason: IndeterminateReason) -> ClassifiedOccupant 
     ClassifiedOccupant {
         path: format!("archive/packages/{name}"),
         name: name.to_string(),
-        class: OccupantClass::Indeterminate { reason },
+        class: OccupantClass::Indeterminate {
+            reason,
+            verifier_blocker: None,
+        },
     }
 }
 

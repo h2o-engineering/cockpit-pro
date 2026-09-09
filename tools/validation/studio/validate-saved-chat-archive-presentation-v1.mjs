@@ -122,6 +122,47 @@ check('3. a preserved stale generation is historical, not current', () => {
   assert.equal(out.preservedLabel, 'Preserved');
 });
 
+/* ── Proof 3c — the TWO REPRESENTATIONS the engine actually emits ─────────
+ *
+ * Every other fixture in this file spells both sides of the comparison in the
+ * pre-M10 `sha256-<hex>` form, so none of them can see a representation skew.
+ * The shipping engine no longer does that: M10 P3.5a moved package identity to
+ * the trusted Rust authority, whose wire carries a BARE lowercase digest, while
+ * the current-projection probe still carries the writer's prefixed form. So the
+ * real coverage result arrives with a bare entry hash and a prefixed projection
+ * hash, and an adapter that compares them literally reports the exact inversion
+ * this validator exists to prevent: a genuinely current package rendered as
+ * "Historical (content changed)".
+ *
+ * This fixture is written in the representations the engine emits TODAY. */
+const BARE_CUR = 'c'.repeat(64);
+check('3c. a bare trusted digest still matches the prefixed projection hash', () => {
+  const live = entry({ contentHash: BARE_CUR });
+  const out = describeSavedChatArchiveStateV1(coverage({
+    projection: { status: 'ok', contentHash: 'sha256-' + BARE_CUR },
+    generations: [live], fresh: [live], selected: live, covered: true,
+  }));
+  assert.equal(out.selected.freshness, 'fresh',
+    'a current package read as ' + out.selected.freshness + ' because of hash REPRESENTATION alone');
+  assert.equal(out.selected.freshnessLabel, 'Current');
+  assert.equal(out.selected.isCurrent, true);
+  assert.equal(out.selected.isHistoricalOnly, false);
+});
+
+/* NEGATIVE CONTROL for 3c: normalization must not make everything match. A
+ * blanket "strip and compare loosely" repair would pass 3c and destroy the
+ * freshness rule; a genuinely different digest must still be stale in BOTH
+ * representations. */
+check('3c-neg. NEGATIVE CONTROL — normalization did not make every hash match', () => {
+  for (const wrong of ['0'.repeat(64), 'sha256-' + '0'.repeat(64)]) {
+    const p = savedChatArchivePresentationV1.entryPresentation(
+      entry({ contentHash: wrong, staleKind: 'content-stale' }),
+      coverage({ projection: { status: 'ok', contentHash: 'sha256-' + BARE_CUR } }));
+    assert.equal(p.isCurrent, false, `digest ${wrong} was presented as current`);
+    assert.equal(p.freshness, 'content-stale');
+  }
+});
+
 /* NEGATIVE CONTROL for proof 3: if the adapter fell back to "assume fresh"
  * when a hash did not match, this fixture would report current. */
 check('3b. NEGATIVE CONTROL — a non-matching hash can never yield isCurrent', () => {

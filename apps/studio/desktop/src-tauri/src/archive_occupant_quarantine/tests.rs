@@ -190,7 +190,7 @@ fn the_four_contract_occupant_states_are_what_the_classifier_produces() {
     let mut seen = vec![];
     for name in [&corrupt, &partial, &foreign, &link] {
         match classify(&root, name) {
-            Indeterminate { reason } => {
+            Indeterminate { reason, .. } => {
                 assert!(eligible(&reason), "{name} must be eligible, got {reason:?}");
                 seen.push(classification_of(&reason));
             }
@@ -337,7 +337,8 @@ fn a_target_that_became_valid_before_the_action_is_refused() {
         matches!(
             stale,
             crate::archive_package_scan::OccupantClass::Indeterminate {
-                reason: IndeterminateReason::Partial
+                reason: IndeterminateReason::Partial,
+                ..
             }
         ),
         "the occupant genuinely WAS eligible: {stale:?}"
@@ -1531,4 +1532,56 @@ fn the_real_pipeline_hints_exactly_the_occupants_the_command_accepts() {
 
     let _ = ex.release();
     let _ = std::fs::remove_dir_all(root.parent().unwrap());
+}
+
+/// M10 P1 §21C — quarantine eligibility is unchanged by blocker presence.
+///
+/// Eligibility and classification are compile-enforced to depend on `reason`
+/// alone (both helpers take only a reason), so this pins the two remaining
+/// ways the field could leak into destructive authority: a differing verdict
+/// across otherwise-identical classes, and the module naming the field at all.
+#[test]
+fn a_verifier_blocker_cannot_change_quarantine_eligibility() {
+    use crate::archive_package_scan::OccupantClass;
+
+    for reason in [
+        IndeterminateReason::Corrupt,
+        IndeterminateReason::Partial,
+        IndeterminateReason::IdentityMismatch,
+        IndeterminateReason::Unreadable,
+        IndeterminateReason::NotAPackageName,
+        IndeterminateReason::UnexpectedOutcome,
+    ] {
+        let bare = OccupantClass::Indeterminate {
+            reason: reason.clone(),
+            verifier_blocker: None,
+        };
+        let blocked = OccupantClass::Indeterminate {
+            reason: reason.clone(),
+            verifier_blocker: Some("generation-destination-corrupt"),
+        };
+
+        // The production branch selects on `reason` alone; both classes must
+        // therefore reach the same arm and yield the same verdict.
+        let verdict = |class: &OccupantClass| match class {
+            OccupantClass::Indeterminate { reason, .. } if eligible(reason) => {
+                Some(classification_of(reason))
+            }
+            OccupantClass::Indeterminate { .. } => None,
+            other => panic!("unexpected class {other:?}"),
+        };
+        assert_eq!(
+            verdict(&bare),
+            verdict(&blocked),
+            "{reason:?}: the diagnostic blocker must not reach quarantine authority"
+        );
+        assert_eq!(eligible(&reason), verdict(&bare).is_some());
+    }
+
+    /* And the governed remedy path never reads the field. */
+    let occupant_src = include_str!("../archive_occupant_quarantine.rs");
+    assert!(
+        !occupant_src.contains("verifier_blocker"),
+        "quarantine must not name the diagnostic blocker field"
+    );
 }

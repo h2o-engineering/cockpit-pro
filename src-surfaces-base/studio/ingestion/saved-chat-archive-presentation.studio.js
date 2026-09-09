@@ -32,6 +32,25 @@
   function asArray(v) { return Array.isArray(v) ? v : []; }
   function cleanString(v) { return typeof v === 'string' ? v.trim() : ''; }
 
+  /* contentHash REPRESENTATION normalization only.
+   *
+   * M10 P3.5a moved archive package identity to the trusted Rust authority,
+   * whose wire carries a BARE lowercase hex digest, while the current-projection
+   * probe still carries the writer's `sha256-<hex>` form. The two sides of the
+   * freshness comparison below therefore arrive in different representations,
+   * and comparing them literally makes every genuinely current package render as
+   * `content-stale` — the exact "correctly refuses, renders Current anyway"
+   * failure inverted. Coverage already normalizes with the same helper; this
+   * adapter was missed.
+   *
+   * This is REPRESENTATION only. Nothing is recomputed, and the frozen freshness
+   * RULE is unchanged: a VALID package whose RECOMPUTED contentHash equals the
+   * current authoritative projection. */
+  function bareHash(v) {
+    var text = cleanString(v).toLowerCase();
+    return text.indexOf('sha256-') === 0 ? text.slice(7) : text;
+  }
+
   /* Package kind, from the VERIFIED classification only. A basename is never
    * consulted here — §D already did that join against recomputed identity. */
   function packageKindV1(classification) {
@@ -60,9 +79,10 @@
     var projectionStatus = cleanString(safeObject(cov.projection).status);
     if (packageKindV1(e.classification) === 'unusable') return 'unusable';
     if (projectionStatus !== 'ok') return 'freshness-unknown';
-    var currentHash = cleanString(safeObject(cov.projection).contentHash);
+    var currentHash = bareHash(safeObject(cov.projection).contentHash);
     if (!currentHash) return 'freshness-unknown';
-    if (cleanString(e.contentHash) && cleanString(e.contentHash) === currentHash) return 'fresh';
+    var entryHash = bareHash(e.contentHash);
+    if (entryHash && entryHash === currentHash) return 'fresh';
     /* §F: the coverage authority already decided which kind of stale. Never
      * re-derive it here. */
     var kind = cleanString(e.staleKind);

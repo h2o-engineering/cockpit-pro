@@ -455,7 +455,9 @@ fn quarantine_internal(
         OccupantClass::ReservedInfrastructure => {
             return OccupantOutcome::refused(request, codes::OCCUPANT_IS_RESERVED)
         }
-        OccupantClass::Indeterminate { reason } if eligible(reason) => reason.clone(),
+        // Eligibility stays driven solely by `reason`; `..` keeps the additive
+        // diagnostic blocker field out of quarantine authority entirely.
+        OccupantClass::Indeterminate { reason, .. } if eligible(reason) => reason.clone(),
         OccupantClass::Indeterminate { .. } => {
             return OccupantOutcome::refused(request, codes::OCCUPANT_NOT_ELIGIBLE)
         }

@@ -684,10 +684,32 @@
        writer would submit without writing anything. Loads after the codec,
        asset-cas and materializer it borrows. -->
   <script src="./ingestion/saved-chat-projection-probe.tauri.js"></script>
+  <!-- Desktop-only: M10 P1 trusted archive-integrity client. Thin bridge to the
+       Rust command h2o_saved_chat_archive_integrity; no verification, hashing,
+       parsing, filesystem or mutation authority of its own. -->
+  <script src="./ingestion/saved-chat-archive-integrity.tauri.js"></script>
+  <!-- M10 P2 pure presentation mapping: trusted facts + separate drift facts ->
+       the six existing operator states. No verification, no filesystem, no
+       invoke, no state. -->
+  <script src="./ingestion/saved-chat-archive-health-mapping.js"></script>
+  <!-- M10 P3.5b renderer hygiene. A read-only DRIFT observation over the
+       snapshot member of trusted-VALID packages only; it decides no package
+       validity and owns no gzip of its own, decoding V3/gzip snapshots through
+       the codec's single bounded NON-VERIFYING decoder. MUST load after the
+       package codec above and BEFORE the composition below, which resolves
+       observeSavedChatRendererHygieneV1. -->
+  <script src="./ingestion/saved-chat-archive-renderer-hygiene.js"></script>
+  <!-- M10 P3a trusted composition. Joins the trusted client with the existing
+       separate DB/CAS/renderer observations and the P2 mapper. MUST load after
+       BOTH of the above (it resolves readSavedChatArchiveIntegrityV1 and
+       archiveHealthMapping) and BEFORE the diagnostics facade below, which
+       resolves composeSavedChatArchiveHealthV1. -->
+  <script src="./ingestion/saved-chat-archive-health-composition.js"></script>
   <!-- Desktop-only: saved-chat archive diagnostics (Phase C C5.1/C5.2).
        Read-only package inventory + manifest/snapshot/hash validation under
        $APPLOCALDATA/archive/packages. No DB/CAS reconciliation, no repair,
-       no import/recovery, no sync, no UI. -->
+       no import/recovery, no sync, no UI. M10 P3b: the archive-health facade
+       here is now sourced from the trusted chain loaded immediately above. -->
   <script src="./ingestion/saved-chat-archive-diagnostics.tauri.js"></script>
   <!-- Desktop-only: M05 Phase 2.2 per-chat coverage/freshness engine. Stateless;
        composes archive discovery + governed package validation + the current
@@ -761,6 +783,12 @@
        adapters. Never overwrites existing rows; restore/relink deferred; mounts
        a sibling card beneath Archive Health. No Chrome authority. -->
   <script src="./ingestion/saved-chat-archive-importer.studio.js"></script>
+  <!-- M10 P3.6a trusted portable verification client. A thin session client
+       over the native portable verifier — the SAME semantic authority the
+       archive path uses — for packages that never touch the archive. It decides
+       nothing itself and has no legacy fallback, so it must load BEFORE the
+       importer and exporter that gate on it. -->
+  <script src="./ingestion/saved-chat-portable-package-verification.tauri.js"></script>
   <!-- Desktop-only: saved-chat archive export / share action (Phase J.2/M08).
        Two-step, verification-gated, NO-OVERWRITE: dry-run a .h2ochat package
        (reuses the read-only inspector), then explicitly export it by manifest-
@@ -790,6 +818,14 @@
        injected read-only API; no mutation/repair/import/sync/Chrome. Shows an
        "available in Desktop Studio only" message when the API is absent. -->
   <script src="./ingestion/saved-chat-reclamation-ui.studio.js"></script>
+  <!-- Saved Chat Recovery Center timeline surface. New-UI-only, READ-ONLY
+       per-chat version timeline mounted as a sibling beneath the Archive Health
+       card. Composes the trusted integrity read (once per open/refresh), the
+       canonical occupant partition, per-chat coverage and the read-only package
+       inspector. Owns no ordering, hashing, validity, classification, name
+       grammar or recovery-eligibility authority; no import/restore/relink and
+       no DB, archive or CAS mutation. Desktop-only message when absent. -->
+  <script src="./ingestion/saved-chat-recovery-center-ui.studio.js"></script>
   <script src="./ingestion/archive-health-ui.studio.js"></script>
   <!-- F14.2.2: Desktop/Tauri L0 privacy kernel primitive. Registers
        H2O.Desktop.Sync.kernel.scanPrivacy / findForbiddenFields /

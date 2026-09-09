@@ -105,6 +105,11 @@ pub mod archive_retention_plan;
 /// canonical package namespace. Registers no command and mutates nothing.
 pub mod archive_package_scan;
 
+/// M10 P1 — trusted READ-ONLY projection of what the T2.1 scanner and the
+/// publisher's verifier already observe in the canonical archive. Implements no
+/// verification, no health verdict and no destructive authority of its own.
+pub mod saved_chat_archive_integrity;
+
 /// M09 P2.1 — the one immutable-per-build active generation-family policy.
 /// Exposes one read-only query; there is no setter or persisted feature state.
 pub mod saved_chat_generation_policy;
@@ -117,6 +122,7 @@ pub mod saved_chat_export_root_policy;
 /// M09 P2.1 — private saved-chat-only semantic verifier for v1/v2 and dormant
 /// v3 identity/gzip admission. Filesystem consumers remain trusted adapters.
 pub(crate) mod saved_chat_package_verify;
+pub mod saved_chat_portable_verify;
 
 /// M07 P0/P1 — storage-owned, read-only immutable transport-object handoff.
 /// Semantic selectors only; retained verified handles expose bounded reads and
@@ -2606,6 +2612,12 @@ macro_rules! h2o_studio_invoke_handler {
             archive_generation_publish::h2o_archive_generation_abort,
             saved_chat_generation_policy::h2o_saved_chat_generation_policy,
             saved_chat_export_root_policy::h2o_saved_chat_export_root_policy,
+            saved_chat_archive_integrity::h2o_saved_chat_archive_integrity,
+            saved_chat_portable_verify::h2o_saved_chat_portable_verify_begin,
+            saved_chat_portable_verify::h2o_saved_chat_portable_verify_declare,
+            saved_chat_portable_verify::h2o_saved_chat_portable_verify_write,
+            saved_chat_portable_verify::h2o_saved_chat_portable_verify_finish,
+            saved_chat_portable_verify::h2o_saved_chat_portable_verify_abort,
             archive_transport_handoff::h2o_archive_transport_handoff_begin,
             archive_transport_handoff::h2o_archive_transport_handoff_read,
             archive_transport_handoff::h2o_archive_transport_handoff_end,
@@ -2653,6 +2665,12 @@ macro_rules! h2o_studio_invoke_handler {
             archive_generation_publish::h2o_archive_generation_abort,
             saved_chat_generation_policy::h2o_saved_chat_generation_policy,
             saved_chat_export_root_policy::h2o_saved_chat_export_root_policy,
+            saved_chat_archive_integrity::h2o_saved_chat_archive_integrity,
+            saved_chat_portable_verify::h2o_saved_chat_portable_verify_begin,
+            saved_chat_portable_verify::h2o_saved_chat_portable_verify_declare,
+            saved_chat_portable_verify::h2o_saved_chat_portable_verify_write,
+            saved_chat_portable_verify::h2o_saved_chat_portable_verify_finish,
+            saved_chat_portable_verify::h2o_saved_chat_portable_verify_abort,
             archive_transport_handoff::h2o_archive_transport_handoff_begin,
             archive_transport_handoff::h2o_archive_transport_handoff_read,
             archive_transport_handoff::h2o_archive_transport_handoff_end,
@@ -2677,6 +2695,7 @@ pub fn run() {
         // survive across invokes, so the publisher is app state rather than
         // per-command.
         .manage(archive_generation_publish::PublisherState::default())
+        .manage(saved_chat_portable_verify::PortableVerifyState::default())
         .manage(archive_transport_handoff::HandoffState::default())
         .manage(archive_instance_lock::ArchiveInstanceState::default())
         // M06 T1.1: instance-lifetime participation in the archive presence

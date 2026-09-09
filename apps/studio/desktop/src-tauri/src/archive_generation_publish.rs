@@ -1564,10 +1564,24 @@ pub(crate) struct VerifiedOccupant {
 /// Shared durable-read admission. The package scanner and M07 transport handoff
 /// both use this entry point, so rollback changes new writes but never read
 /// compatibility for an already-verified family.
+/// How an occupant failed trusted admission.
+///
+/// `.0` and `.1` are the EXISTING coarse admission `Outcome` and code, with
+/// unchanged semantics: every current consumer — publication, the M06 scanner's
+/// broad classification and the M07 handoff — reads only these two, and they are
+/// what decides admission.
+///
+/// `.2` is additive DIAGNOSTIC evidence: the granular
+/// `saved_chat_package_verify` rule code, present only when that verifier is
+/// what refused the package, and `None` for every filesystem or admission
+/// failure that did not come from it. No decision may read it, and no granular
+/// code is ever fabricated to fill it.
+pub(crate) type AdmissionFailure = (Outcome, &'static str, Option<&'static str>);
+
 pub(crate) fn verify_occupant_all_supported(
     packages: &confined::Dir,
     name: &[u8],
-) -> Result<VerifiedOccupant, (Outcome, &'static str)> {
+) -> Result<VerifiedOccupant, AdmissionFailure> {
     verify_occupant_with_admission(packages, name, VerificationAdmission::AllSupported)
 }
 
@@ -1575,13 +1589,14 @@ fn verify_occupant_with_admission(
     packages: &confined::Dir,
     name: &[u8],
     admission: VerificationAdmission,
-) -> Result<VerifiedOccupant, (Outcome, &'static str)> {
+) -> Result<VerifiedOccupant, AdmissionFailure> {
     let st = match packages.stat_child_nofollow(name) {
         Ok(Some(st)) => st,
         _ => {
             return Err((
                 Outcome::GenerationOccupantUnreadable,
                 "generation-occupant-unreadable",
+                None,
             ))
         }
     };
@@ -1591,6 +1606,7 @@ fn verify_occupant_with_admission(
         return Err((
             Outcome::GenerationOccupantUnreadable,
             "generation-occupant-unreadable",
+            None,
         ));
     }
     let dir = match packages.open_child_nofollow(name) {
@@ -1599,19 +1615,24 @@ fn verify_occupant_with_admission(
             return Err((
                 Outcome::GenerationOccupantUnreadable,
                 "generation-occupant-unreadable",
+                None,
             ))
         }
     };
     let manifest_bytes = match read_staged_member(&dir, Member::Manifest) {
         Ok(bytes) => bytes,
-        Err(_) => return Err((Outcome::GenerationPartial, "generation-partial")),
+        Err(_) => return Err((Outcome::GenerationPartial, "generation-partial", None)),
     };
     let manifest = match saved_chat_package_verify::validate_manifest(&manifest_bytes, admission) {
         Ok(manifest) => manifest,
-        Err(_) => {
+        // A manifest rule failure IS a saved_chat_package_verify rule failure,
+        // so its granular code is preserved on the same terms as the package
+        // verifier's. The coarse admission pair is unchanged.
+        Err(granular) => {
             return Err((
                 Outcome::GenerationDestinationCorrupt,
                 "generation-destination-corrupt",
+                Some(granular),
             ))
         }
     };
@@ -1626,13 +1647,13 @@ fn verify_occupant_with_admission(
         read_staged_member(&dir, Member::Snapshot)
     } {
         Ok(bytes) => bytes,
-        Err(_) => return Err((Outcome::GenerationPartial, "generation-partial")),
+        Err(_) => return Err((Outcome::GenerationPartial, "generation-partial", None)),
     };
     if !is_v3
         && (read_staged_member(&dir, Member::Markdown).is_err()
             || read_staged_member(&dir, Member::Html).is_err())
     {
-        return Err((Outcome::GenerationPartial, "generation-partial"));
+        return Err((Outcome::GenerationPartial, "generation-partial", None));
     }
 
     if is_v3 {
@@ -1640,6 +1661,7 @@ fn verify_occupant_with_admission(
             (
                 Outcome::GenerationDestinationCorrupt,
                 "generation-destination-corrupt",
+                None,
             )
         })?;
         let mut expected = BTreeSet::from([
@@ -1653,6 +1675,7 @@ fn verify_occupant_with_admission(
             return Err((
                 Outcome::GenerationDestinationCorrupt,
                 "generation-destination-corrupt",
+                None,
             ));
         }
     }
@@ -1672,13 +1695,14 @@ fn verify_occupant_with_admission(
     if !manifest.assets.is_empty() {
         let assets = match dir.open_child_nofollow(b"assets") {
             Ok(dir) => dir,
-            Err(_) => return Err((Outcome::GenerationPartial, "generation-partial")),
+            Err(_) => return Err((Outcome::GenerationPartial, "generation-partial", None)),
         };
         if is_v3 {
             let names = assets.read_entry_names().map_err(|_| {
                 (
                     Outcome::GenerationDestinationCorrupt,
                     "generation-destination-corrupt",
+                    None,
                 )
             })?;
             let expected: BTreeSet<Vec<u8>> = manifest
@@ -1690,6 +1714,7 @@ fn verify_occupant_with_admission(
                 return Err((
                     Outcome::GenerationDestinationCorrupt,
                     "generation-destination-corrupt",
+                    None,
                 ));
             }
         }
@@ -1697,11 +1722,12 @@ fn verify_occupant_with_admission(
             let member_name = format!("{}.{}", asset.sha256, asset.ext);
             let st = match assets.stat_child_nofollow(member_name.as_bytes()) {
                 Ok(Some(st)) => st,
-                Ok(None) => return Err((Outcome::GenerationPartial, "generation-partial")),
+                Ok(None) => return Err((Outcome::GenerationPartial, "generation-partial", None)),
                 Err(_) => {
                     return Err((
                         Outcome::GenerationDestinationCorrupt,
                         "generation-destination-corrupt",
+                        None,
                     ))
                 }
             };
@@ -1709,6 +1735,7 @@ fn verify_occupant_with_admission(
                 return Err((
                     Outcome::GenerationDestinationCorrupt,
                     "generation-destination-corrupt",
+                    None,
                 ));
             }
             match hash_child(&assets, member_name.as_bytes()) {
@@ -1718,6 +1745,7 @@ fn verify_occupant_with_admission(
                         return Err((
                             Outcome::GenerationDestinationCorrupt,
                             "generation-destination-corrupt",
+                            None,
                         ));
                     }
                     actual_assets.push(VerifiedAssetMember {
@@ -1730,6 +1758,7 @@ fn verify_occupant_with_admission(
                     return Err((
                         Outcome::GenerationDestinationCorrupt,
                         "generation-destination-corrupt",
+                        None,
                     ))
                 }
             }
@@ -1757,10 +1786,14 @@ fn verify_occupant_with_admission(
             &manifest.chat_id,
             admission,
         )
-        .map_err(|_| {
+        // The coarse admission Outcome and code are UNCHANGED; the granular
+        // saved_chat_package_verify rule code is additionally preserved as
+        // evidence. Verification is not re-run to obtain it.
+        .map_err(|granular| {
             (
                 Outcome::GenerationDestinationCorrupt,
                 "generation-destination-corrupt",
+                Some(granular),
             )
         })?;
         (
@@ -1776,10 +1809,13 @@ fn verify_occupant_with_admission(
         // Preserve the accepted v1/v2 occupant contract. Presentation bytes
         // must exist, but descriptor mismatch remains a non-blocking dedupe
         // advisory rather than package corruption.
-        if validate_snapshot_cross_binding(&snapshot_bytes, &manifest, &manifest.chat_id).is_err() {
+        if let Err(granular) =
+            validate_snapshot_cross_binding(&snapshot_bytes, &manifest, &manifest.chat_id)
+        {
             return Err((
                 Outcome::GenerationDestinationCorrupt,
                 "generation-destination-corrupt",
+                Some(granular),
             ));
         }
 
@@ -1806,6 +1842,7 @@ fn verify_occupant_with_admission(
                         return Err((
                             Outcome::GenerationDestinationCorrupt,
                             "generation-destination-corrupt",
+                            None,
                         ));
                     }
                 }
@@ -1813,6 +1850,7 @@ fn verify_occupant_with_admission(
                     return Err((
                         Outcome::GenerationDestinationCorrupt,
                         "generation-destination-corrupt",
+                        None,
                     ))
                 }
             }
@@ -1825,6 +1863,7 @@ fn verify_occupant_with_admission(
             return Err((
                 Outcome::GenerationDestinationCorrupt,
                 "generation-destination-corrupt",
+                None,
             ));
         }
         let snapshot_sha = format!("sha256-{}", sha256_hex(&snapshot_bytes));
@@ -1884,7 +1923,9 @@ fn classify_occupant(
         ..
     } = match verify_occupant_with_admission(packages, name, admission) {
         Ok(verified) => verified,
-        Err((outcome, code)) => return (outcome, code, Vec::new()),
+        // Admission reads ONLY the coarse pair; the granular evidence is not a
+        // publication input.
+        Err((outcome, code, _granular)) => return (outcome, code, Vec::new()),
     };
     // §D's join, reduced to its only free variable here. UNREACHABLE in
     // practice and deliberately kept as defence in depth: reaching it requires

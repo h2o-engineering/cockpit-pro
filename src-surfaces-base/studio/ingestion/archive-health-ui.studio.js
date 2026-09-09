@@ -58,7 +58,13 @@
     partial: 'Some packages have integrity problems; others are healthy and portable.',
     blocked: 'One or more saved chat packages are corrupt or unreadable and need attention.',
     empty: 'Save a chat to a folder to create a package.',
+    warningHygiene: 'Warnings include renderer residue left inside otherwise valid packages. The saved packages remain valid and portable.',
+    partialHygiene: 'Some packages have integrity problems; others are healthy and portable, though some carry cosmetic renderer residue.',
   };
+
+  /* The label the package-details renderer already uses for an absent value;
+   * reused so the card speaks one vocabulary for "we did not measure this". */
+  var UNAVAILABLE_LABEL = 'n/a';
 
   var PILL_TONES = {
     ok: 'background:rgba(46,160,67,.18);color:#3fb950;border:1px solid rgba(46,160,67,.35)',
@@ -79,6 +85,27 @@
   function nowIso() {
     try { return new Date().toISOString(); }
     catch (_) { return ''; }
+  }
+
+  /* M10 P3.5b: cause-aware drift copy. Renderer hygiene introduces a THIRD
+   * drift cause alongside DB and asset-cache drift, and it is the only one that
+   * is purely cosmetic — a package carrying renderer residue is valid and
+   * portable. Saying so is a copy refinement, NOT a seventh operator state: the
+   * state, pill and tone are unchanged, and hygiene never moves severity. The
+   * unqualified drift wording would now be actively misleading, since it names
+   * two causes that may not be the ones that fired. */
+  function hygieneFindingCount(result) {
+    var hygiene = safeObject(result && result.rendererHygiene);
+    if (hygiene.observed !== true) return 0;
+    return (hygiene.dataImageResidue || 0) + (hygiene.assetRefDrift || 0);
+  }
+
+  function explanationFor(status, result) {
+    var base = EXPLAIN[status] || '';
+    if (status !== 'warning' && status !== 'partial') return base;
+    if (!hygieneFindingCount(result)) return base;
+    if (status === 'warning') return EXPLAIN.warningHygiene;
+    return EXPLAIN.partialHygiene;
   }
 
   /* Pure: map a diagnoseSavedChatArchiveV1 result to a status-only summary. */
@@ -107,10 +134,10 @@
       return { state: 'ready', status: 'ok', pill: { label: 'Healthy', tone: 'ok' }, headline: TEXT.ok, explanation: EXPLAIN.ok };
     }
     if (status === 'warning') {
-      return { state: 'ready', status: 'warning', pill: { label: 'Healthy with drift', tone: 'warn' }, headline: TEXT.warning, explanation: EXPLAIN.warning };
+      return { state: 'ready', status: 'warning', pill: { label: 'Healthy with drift', tone: 'warn' }, headline: TEXT.warning, explanation: explanationFor('warning', result) };
     }
     if (status === 'partial') {
-      return { state: 'ready', status: 'partial', pill: { label: 'Mixed', tone: 'block' }, headline: TEXT.blocked, explanation: EXPLAIN.partial };
+      return { state: 'ready', status: 'partial', pill: { label: 'Mixed', tone: 'block' }, headline: TEXT.blocked, explanation: explanationFor('partial', result) };
     }
     if (status === 'blocked') {
       return { state: 'ready', status: 'blocked', pill: { label: 'Integrity problems', tone: 'block' }, headline: TEXT.blocked, explanation: EXPLAIN.blocked };
@@ -133,7 +160,55 @@
   }
 
   function formatCount(label, key, value) {
-    return { label: label, key: key, value: value };
+    return { label: label, key: key, value: value, available: true };
+  }
+
+  /* M10 P3: a metric that was NOT OBSERVED. Deliberately distinct from a
+   * measured zero — publishing `0` for something nothing measured is the exact
+   * false-healthy shape this migration exists to remove. `countValue` and
+   * `listCount` are untouched, so every measured metric is unaffected. */
+  function unavailableCount(label, key) {
+    return { label: label, key: key, value: null, available: false };
+  }
+
+  /* Absent -> the repository's existing explicit unavailable label. */
+  function countDisplayValue(item) {
+    if (!item || item.available === false || item.value == null) return UNAVAILABLE_LABEL;
+    return item.value;
+  }
+
+  /* An optional LIST metric: a real array counts, an absent field is
+   * unavailable. `listCount` still returns 0 for its own callers. */
+  function listCountOrUnavailable(value) {
+    if (Array.isArray(value)) return value.length;
+    if (typeof value === 'number' && isFinite(value)) return value;
+    return null;
+  }
+
+  /* M10 P3.5b: renderer hygiene is now OBSERVED, but only for packages the
+   * observation could actually reach. Anything not observed stays `n/a` rather
+   * than becoming a clean zero, and an observation that reached no package at
+   * all publishes no counts — only its own unavailability. Hygiene is drift:
+   * its findings already reached the aggregate as package warnings, so these
+   * counts are a readout, never a second severity input. */
+  function rendererHygieneCounts(result) {
+    var hygiene = safeObject(result && result.rendererHygiene);
+    if (hygiene.observed !== true) {
+      return [unavailableCount('rendererHygiene', 'rendererHygiene')];
+    }
+    var counts = [
+      formatCount('dataImageResidue', 'rendererHygiene.dataImageResidue',
+        listCountOrUnavailable(hygiene.dataImageResidue)),
+      formatCount('rendererAssetRefDrift', 'rendererHygiene.assetRefDrift',
+        listCountOrUnavailable(hygiene.assetRefDrift)),
+    ];
+    /* Partial coverage is stated, not hidden: some packages were observed and
+     * others could not be, so the counts above are not archive-wide. */
+    if (hygiene.packagesUnavailable > 0) {
+      counts.push(formatCount('hygieneUnobservedPackages', 'rendererHygiene.packagesUnavailable',
+        hygiene.packagesUnavailable));
+    }
+    return counts;
   }
 
   /* Pure: groups the diagnostic result into C6.2 summary sections. */
@@ -156,14 +231,17 @@
         ],
       },
       {
+        /* M10 P3: integrity severity now comes only from trusted verification.
+         * `brokenPackageAssets` and the conflated `assetRefMismatches` are
+         * retired: the canonical verifier is fail-fast, so an exact broken-asset
+         * total does not exist, and the old mismatch count mixed integrity with
+         * renderer hygiene. Which packages failed, and which trusted rule each
+         * one broke, is shown per package below. */
         key: 'integrity',
         title: 'Integrity',
-        note: 'Blockers are package integrity problems and need attention.',
+        note: 'Blocked packages failed trusted verification. The exact rule that failed is listed with each package below.',
         tone: 'block',
         counts: [
-          formatCount('brokenPackageAssets', 'brokenPackageAssets', countValue(counts, 'brokenPackageAssets')),
-          formatCount('assetRefMismatches', 'assetRefMismatches', countValue(counts, 'assetRefMismatches')),
-          formatCount('dataImageResidue', 'dataImageResidue', countValue(counts, 'dataImageResidue')),
           formatCount('packagesBlocked', 'packagesBlocked', countValue(counts, 'packagesBlocked')),
         ],
       },
@@ -179,7 +257,7 @@
           formatCount('orphanedPackages', 'orphanedPackages', countValue(counts, 'orphanedPackages')),
           formatCount('stalePackages', 'stalePackages', countValue(counts, 'stalePackages')),
           formatCount('storeAssetMismatches', 'storeAssetMismatches', countValue(counts, 'storeAssetMismatches')),
-        ],
+        ].concat(rendererHygieneCounts(result)),
       },
       {
         key: 'db-checks',
@@ -209,7 +287,7 @@
         + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:9px">';
       (section.counts || []).forEach(function (item) {
         out += '<div data-archive-health-count="' + escapeHtml(item.key) + '" style="border:1px solid rgba(255,255,255,.10);border-radius:6px;padding:8px;background:rgba(0,0,0,.12)">'
-          + '<div style="font-size:18px;font-weight:700;line-height:1.15">' + escapeHtml(item.value) + '</div>'
+          + '<div style="font-size:18px;font-weight:700;line-height:1.15">' + escapeHtml(countDisplayValue(item)) + '</div>'
           + '<div style="opacity:.68;font-size:11px;word-break:break-word">' + escapeHtml(item.label) + '</div>'
           + '</div>';
       });
@@ -236,8 +314,10 @@
       packageAssetCount: countValue(assets, 'packageAssetCount'),
       missingPackageAssets: listCount(assets.missingPackageAssets),
       missingLiveCasAssets: listCount(assets.missingLiveCasAssets),
-      dataImageResidue: listCount(assets.dataImageResidue),
-      assetRefMismatches: listCount(assets.assetRefMismatches),
+      /* Absent on the trusted path (renderer hygiene deferred to P3.5), so these
+       * stay null and render as the existing unavailable label. */
+      dataImageResidue: listCountOrUnavailable(assets.dataImageResidue),
+      assetRefMismatches: listCountOrUnavailable(assets.assetRefMismatches),
     };
   }
 
@@ -272,6 +352,18 @@
         kindLabel: kind === 'generation' ? 'generation'
           : (kind === 'legacy' ? 'legacy' : 'unusable'),
         blockersCount: blockers.length,
+        /* M10 P3: the trusted verification rules that actually failed. With the
+         * approximate integrity counts retired, this IS the operator's account
+         * of WHY a package is blocked, so the code is shown verbatim beside its
+         * explanation. Read-only text; capped so one pathological package
+         * cannot dominate the card. */
+        blockerDetails: blockers.slice(0, 5).map(function (issue) {
+          var entry = safeObject(issue);
+          return {
+            code: String(entry.code || ''),
+            message: String(entry.message || ''),
+          };
+        }).filter(function (entry) { return entry.code || entry.message; }),
         warningsCount: warnings.length,
         chatId: String(pkg.chatId || ''),
         snapshotId: String(pkg.snapshotId || ''),
@@ -298,6 +390,22 @@
       + '<span style="opacity:.58;font-size:10px">' + escapeHtml(label) + '</span>'
       + '<span style="font-size:12px;word-break:break-word">' + escapeHtml(value == null || value === '' ? 'n/a' : value) + '</span>'
       + '</span>';
+  }
+
+  /* Read-only presentation of the trusted verification failures. No action, no
+   * affordance, no severity of its own: it explains the status the trusted
+   * authority already decided. */
+  function renderPackageBlockerDetails(entries) {
+    var list = Array.isArray(entries) ? entries : [];
+    if (!list.length) return '';
+    var out = '<div data-archive-health-package-blockers="1" style="margin-top:8px;display:flex;flex-direction:column;gap:4px">';
+    list.forEach(function (entry) {
+      out += '<div data-archive-health-blocker-code="' + escapeHtml(entry.code) + '" style="font-size:11px;line-height:1.45">'
+        + '<span style="opacity:.82">' + escapeHtml(entry.message) + '</span> '
+        + '<span style="opacity:.55;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;user-select:text">' + escapeHtml(entry.code) + '</span>'
+        + '</div>';
+    });
+    return out + '</div>';
   }
 
   function renderPackageDetails(result, state) {
@@ -343,6 +451,7 @@
           + renderPackageDetailsCell('dataImageResidue', assets.dataImageResidue)
           + renderPackageDetailsCell('assetRefMismatches', assets.assetRefMismatches)
           + '</div>'
+          + renderPackageBlockerDetails(row.blockerDetails)
           + '<div data-archive-health-package-path="1" style="margin-top:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;line-height:1.45;word-break:break-all;user-select:text;opacity:.82">'
           + '<span style="opacity:.58">packagePath</span> ' + escapeHtml(row.packagePath || 'n/a')
           + '</div>'
@@ -580,6 +689,17 @@
         reclamationApi.mountReclamationCard(container);
       }
     } catch (_) { /* reclamation card must never break the read-only health card */ }
+
+    // Recovery Center T02: mount the New-UI-only, READ-ONLY per-chat version
+    // timeline as a sibling beneath this card. It exposes no action beyond
+    // Refresh and selection, and no destructive control of any kind; this
+    // health card is unchanged and still performs no mutation.
+    try {
+      var recoveryCenterApi = H2O.Studio && H2O.Studio.recoveryCenterUi;
+      if (recoveryCenterApi && typeof recoveryCenterApi.mountRecoveryCenterCard === 'function') {
+        recoveryCenterApi.mountRecoveryCenterCard(container);
+      }
+    } catch (_) { /* recovery center card must never break the read-only health card */ }
 
     return { run: run, getState: function () { return card.state; } };
   }

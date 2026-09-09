@@ -135,15 +135,6 @@
     } catch (_) { return ''; }
   }
 
-  function readPackageTextFile(packagePath, leaf) {
-    var invoke = getInvoke();
-    if (!invoke) return Promise.reject(new Error('tauri invoke unavailable for fs read_file'));
-    if (!packagePathIsScoped(packagePath)) return Promise.reject(new Error('package path not scoped to ' + PACKAGE_ROOT));
-    var rel = joinPath(packagePath, leaf);
-    return Promise.resolve(invoke('plugin:fs|read_file', { path: rel, options: { baseDir: APP_LOCAL_DATA } }))
-      .then(decodeToText);
-  }
-
   function safeParseJson(text) {
     try { var v = JSON.parse(text); return isObject(v) ? v : null; } catch (_) { return null; }
   }
@@ -161,40 +152,160 @@
     return codec;
   }
 
-  function readPackageManifestJson(packagePath) {
-    return readPackageTextFile(packagePath, 'manifest.json')
-      .then(function (t) { return safeParseJson(String(t || '')); }, function () { return null; });
+  /* ── Trusted archive-state binding ────────────────────────────────────────
+   *
+   * `packagePath` is an ADDRESS, never proof. Between the moment trusted
+   * verification rules on a package and the moment its bytes are read, the
+   * bytes at that address can change. Sourcing the expected digest, length or
+   * encoding from a package file read after that ruling lets a substituted
+   * package describe — and therefore validate — itself, and for restore the
+   * consequence is content persisted under another package's ORIGINAL
+   * canonical chatId and snapshotId.
+   *
+   * So the expectations come from the trusted archive-integrity enumeration
+   * instead: the verifier's own measurements of the package it examined. The
+   * package is never allowed to state what it should hash to. This module adds
+   * no verification of its own — it consumes existing trusted facts and the
+   * existing governed codec. */
+  var CLASS_VERIFIED_GENERATION = 'verified-generation';
+  var CLASS_LEGACY_PACKAGE = 'legacy-package';
+  var FAMILY_V3 = 'v3';
+
+  function getTrustedIntegrityFn() {
+    var ing = (H2O.Studio && H2O.Studio.ingestion) || {};
+    return (typeof ing.readSavedChatArchiveIntegrityV1 === 'function')
+      ? ing.readSavedChatArchiveIntegrityV1 : null;
+  }
+  function getPartitionFn() {
+    var mapping = (H2O.Studio && H2O.Studio.archiveHealthMapping) || null;
+    return (mapping && typeof mapping.partitionOccupants === 'function')
+      ? mapping.partitionOccupants : null;
   }
 
-  /* M03 T04: the recovery payload this module turns into restored persistent
-   * rows is read through the governed codec for v3 packages — filesystem
-   * metadata admission (lstat), an independent physical cap, bounded read,
-   * physical descriptor verification, encoding-aware bounded decode and logical
-   * length/SHA verification all complete before a single byte is parsed. The
-   * manifest descriptor is never the independent pre-read bound, and the
-   * write-time re-inspection alone is not treated as sufficient for this second
-   * read. Any governed failure yields null, which the caller already treats as a
-   * hard refusal, so no unverified payload can reach insertRestoreRows. v1/v2
-   * keep the historical read path unchanged. */
-  function readPackageSnapshotJson(packagePath) {
-    return readPackageManifestJson(packagePath).then(function (manifest) {
-      var m = safeObject(manifest);
-      var descriptor = safeObject(safeObject(m.files).snapshot);
-      var codec = savedChatPackageCodecV3();
-      if (m.schemaVersion === 3 && codec && cleanString(descriptor.path)) {
+  /* Representation normalization only. The trusted wire carries a bare digest
+   * for content identity; the inspector re-applies the `sha256-` prefix
+   * outwardly. Nothing is recomputed. */
+  function bareHash(value) {
+    var text = cleanString(value).toLowerCase();
+    return text.indexOf('sha256-') === 0 ? text.slice(7) : text;
+  }
+
+  /* The trusted occupant for exactly this package, from a FRESH enumeration.
+   * The canonical partition is reused, so reserved infrastructure and
+   * non-package strays can never be matched. */
+  function trustedOccupantFor(packagePath) {
+    var readIntegrity = getTrustedIntegrityFn();
+    var partition = getPartitionFn();
+    if (!readIntegrity || !partition) return Promise.resolve(null);
+    return Promise.resolve()
+      .then(function () { return readIntegrity(); })
+      .then(function (envelope) {
+        var occupants = asArray(safeObject(partition(safeObject(envelope).occupants)).packageOccupants);
+        for (var i = 0; i < occupants.length; i += 1) {
+          var occupant = safeObject(occupants[i]);
+          if (cleanString(occupant.path) !== packagePath) continue;
+          var klass = cleanString(occupant.class);
+          if (klass !== CLASS_VERIFIED_GENERATION && klass !== CLASS_LEGACY_PACKAGE) return null;
+          return occupant;
+        }
+        return null;
+      }, function () { return null; });
+  }
+
+  /* Binds the two independent trusted reads — the inspection that produced the
+   * verdict and the enumeration that produced the member measurements — to the
+   * SAME package state. STRICT: both sides are trusted output, so a missing
+   * identity is a failure to bind, not an absence of evidence. Two empty values
+   * must never compare equal. */
+  function trustedStateMatches(inspection, occupant) {
+    var inspected = bareHash(safeObject(safeObject(inspection).identity).contentHash);
+    var enumerated = bareHash(safeObject(occupant).contentHash);
+    if (!inspected || !enumerated) return false;
+    return inspected === enumerated;
+  }
+
+  /* The verifier's own measurements of the snapshot member. Returned only when
+   * COMPLETE: a partial set is a set of checks that would silently not happen,
+   * so it fails closed rather than degrading. */
+  function trustedMemberAnchors(occupant) {
+    var o = safeObject(occupant);
+    var encoding = cleanString(o.snapshotEncoding);
+    var physicalSha = cleanString(o.snapshotPhysicalSha256);
+    var logicalSha = cleanString(o.logicalSnapshotSha256);
+    var physicalLength = o.snapshotPhysicalByteLength;
+    var logicalLength = o.logicalSnapshotByteLength;
+    var family = cleanString(o.constructionFamily);
+    if (!family || !encoding || !physicalSha || !logicalSha) return null;
+    if (!isFiniteNumber(physicalLength) || physicalLength < 0) return null;
+    if (!isFiniteNumber(logicalLength) || logicalLength < 0) return null;
+    return {
+      family: family,
+      encoding: encoding,
+      physicalSha256: physicalSha,
+      physicalByteLength: physicalLength,
+      logicalSha256: logicalSha,
+      logicalByteLength: logicalLength,
+    };
+  }
+
+  /* The governed member descriptor, built ENTIRELY from trusted anchors. Every
+   * field the codec verifies against is a verifier measurement; no value here
+   * comes from the package. */
+  function trustedSnapshotDescriptor(anchors) {
+    var a = safeObject(anchors);
+    return {
+      path: 'snapshot.json',
+      encoding: a.encoding,
+      sha256: a.physicalSha256,
+      byteLength: a.physicalByteLength,
+      contentSha256: a.logicalSha256,
+      contentByteLength: a.logicalByteLength,
+    };
+  }
+
+  /* Read the snapshot BOUND to the trusted package state.
+   *
+   * The read regime is chosen by the TRUSTED construction family, never by
+   * anything the package says about itself, so a package trusted as v3 can
+   * never fall through to the weaker plain read by claiming otherwise. v3 goes
+   * through the governed verified-member path against the trusted descriptor;
+   * v1/v2 have no governed logical representation, so the bounded reader's own
+   * returned physical digest AND length are compared against the trusted
+   * measurements before a single byte is parsed. A package substituted after
+   * either the inspection or the enumeration therefore refuses here.
+   *
+   * Every failure yields null, which the existing callers already treat as a
+   * hard refusal — no new policy state is introduced. */
+  function readBoundPackageSnapshotJson(packagePath, inspection) {
+    var codec = savedChatPackageCodecV3();
+    if (!codec || typeof codec.readBoundedPackageMemberBytes !== 'function') return Promise.resolve(null);
+    return trustedOccupantFor(packagePath).then(function (occupant) {
+      if (!occupant || !trustedStateMatches(inspection, occupant)) return null;
+      var anchors = trustedMemberAnchors(occupant);
+      if (!anchors) return null;
+      var cap = codec.LOGICAL_SNAPSHOT_CAP_BYTES;
+      if (anchors.family === FAMILY_V3) {
         return Promise.resolve(codec.readVerifiedPackageMember({
           packagePath: packagePath,
-          descriptor: descriptor,
+          descriptor: trustedSnapshotDescriptor(anchors),
           expectedPath: 'snapshot.json',
-          physicalByteCap: codec.LOGICAL_SNAPSHOT_CAP_BYTES,
-          logicalByteCap: codec.LOGICAL_SNAPSHOT_CAP_BYTES,
+          physicalByteCap: cap,
+          logicalByteCap: cap,
         })).then(function (verified) {
           return safeParseJson(decodeToText(safeObject(verified).logicalBytes));
         }, function () { return null; });
       }
-      return readPackageTextFile(packagePath, 'snapshot.json')
-        .then(function (t) { return safeParseJson(String(t || '').slice(0, SNAPSHOT_READ_CAP)); }, function () { return null; });
-    });
+      return Promise.resolve(codec.readBoundedPackageMemberBytes({
+        packagePath: packagePath,
+        memberPath: 'snapshot.json',
+        physicalByteCap: cap,
+      })).then(function (bounded) {
+        var read = safeObject(bounded);
+        if (bareHash(read.physicalSha256) !== bareHash(anchors.physicalSha256)) return null;
+        if (read.physicalByteLength !== anchors.physicalByteLength) return null;
+        return safeParseJson(decodeToText(read.storedBytes));
+      }, function () { return null; });
+    }, function () { return null; });
   }
 
   function snapshotRowId(snap) {
@@ -330,13 +441,22 @@
     return Promise.resolve()
       .then(function () { return inspector.inspectPackage({ packagePath: packagePath }); })
       .then(function (res) { inspection = safeObject(res); })
-      .then(function () { return readPackageSnapshotJson(packagePath); })
+      .then(function () { return readBoundPackageSnapshotJson(packagePath, inspection); })
       .then(function (json) { snapshotJson = json; })
       .then(function () {
         var inspectStatus = cleanString(inspection.status);
         var identity = packageIdentity(inspection, snapshotJson);
         var early = nonVerifiedDecision(inspectStatus);
         if (early) return dryRunResult(packagePath, early, identity, null, 'inspector status: ' + inspectStatus, inspectStatus);
+        /* The snapshot could not be bound to the trusted package state, so there
+         * is nothing here that may be reported as restorable. Execution refuses
+         * this case too, but a dry-run that still said `restore-ready` would arm
+         * an operator confirmation for a package whose content is unproven.
+         * Existing `rejected` vocabulary; no new decision state. */
+        if (!snapshotJson) {
+          return dryRunResult(packagePath, 'rejected', identity, null,
+            'snapshot content could not be bound to the trusted package state', inspectStatus);
+        }
         if (!identity.chatId || !identity.snapshotId) {
           return dryRunResult(packagePath, 'rejected', identity, null, 'package identity missing chatId or snapshotId', inspectStatus);
         }
@@ -518,7 +638,7 @@
         if (cleanString(safeObject(inspection).status) !== 'verified') {
           return actionResult(packagePath, 'rejected', dry, null, 'package no longer verified at write time');
         }
-        return readPackageSnapshotJson(packagePath).then(function (json) {
+        return readBoundPackageSnapshotJson(packagePath, inspection).then(function (json) {
           snapshotJson = json;
           var identity = packageIdentity(inspection, snapshotJson);
           var turns = getImporter().buildTurnsFromPackageSnapshot(snapshotJson);

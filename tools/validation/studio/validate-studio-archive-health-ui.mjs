@@ -47,14 +47,17 @@ const helperCode = stripComments(helperSrc);
 
 // The read-only health card delegates sibling MOUNTS (operator action / inspector /
 // importer) to their own modules. Those delegations legitimately name the sibling
-// modules (e.g. archiveImporter, mountArchiveImporterCard, importerApi) — they are
+// modules (e.g. archiveImporter, mountArchiveImporterCard, importerApi, and the
+// Recovery Center's recoveryCenterUi / mountRecoveryCenterCard / recoveryCenterApi) — they are
 // not import/mutation LOGIC in the health card itself. Neutralize ONLY those exact
 // delegation identifiers so the read-only / no-action-label scans test the health
 // card's own behavior; any other import/recover/restore/upsert token still trips.
 const helperLogic = helperCode
   .replace(/H2O\.Studio\.archive(MaterializerAction|Inspector|Importer)\b/g, 'H2O.Studio.siblingModule')
+  .replace(/H2O\.Studio\.recoveryCenterUi\b/g, 'H2O.Studio.siblingModule')
   .replace(/mountArchive(MaterializerAction|Inspector|Importer)Card/g, 'mountSiblingCard')
-  .replace(/\b(actionApi|inspectorApi|importerApi)\b/g, 'siblingApi');
+  .replace(/mountRecoveryCenterCard/g, 'mountSiblingCard')
+  .replace(/\b(actionApi|inspectorApi|importerApi|recoveryCenterApi)\b/g, 'siblingApi');
 
 function functionBlock(src, name) {
   const signature = `function ${name}`;
@@ -136,14 +139,18 @@ check('helper is read-only: no mutation/repair/import/sync/CAS/DB-write/package-
 check('helper has C6.2 summary count labels and separates integrity from drift', () => {
   for (const label of [
     'packagesTotal', 'packagesOk', 'packagesWarning', 'packagesBlocked', 'v1', 'v2',
-    'brokenPackageAssets', 'assetRefMismatches', 'dataImageResidue',
     'missingLiveCasAssets', 'missingDbChats', 'missingDbSnapshots', 'orphanedPackages', 'stalePackages', 'storeAssetMismatches',
     'dbChecks passed', 'dbChecks warnings', 'dbChecks failed',
+    /* M10 P3: renderer hygiene is surfaced, explicitly unavailable. */
+    'rendererHygiene',
   ]) {
     assert.ok(helperSrc.includes(label), `summary label missing: ${label}`);
   }
   assert.ok(helperSrc.includes('Integrity'), 'integrity section missing');
-  assert.ok(helperSrc.includes('Blockers are package integrity problems and need attention.'), 'blocker explanation missing');
+  assert.ok(
+    helperSrc.includes('Blocked packages failed trusted verification.'),
+    'integrity section must explain that severity comes from trusted verification',
+  );
   assert.ok(helperSrc.includes('Drift / informational warnings'), 'drift section missing');
   assert.ok(helperSrc.includes('Drift does not automatically mean a saved package is broken'), 'drift explanation missing');
   assert.ok(helperSrc.includes('grid-template-columns:repeat(auto-fit,minmax(150px,1fr))'), 'compact counts grid missing');
@@ -308,10 +315,86 @@ check('formatArchiveHealthSections returns the four C6.2 count sections', () => 
   const html = api.renderArchiveHealthCounts(sections);
   assert.match(html, /data-archive-health-counts/);
   assert.match(html, /packagesTotal/);
-  assert.match(html, /brokenPackageAssets/);
   assert.match(html, /missingLiveCasAssets/);
   assert.match(html, /dbChecks\.passed/);
   assert.match(html, /repeat\(auto-fit,minmax\(150px,1fr\)\)/);
+
+  /* M10 P3 metric correction. The canonical verifier is fail-fast, so an exact
+     broken-asset total does not exist, and the old mismatch count conflated
+     package integrity with renderer hygiene. Both are RETIRED rather than
+     rendered as a measured-looking zero. */
+  for (const retired of ['brokenPackageAssets', 'assetRefMismatches']) {
+    assert.ok(!html.includes(retired), `retired metric must not be presented: ${retired}`);
+  }
+  /* The Integrity card claims only what trusted verification supplies. */
+  const integrity = sections.find((section) => section.key === 'integrity');
+  assert.equal(JSON.stringify(integrity.counts.map((c) => c.key)), JSON.stringify(['packagesBlocked']),
+    'the Integrity card presents only the trusted blocked count');
+
+  /* UNAVAILABLE IS NOT ZERO. Renderer hygiene is not observed in P3, so it must
+     render as the explicit unavailable label and must sit on the DRIFT side,
+     never in the integrity severity area. */
+  const drift = sections.find((section) => section.key === 'drift');
+  const hygiene = drift.counts.find((c) => c.key === 'rendererHygiene');
+  assert.ok(hygiene, 'renderer hygiene is presented on the drift side');
+  assert.equal(hygiene.available, false, 'declared unavailable');
+  assert.equal(hygiene.value, null, 'no synthetic numeric value');
+  assert.match(html, /data-archive-health-count="rendererHygiene"[\s\S]{0,200}>n\/a</,
+    'renderer hygiene renders as n/a, never 0');
+  assert.ok(
+    !integrity.counts.some((c) => c.key === 'rendererHygiene' || c.key === 'dataImageResidue'),
+    'renderer hygiene must not appear as integrity severity',
+  );
+  /* And no clean-sounding claim is made about something nothing measured. */
+  for (const forbidden of ['no residue', '0 issues', 'clean', 'verified', 'passed']) {
+    assert.ok(!String(drift.note).toLowerCase().includes(forbidden), `hygiene copy must not claim: ${forbidden}`);
+  }
+
+  /* A MEASURED zero still renders 0 — the distinction is the whole point. */
+  assert.match(html, /data-archive-health-count="packagesBlocked"[\s\S]{0,200}>0</,
+    'a measured zero is still shown as 0');
+  assert.match(html, /data-archive-health-count="missingDbChats"[\s\S]{0,200}>0</);
+});
+
+check('M10 P3: unavailable per-package metrics render n/a, measured ones still render', () => {
+  const api = loadHelper();
+  /* Trusted path: the legacy renderer buckets are absent, not empty. */
+  const trusted = api.formatPackageDetailsRows({
+    packages: [{
+      packagePath: 'archive/packages/a.h2ochat', status: 'ok', chatId: 'c', snapshotId: 's',
+      blockers: [], warnings: [],
+      assetChecks: { manifestAssetCount: 0, packageAssetCount: 0, missingPackageAssets: [], missingLiveCasAssets: [] },
+      dbChecks: {},
+    }],
+  })[0];
+  assert.equal(trusted.assetChecks.dataImageResidue, null, 'unobserved, not zero');
+  assert.equal(trusted.assetChecks.assetRefMismatches, null, 'unobserved, not zero');
+  assert.equal(trusted.assetChecks.missingPackageAssets, 0, 'a measured empty list is still 0');
+
+  /* Legacy helper output still carries real arrays; those must keep counting. */
+  const legacy = api.formatPackageDetailsRows({
+    packages: [{
+      packagePath: 'archive/packages/b.h2ochat', status: 'blocked', chatId: 'c', snapshotId: 's',
+      blockers: [], warnings: [],
+      assetChecks: { dataImageResidue: [{ x: 1 }, { x: 2 }], assetRefMismatches: [{ y: 1 }] },
+      dbChecks: {},
+    }],
+  })[0];
+  assert.equal(legacy.assetChecks.dataImageResidue, 2, 'a measured list still counts');
+  assert.equal(legacy.assetChecks.assetRefMismatches, 1);
+
+  const html = api.renderPackageDetails({ packages: [{
+    packagePath: 'archive/packages/a.h2ochat', status: 'blocked', chatId: 'c', snapshotId: 's',
+    blockers: [{ code: 'generation-v3-gzip-decode-failed', message: 'The compressed snapshot could not be decoded.' }],
+    warnings: [], assetChecks: {}, dbChecks: {},
+  }] }, { detailsExpanded: true });
+  const residueCell = html.slice(html.indexOf('data-archive-health-detail-field="dataImageResidue"'));
+  const residueValue = residueCell.slice(0, residueCell.indexOf('</span></span>'));
+  assert.ok(residueValue.includes('n/a'), 'unavailable renders n/a');
+  assert.ok(!/>0</.test(residueValue), 'and never as a measured zero');
+  /* §10: the trusted blocker explanation stays visible and authoritative. */
+  assert.ok(html.includes('generation-v3-gzip-decode-failed'), 'trusted blocker code visible');
+  assert.ok(html.includes('The compressed snapshot could not be decoded.'), 'explanation visible');
 });
 
 check('formatPackageDetailsRows sorts by severity and summarizes DB/asset checks defensively', () => {

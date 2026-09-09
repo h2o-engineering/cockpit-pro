@@ -97,10 +97,10 @@
       typeof portable.readPortablePackageZip === 'function' ? portable : null;
   }
 
-  function getPackageByteValidator() {
+  function getPortableVerifier() {
     var ingestion = (H2O.Studio && H2O.Studio.ingestion) || {};
-    return typeof ingestion.validateSavedChatPackageBytesV1 === 'function'
-      ? ingestion.validateSavedChatPackageBytesV1 : null;
+    return typeof ingestion.verifySavedChatPortablePackageV1 === 'function'
+      ? ingestion.verifySavedChatPortablePackageV1 : null;
   }
 
   function getInvoke() {
@@ -349,6 +349,16 @@
     throw new Error('saved-chat-zip-stage-collision-exhausted');
   }
 
+  /* Trusted native carries bare lowercase hex; the outward export contract has
+   * always used the prefixed form. Formatting only — nothing is hashed here. */
+  function prefixedHash(value) {
+    var text = cleanString(value).toLowerCase();
+    if (!text) return '';
+    return text.indexOf('sha256-') === 0 ? text : 'sha256-' + text;
+  }
+
+  /* TRANSPORT hashing only (M10 P3.6c): copied-member equality and the ZIP's
+   * own published byte identity. It establishes no package semantics. */
   async function sha256Prefixed(bytes) {
     if (!global.crypto || !global.crypto.subtle) throw new Error('crypto.subtle unavailable for export verification');
     var digest = await global.crypto.subtle.digest('SHA-256', bytesFor(bytes));
@@ -356,21 +366,6 @@
       return byte.toString(16).padStart(2, '0');
     }).join('');
     return 'sha256-' + hex;
-  }
-
-  function canonicalJson(value) {
-    function normalize(v) {
-      if (v === undefined) return undefined;
-      if (v === null || typeof v !== 'object') return v;
-      if (Array.isArray(v)) return v.map(normalize).filter(function (item) { return item !== undefined; });
-      var out = {};
-      Object.keys(v).sort().forEach(function (key) {
-        var nv = normalize(v[key]);
-        if (nv !== undefined) out[key] = nv;
-      });
-      return out;
-    }
-    return JSON.stringify(normalize(value));
   }
 
   function sanitizeExportName(rawName, fallbackName) {
@@ -480,35 +475,12 @@
     return (sv === 2 && pv === 2) || (sv === 3 && pv === 3);
   }
 
-  function contentHashExpected(manifest, fileHashes) {
-    var snapshotSha = cleanString(fileHashes['snapshot.json']);
-    if (!snapshotSha) return '';
-    var assets = asArray(manifest.assets).map(function (asset) {
-      return normalizeSha(asset && asset.sha256);
-    }).filter(Boolean).sort();
-    var schemaVersion = isFiniteNumber(manifest.schemaVersion) ? manifest.schemaVersion : Number(manifest.schemaVersion);
-    if (schemaVersion === 3) {
-      var snapshotDescriptor = safeObject(safeObject(manifest.files).snapshot);
-      var logicalSnapshotSha = normalizeSha(snapshotDescriptor.contentSha256) || snapshotSha;
-      return sha256Prefixed(new TextEncoder().encode(canonicalJson({
-        payloadVersion: 3,
-        snapshot: logicalSnapshotSha,
-        assets: assets,
-      })));
-    }
-    /* v2 identity is the canonical preservation descriptor { snapshot, assets },
-     * and an empty assets array is a legitimate value of it — not a reason to
-     * fall back to the v1 rule. Gating this on assets.length made a zero-asset
-     * v2 package (an ordinary chat with no images) verify against the v1 hash
-     * here while the governed builder and validator both used the descriptor,
-     * so export self-verification rejected packages those authorities accept.
-     * Only v1 uses the bare snapshot hash. */
-    if (schemaVersion >= 2) {
-      return sha256Prefixed(new TextEncoder().encode(canonicalJson({ snapshot: snapshotSha, assets: assets })));
-    }
-    return Promise.resolve(snapshotSha);
-  }
-
+  /* TRANSPORT assurance only (M10 P3.6c). Each copied member is compared to the
+   * descriptor the manifest declares for it, which proves the copy moved the
+   * bytes faithfully. It no longer recomputes the package contentHash: the
+   * exporter's private semantic identity authority is retired, and package
+   * validity now comes from the trusted Archive Inspector for the source and
+   * from trusted native verification for the assembled portable package. */
   async function verifyCopiedFiles(manifest, copied) {
     var hashes = {};
     for (var i = 0; i < copied.length; i += 1) {
@@ -522,11 +494,7 @@
         throw new Error('copied file byteLength mismatch: ' + item.relativePath);
       }
     }
-    var expectedContentHash = await contentHashExpected(manifest, hashes);
-    if (normalizeSha(manifest.contentHash) !== expectedContentHash) {
-      throw new Error('copied package contentHash mismatch');
-    }
-    return { hashes: hashes, contentHash: expectedContentHash };
+    return { hashes: hashes };
   }
 
   function exportResult(status, data) {
@@ -768,7 +736,7 @@
       for (var i = 0; i < declared.length; i += 1) {
         copied.push(await copyDeclaredFile(packagePath, tempPath, declared[i], exportPolicy));
       }
-      var postCopy = await verifyCopiedFiles(verified.manifest, copied);
+      await verifyCopiedFiles(verified.manifest, copied);
       /* Derived v3 companions are intentionally outside manifest.files and
        * contentHash. The source manifest is copied byte-for-byte and unchanged. */
       var derivedCompanions = await writeV3DerivedExportCompanions(
@@ -813,7 +781,9 @@
         payloadVersion: verified.manifest.payloadVersion,
         /* Recomputed over the COPIED bytes — this is the proof the export is
          * byte-faithful, not a restatement of the source manifest's claim. */
-        contentHash: postCopy.contentHash,
+        /* The TRUSTED identity established by the Archive Inspector for the
+         * source package. The exporter no longer derives one of its own. */
+        contentHash: cleanString(verifiedIdentity(verified).contentHash),
         contentHashVerified: true,
         packageKind: cleanString(verifiedIdentity(verified).packageKind),
         fileCount: copied.length + derivedCompanions.length,
@@ -840,23 +810,78 @@
     return base;
   }
 
+  /* Canonical container entry -> native member key. A portable V3 export carries
+   * REGENERATED chat.md / chat.html companions: the container's inventory
+   * requires them, but V3 package semantics forbid a persistent renderer, so
+   * they are transport artifacts and are not offered as semantic members. */
+  var CANONICAL_MEMBER_BY_ENTRY = {
+    'manifest.json': 'manifest',
+    'snapshot.json': 'snapshot',
+    'chat.md': 'markdown',
+    'chat.html': 'html',
+  };
+  var CANONICAL_ASSET_ENTRY = /^assets\/sha256-[0-9a-f]{64}\.[a-z0-9]{1,16}$/;
+
+  function portableVerificationInput(packageEntries, schemaVersion) {
+    var companionsAreMembers = Number(schemaVersion) !== 3;
+    var members = { assets: [] };
+    var unexpected = [];
+    asArray(packageEntries).forEach(function (entry) {
+      var name = cleanString(entry && entry.name);
+      if (!name) return;
+      var canonical = CANONICAL_MEMBER_BY_ENTRY[name];
+      if (canonical) {
+        if ((canonical === 'markdown' || canonical === 'html') && !companionsAreMembers) return;
+        members[canonical] = entry.bytes;
+        return;
+      }
+      if (CANONICAL_ASSET_ENTRY.test(name)) {
+        members.assets.push({ key: 'asset:' + name.slice('assets/'.length), bytes: entry.bytes });
+        return;
+      }
+      unexpected.push(name);
+    });
+    return { members: members, unexpectedMembers: unexpected };
+  }
+
   async function assemblePortablePackage(packagePath, verified) {
     var declared = declaredFilesFromManifest(verified.manifest);
     var copied = [];
     for (var i = 0; i < declared.length; i += 1) copied.push(await readDeclaredFile(packagePath, declared[i]));
-    var postCopy = await verifyCopiedFiles(verified.manifest, copied);
+    await verifyCopiedFiles(verified.manifest, copied);
     var companions = await buildV3DerivedExportCompanions(verified.manifest, copied);
     var packageEntries = copied.concat(companions).map(function (entry) {
       return { name: entry.relativePath, bytes: bytesFor(entry.bytes) };
     });
     var packageDirName = packageDirNameForPath(packagePath);
+
+    /* THE semantic verification, performed ONCE, on the assembled members and
+     * before any ZIP exists. The read-back below proves the published bytes are
+     * these bytes, so verifying a second time after the write would be ceremony
+     * rather than assurance. */
+    var verify = getPortableVerifier();
+    if (!verify) throw new Error('trusted portable verification unavailable');
+    var input = portableVerificationInput(packageEntries, verified.manifest.schemaVersion);
+    var trusted = safeObject(await verify({
+      packageDirName: packageDirName,
+      members: input.members,
+      unexpectedMembers: input.unexpectedMembers,
+    }));
+    if (trusted.verified !== true) {
+      var refusal = safeObject(trusted.refusal);
+      throw new Error('assembled portable package failed trusted verification: '
+        + (cleanString(refusal.code) || 'unknown'));
+    }
+
     return {
       packageDirName: packageDirName,
       packageEntries: packageEntries,
       zipEntries: packageEntries.map(function (entry) {
         return { name: joinPath(packageDirName, entry.name), bytes: entry.bytes };
       }),
-      contentHash: postCopy.contentHash,
+      /* The trusted wire is bare hex; the outward export contract has always
+       * carried the prefixed form. Formatting only — nothing is recomputed. */
+      contentHash: prefixedHash(trusted.contentHash),
       assetCount: asArray(verified.manifest.assets).length,
       schemaVersion: verified.manifest.schemaVersion,
       payloadVersion: verified.manifest.payloadVersion,
@@ -872,10 +897,12 @@
     return true;
   }
 
+  /* TRANSPORT identity only. The semantic claim was established before the ZIP
+   * was built; this proves the container round-trips those exact bytes, which is
+   * what binds the claim to what gets published. */
   async function verifyPortableZipReadback(zipBytes, assembled) {
     var portable = getPortableZip();
-    var validator = getPackageByteValidator();
-    if (!portable || !validator) throw new Error('portable ZIP read-back authority unavailable');
+    if (!portable) throw new Error('portable ZIP read-back authority unavailable');
     var decoded = await portable.readPortablePackageZip(zipBytes);
     if (decoded.packageDirName !== assembled.packageDirName) throw new Error('portable ZIP package root changed during write');
     var actual = Object.create(null);
@@ -886,15 +913,6 @@
         throw new Error('portable ZIP member read-back mismatch: ' + entry.name);
       }
     });
-    var diag = safeObject(await validator({
-      packageDirName: decoded.packageDirName,
-      entries: decoded.entries,
-      includeRendererChecks: true,
-    }));
-    if (asArray(diag.blockers).length || safeObject(diag.hashChecks).contentHashOk !== true ||
-        cleanString(safeObject(diag.hashChecks).expectedContentHash) !== assembled.contentHash) {
-      throw new Error('portable ZIP contained package failed governed read-back verification');
-    }
     return decoded;
   }
 
@@ -904,7 +922,7 @@
     try {
       var exportPolicy = policyToken || await readSavedChatExportRootPolicy();
       var dest = resolveZipExportDestination(opts);
-      if (!getPortableZip() || !getPackageByteValidator()) {
+      if (!getPortableZip() || !getPortableVerifier()) {
         return zipExportResult('rejected', { packagePath: packagePath, exportName: dest.exportName, destinationPath: dest.destinationPath, reason: 'portable ZIP authority unavailable' });
       }
       var verified = await inspectVerifiedPackage(packagePath);
@@ -1222,7 +1240,6 @@
       sanitizeZipExportName: sanitizeZipExportName,
       assertSafeRelativePackagePath: assertSafeRelativePackagePath,
       declaredFilesFromManifest: declaredFilesFromManifest,
-      canonicalJson: canonicalJson,
     },
   };
 })(typeof window !== 'undefined' ? window : globalThis);
