@@ -48,6 +48,45 @@ const functionBody = (source, name) => {
   return next === -1 ? rest : rest.slice(0, next);
 };
 
+/* Bounded call-graph over ONE module's top-level functions. This is not a
+ * general JavaScript analyser: it indexes the two-space-indented module
+ * functions this repository's ingestion modules use, treats "name(" inside a
+ * body as a direct call, and walks those edges. Enough to follow helper
+ * indirection inside a single authority surface; deliberately nothing more. */
+const moduleFunctions = (source) => {
+  const decl = /\n {2}(?:async\s+)?function\s+([A-Za-z0-9_$]+)\s*\(/g;
+  const marks = [];
+  let m;
+  while ((m = decl.exec(source))) marks.push({ name: m[1], start: m.index });
+  const bodies = new Map();
+  marks.forEach((d, i) => {
+    const end = i + 1 < marks.length ? marks[i + 1].start : source.length;
+    bodies.set(d.name, source.slice(d.start, end));
+  });
+  return bodies;
+};
+const callEdges = (bodies) => {
+  const names = [...bodies.keys()];
+  const edges = new Map();
+  for (const [name, body] of bodies) {
+    edges.set(name, names.filter((other) => other !== name
+      && new RegExp('\\b' + other.replace(/\$/g, '\\$') + '\\s*\\(').test(body)));
+  }
+  return edges;
+};
+/* Every function transitively reachable from the given entry points. */
+const reachableFrom = (edges, roots) => {
+  const seen = new Set();
+  const stack = [...roots];
+  while (stack.length) {
+    const node = stack.pop();
+    if (seen.has(node)) continue;
+    seen.add(node);
+    for (const callee of (edges.get(node) || [])) if (!seen.has(callee)) stack.push(callee);
+  }
+  return seen;
+};
+
 const callersOf = (token) => productionFiles()
   .filter((rel) => rel !== DEFINER)
   .filter((rel) => codeOf(rel).includes(token));
@@ -186,20 +225,47 @@ check('the importer verifies portable packages through trusted native code', () 
     'trustedOccupantFor',
     'readBoundPackageSnapshotJson',
   ];
-  for (const fn of ['loadPortableCandidate', 'dryRunImportZip', 'importVerifiedZip']) {
-    const body = functionBody(importer, fn);
-    assert.ok(body, `portable path function not found: ${fn}`);
-    for (const token of ARCHIVE_AUTHORITY) {
-      assert.ok(!body.includes(token),
-        `portable path ${fn} reaches archive-integrity authority: ${token}`);
+  const PORTABLE_ENTRY = ['dryRunImportZip', 'importVerifiedZip', 'loadPortableCandidate'];
+  const ARCHIVE_ENTRY = ['dryRunImportPackage', 'importVerifiedPackage', 'loadArchiveCandidate'];
+
+  /* TRANSITIVE, not one-hop. Scanning only the entry bodies would miss a wrapper:
+   * portable entry -> helper A -> (helper B) -> archive-integrity authority.
+   * The closure below follows local calls to any depth, and both the reachable
+   * FUNCTION NAMES and the reachable BODIES are checked, so an inline invoke
+   * that introduces no new local helper is caught as well. */
+  const bodies = moduleFunctions(importer);
+  const edges = callEdges(bodies);
+  for (const fn of [...PORTABLE_ENTRY, ...ARCHIVE_ENTRY]) {
+    assert.ok(bodies.has(fn), `path function not found: ${fn}`);
+  }
+  const portableReach = reachableFrom(edges, PORTABLE_ENTRY);
+  for (const authority of ARCHIVE_AUTHORITY) {
+    assert.ok(!portableReach.has(authority),
+      `portable path transitively reaches archive-integrity authority: ${authority}`);
+  }
+  for (const fn of portableReach) {
+    for (const authority of ARCHIVE_AUTHORITY) {
+      assert.ok(!(bodies.get(fn) || '').includes(authority),
+        `portable-reachable ${fn} names archive-integrity authority: ${authority}`);
     }
   }
+
   /* The portable path must positively verify through the trusted portable
    * client, so the absence above cannot be satisfied by verifying nothing. */
+  assert.ok(portableReach.has('getPortableVerifier'),
+    'the portable path does not transitively resolve the trusted portable verifier');
+  assert.ok([...portableReach].some((fn) => (bodies.get(fn) || '').includes('verifySavedChatPortablePackageV1')),
+    'the portable path does not reach trusted native portable verification');
   assert.ok(functionBody(importer, 'loadPortableCandidate').includes('getPortableVerifier'),
-    'the portable path does not resolve the trusted portable verifier');
-  assert.ok(functionBody(importer, 'getPortableVerifier').includes('verifySavedChatPortablePackageV1'),
-    'the portable verifier resolver does not resolve trusted native portable verification');
+    'the portable loader does not resolve the trusted portable verifier directly');
+
+  /* And the archive path must still transitively reach its own trusted
+   * authority, so this check can never be satisfied by deleting b642. */
+  const archiveReach = reachableFrom(edges, ARCHIVE_ENTRY);
+  assert.ok(archiveReach.has('getTrustedIntegrityFn') && archiveReach.has('readBoundPackageSnapshotJson'),
+    'the archive path no longer transitively reaches its trusted content binding');
+  assert.ok([...archiveReach].some((fn) => (bodies.get(fn) || '').includes('readSavedChatArchiveIntegrityV1')),
+    'the archive path no longer reaches trusted archive integrity');
 
   /* And the archive-integrity token stays CONFINED to its own resolver, whose
    * reachability chain terminates in the archive loader. This both allows the
