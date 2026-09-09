@@ -160,7 +160,7 @@ const BATCH11_VALIDATOR_SHA256 = "c8a1abd5c21a9328dc13a8bf19aba508ab476095d9e988
 // invisible. Main commit 0bec56f5 ("feat(publish): allow clean worktree staging
 // authority") advanced the publisher, so the two roles are now pinned separately:
 // BASE_HEAD immutability above, executed-fixture bytes here.
-const SYNCED_PUBLISHER_SHA256 = "de4a1f5d1ecde209b127f908c057a3f5b6f233cdfc69b930b636677f91979ae3";
+const SYNCED_PUBLISHER_SHA256 = "89630e190d3d3a4e5d14db975a6ebf0c0cba3f463c05ad11de35284ef01880cf";
 const ACCEPTED_ACTIVATOR_SHA256 = "531bb4e9b5d7d61584e013d0d10c8007c78f75498988ba64bac4d24a8d4f2f36";
 const REQUIRED_FILES = Object.freeze([
   "manifest.json", "loader.js", "bg.js", "title-contract-bridge.js",

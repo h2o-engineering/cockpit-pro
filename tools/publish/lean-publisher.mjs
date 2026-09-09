@@ -98,6 +98,9 @@ const STUDIO_LAUNCHER_SHELL_FILES = Object.freeze([
 const STUDIO_REQUIRED_ORDER = Object.freeze([
   "platform/selectors.contract.js",
   "platform/html-sanitizer.js",
+  "renderer/safety/sanitizer-policy.v1.js",
+  "renderer/safety/vendor/dompurify/purify.js",
+  "renderer/safety/html-sanitizer.v2.js",
   "renderer/chat-renderer.studio.js",
   "studio.js",
 ]);

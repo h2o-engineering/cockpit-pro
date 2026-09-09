@@ -645,6 +645,15 @@
        H2O.Studio.html.sanitize. Must load BEFORE the saved-chat package
        projector, which delegates its sanitization here. Interim regex+CSP. -->
   <script src="./platform/html-sanitizer.js"></script>
+  <!-- Renderer sanitizer v2 (M03 P1 S1A) — LOADED BUT UNUSED. Admitted in
+       dependency order: the pure policy installs first, then the pinned
+       DOMPurify 3.4.15 UMD singleton, then the Renderer adapter that
+       captures it. Installs H2O.Studio.Renderer.htmlSanitizer only; the v1
+       surface above is untouched and remains what the Renderer and the
+       saved-chat projector consume. No consumer has migrated. -->
+  <script src="./renderer/safety/sanitizer-policy.v1.js"></script>
+  <script src="./renderer/safety/vendor/dompurify/purify.js"></script>
+  <script src="./renderer/safety/html-sanitizer.v2.js"></script>
   <!-- Canonical base transcript Renderer. Loads after the shared sanitizer
        and selector contract, and before studio.js Reader orchestration. -->
   <script src="./renderer/chat-renderer.studio.js"></script>
