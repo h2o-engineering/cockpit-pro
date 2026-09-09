@@ -275,11 +275,22 @@
   }
 
   /* ── Defaults ─────────────────────────────────────────────────────── */
+  /* An ABSENT config means "never configured", not "historically opted in".
+   * A fresh Desktop identity (new bundle id / new app-local store) has no
+   * persisted CONFIG_KEY, so this default is what it boots with: it must be
+   * unconfigured and non-mutating — no watcher, no source-folder read, no
+   * automatic import. Seeding mode 'auto' + the shared HOME-relative
+   * SYNC_FOLDER_NAME here made every fresh identity silently import whatever
+   * $HOME/H2O Studio Sync/chrome-latest.json held.
+   * Explicitly persisted configs are unaffected: getConfig() merges the
+   * persisted record over this base, the Phase 3 legacy manual->auto
+   * migration keys off a persisted mode, and an explicit 'auto' with no
+   * folder still falls back to SYNC_FOLDER_NAME below. */
   function defaultConfig() {
     return {
       schemaVersion: 1,
-      mode: 'auto',
-      folderPath: SYNC_FOLDER_NAME,
+      mode: 'off',
+      folderPath: '',
       phase3AutoSyncConfigVersion: PHASE3_AUTO_IMPORT_CONFIG_VERSION,
       updatedAt: ''
     };
