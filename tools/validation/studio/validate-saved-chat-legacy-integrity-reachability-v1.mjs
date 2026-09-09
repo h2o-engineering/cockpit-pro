@@ -36,6 +36,18 @@ function productionFiles() {
 const codeOf = (rel) => readRepo(rel)
   .replace(/\/\*[\s\S]*?\*\//g, ' ')
   .replace(/^\s*\/\/.*$/gm, ' ');
+/* Bounded body of one top-level module function, so an assertion can be scoped
+ * to a single execution path instead of the whole file. Same idiom as the
+ * sibling restore/relink validator, with `async function` handled because the
+ * importer's path loaders are async. */
+const functionBody = (source, name) => {
+  const m = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(').exec(source);
+  if (!m) return '';
+  const rest = source.slice(m.index + m[0].length);
+  const next = rest.search(/\n {2}(?:async )?function\s/);
+  return next === -1 ? rest : rest.slice(0, next);
+};
+
 const callersOf = (token) => productionFiles()
   .filter((rel) => rel !== DEFINER)
   .filter((rel) => codeOf(rel).includes(token));
@@ -152,9 +164,58 @@ check('the importer verifies portable packages through trusted native code', () 
   assert.ok(!importer.includes('validateSavedChatPackageBytesV1'),
     'M10 P3.6b retired the legacy byte validator from the importer');
   assert.ok(!importer.includes('mapInspectStatus'), 'and the legacy mapper with it');
-  /* The archive integrity envelope is a different authority and stays out of
-     the portable path. */
-  assert.ok(!importer.includes('readSavedChatArchiveIntegrityV1'));
+
+  /* The archive-integrity envelope is a DIFFERENT authority and stays out of the
+   * portable path.
+   *
+   * This was once asserted as whole-file absence of
+   * readSavedChatArchiveIntegrityV1. That became wrong — not because the
+   * invariant changed, but because b642 ("bind archive recovery reads to trusted
+   * state") made the ARCHIVE path legitimately consume fresh trusted archive
+   * integrity to bind its post-inspection reads. A whole-file substring
+   * conflates the two paths, and keeping it green would have required the
+   * archive path to surrender its own safety correction.
+   *
+   * The invariant is therefore asserted where it actually lives: portable
+   * recovery must verify through the trusted PORTABLE native verifier and must
+   * never substitute archive-integrity authority. Proven by path topology
+   * rather than by file-wide spelling. */
+  const ARCHIVE_AUTHORITY = [
+    'readSavedChatArchiveIntegrityV1',
+    'getTrustedIntegrityFn',
+    'trustedOccupantFor',
+    'readBoundPackageSnapshotJson',
+  ];
+  for (const fn of ['loadPortableCandidate', 'dryRunImportZip', 'importVerifiedZip']) {
+    const body = functionBody(importer, fn);
+    assert.ok(body, `portable path function not found: ${fn}`);
+    for (const token of ARCHIVE_AUTHORITY) {
+      assert.ok(!body.includes(token),
+        `portable path ${fn} reaches archive-integrity authority: ${token}`);
+    }
+  }
+  /* The portable path must positively verify through the trusted portable
+   * client, so the absence above cannot be satisfied by verifying nothing. */
+  assert.ok(functionBody(importer, 'loadPortableCandidate').includes('getPortableVerifier'),
+    'the portable path does not resolve the trusted portable verifier');
+  assert.ok(functionBody(importer, 'getPortableVerifier').includes('verifySavedChatPortablePackageV1'),
+    'the portable verifier resolver does not resolve trusted native portable verification');
+
+  /* And the archive-integrity token stays CONFINED to its own resolver, whose
+   * reachability chain terminates in the archive loader. This both allows the
+   * legitimate b642 archive use and proves it cannot leak sideways. */
+  assert.ok(functionBody(importer, 'getTrustedIntegrityFn').includes('readSavedChatArchiveIntegrityV1'),
+    'the archive-integrity resolver no longer resolves the trusted archive command');
+  for (const fn of ['loadArchiveCandidate', 'readBoundPackageSnapshotJson', 'trustedOccupantFor']) {
+    assert.ok(functionBody(importer, fn), `archive path function not found: ${fn}`);
+  }
+  assert.ok(functionBody(importer, 'loadArchiveCandidate').includes('readBoundPackageSnapshotJson'),
+    'the archive path no longer performs the b642 bound read');
+  const total = importer.split('readSavedChatArchiveIntegrityV1').length - 1;
+  const inResolver = functionBody(importer, 'getTrustedIntegrityFn')
+    .split('readSavedChatArchiveIntegrityV1').length - 1;
+  assert.equal(total - inResolver, 0,
+    'the trusted archive command is named outside its single archive-path resolver');
 });
 
 /* ── P3.5.6B: mapper trust-domain ownership ─────────────────────────────── */
