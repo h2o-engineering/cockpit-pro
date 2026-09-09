@@ -75,22 +75,13 @@
     return dir === "ltr" || dir === "rtl" ? dir : "auto";
   }
 
-  function stableHash(value) {
-    const text = asString(value);
-    let hash = 2166136261;
-    for (let i = 0; i < text.length; i += 1) {
-      hash ^= text.charCodeAt(i);
-      hash = Math.imul(hash, 16777619);
-    }
-    return (hash >>> 0).toString(36);
-  }
-
-  function makeRenderKey(namespace, ownerRef, ordinal) {
+  function makeRenderKey(namespace, ownerRef, fallbackPath) {
     const ns = asString(namespace).trim() || "node";
     const owner = asString(ownerRef).trim();
-    if (owner) return `${ns}:owner:${stableHash(owner)}`;
-    const n = Number.isInteger(ordinal) && ordinal >= 0 ? ordinal : 0;
-    return `${ns}:ordinal:${n}`;
+    const identity = owner
+      ? `owner:${owner}`
+      : `path:${asString(fallbackPath).trim() || "0"}`;
+    return `${ns}:${encodeURIComponent(identity)}`;
   }
 
   function normalizeOwnerRef(input) {
@@ -100,7 +91,7 @@
 
     const out = {};
     for (const key of ["type", "id", "version", "anchor", "provider", "namespace"]) {
-      if (input[key] != null && input[key] !== "") out[key] = input[key];
+      if (input[key] != null && input[key] !== "") out[key] = cloneValue(input[key]);
     }
     return Object.keys(out).length ? out : null;
   }
@@ -119,13 +110,24 @@
     );
   }
 
+  function cloneValue(value) {
+    if (value == null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+    if (Array.isArray(value)) return value.map(cloneValue);
+    if (isPlainObject(value)) {
+      const out = {};
+      for (const [key, child] of Object.entries(value)) out[key] = cloneValue(child);
+      return out;
+    }
+    throw new TypeError("Render IR payload values must be JSON-like data");
+  }
+
   function clonePayload(input, excluded) {
     if (!isPlainObject(input)) return {};
     const out = {};
     const skip = new Set(excluded || []);
     for (const [key, value] of Object.entries(input)) {
       if (skip.has(key)) continue;
-      out[key] = value;
+      out[key] = cloneValue(value);
     }
     return out;
   }
@@ -154,11 +156,12 @@
     const kind = asString(input.kind || input.type).trim();
     if (!BLOCK_KIND_SET.has(kind)) throw new TypeError(`Unsupported Render IR block kind: ${kind || "<empty>"}`);
 
-    const ordinal = Number.isInteger(context.ordinal) ? context.ordinal : 0;
+    const pathToken = asString(context.path).trim()
+      || (Number.isInteger(context.ordinal) && context.ordinal >= 0 ? String(context.ordinal) : "0");
     const messageKey = asString(context.messageKey).trim() || "message:unknown";
     const ownerRef = extractOwnerRef(input);
     const renderKey = asString(input.renderKey).trim()
-      || makeRenderKey(`${messageKey}:block`, ownerRef ? JSON.stringify(ownerRef) : "", ordinal);
+      || makeRenderKey(`${messageKey}:block`, ownerRef ? JSON.stringify(ownerRef) : "", pathToken);
 
     const out = {
       kind,
@@ -174,31 +177,31 @@
     if (Array.isArray(out.children)) {
       out.children = out.children.map((child, index) => createBlock(child, {
         messageKey,
-        ordinal: (ordinal * 1000) + index + 1,
+        path: `${pathToken}.children.${index}`,
       }));
     }
     if (Array.isArray(out.blocks)) {
       out.blocks = out.blocks.map((child, index) => createBlock(child, {
         messageKey,
-        ordinal: (ordinal * 1000) + index + 1,
+        path: `${pathToken}.blocks.${index}`,
       }));
     }
     if (Array.isArray(out.items)) {
       out.items = out.items.map((child, index) => createBlock(
         isPlainObject(child) && child.kind ? child : { kind: "listItem", blocks: Array.isArray(child) ? child : [] },
-        { messageKey, ordinal: (ordinal * 1000) + index + 1 }
+        { messageKey, path: `${pathToken}.items.${index}` }
       ));
     }
     if (Array.isArray(out.rows)) {
       out.rows = out.rows.map((child, index) => createBlock(
         isPlainObject(child) && child.kind ? child : { kind: "tableRow", cells: Array.isArray(child) ? child : [] },
-        { messageKey, ordinal: (ordinal * 1000) + index + 1 }
+        { messageKey, path: `${pathToken}.rows.${index}` }
       ));
     }
     if (Array.isArray(out.cells)) {
       out.cells = out.cells.map((child, index) => createBlock(
         isPlainObject(child) && child.kind ? child : { kind: "tableCell", blocks: Array.isArray(child) ? child : [] },
-        { messageKey, ordinal: (ordinal * 1000) + index + 1 }
+        { messageKey, path: `${pathToken}.cells.${index}` }
       ));
     }
 
@@ -214,7 +217,7 @@
     const renderKey = asString(input.renderKey).trim()
       || makeRenderKey("message", ownerRef ? JSON.stringify(ownerRef) : "", index);
     const blocks = Array.isArray(input.blocks)
-      ? input.blocks.map((block, blockIndex) => createBlock(block, { messageKey: renderKey, ordinal: blockIndex }))
+      ? input.blocks.map((block, blockIndex) => createBlock(block, { messageKey: renderKey, path: String(blockIndex) }))
       : [];
 
     return deepFreeze({

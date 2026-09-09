@@ -7,11 +7,11 @@ import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(__filename), '..', '..', '..');
-const MODULE_REL = 'src-surfaces-base/studio/renderer/semantic/render-ir.v1.js';
-const source = fs.readFileSync(path.join(REPO_ROOT, MODULE_REL), 'utf8');
+const modulePath = process.argv[2] || path.join(REPO_ROOT, 'src-surfaces-base/studio/renderer/semantic/render-ir.v1.js');
+const source = fs.readFileSync(modulePath, 'utf8');
 const sandbox = vm.createContext({ console });
 sandbox.globalThis = sandbox;
-vm.runInContext(source, sandbox, { filename: MODULE_REL });
+vm.runInContext(source, sandbox, { filename: modulePath });
 const ir = sandbox.H2O?.Studio?.Renderer?.renderIR;
 assert.ok(ir, 'Render IR API did not register');
 
@@ -48,6 +48,25 @@ check('derives deterministic projection-local keys without claiming durable cont
   assert.equal(a.renderKey, b.renderKey);
   assert.equal(a.ownerRef, 'owner-block-42');
   assert.equal(Object.prototype.hasOwnProperty.call(a, 'contentBlockId'), false);
+});
+
+check('does not freeze or mutate owner-provided source objects while freezing the IR copy', () => {
+  const sourceMeta = { nested: { value: 1 } };
+  const block = ir.createBlock({ kind: 'artifact', metadata: sourceMeta }, { messageKey: 'message:a', path: '0' });
+  assert.equal(Object.isFrozen(block.metadata), true);
+  assert.equal(Object.isFrozen(sourceMeta), false);
+  assert.equal(Object.isFrozen(sourceMeta.nested), false);
+  sourceMeta.nested.value = 2;
+  assert.equal(block.metadata.nested.value, 1);
+});
+
+check('projection-local fallback paths remain unique beyond 1000 sibling/nested nodes', () => {
+  const blocks = Array.from({ length: 1505 }, (_, index) => ({ kind: 'text', text: String(index) }));
+  const message = ir.createMessage({ role: 'assistant', blocks }, 0);
+  const keys = message.blocks.map((block) => block.renderKey);
+  assert.equal(new Set(keys).size, keys.length);
+  const nested = ir.createBlock({ kind: 'list', items: [[{ kind: 'text', text: 'x' }]] }, { messageKey: 'message:a', path: '1501' });
+  assert.notEqual(nested.renderKey, nested.items[0].renderKey);
 });
 
 check('creates immutable conversation/message/block structures', () => {
