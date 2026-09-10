@@ -654,6 +654,19 @@
   <script src="./renderer/safety/sanitizer-policy.v1.js"></script>
   <script src="./renderer/safety/vendor/dompurify/purify.js"></script>
   <script src="./renderer/safety/html-sanitizer.v2.js"></script>
+  <!-- Renderer Markdown semantic engine (M03 P2 S2A T4) — LOADED BUT UNUSED.
+       Admitted in dependency order: the byte-verbatim markdown-it 15.0.1 UMD
+       first, then the H2O bounded GFM closure that extends it, then the one
+       engine configuration, then the Render IR adapter. Installs
+       H2O.Studio.Renderer.markdownGfm / .markdownEngine / .markdownIrAdapter
+       only. No consumer has migrated: the Renderer below still uses its
+       bespoke Markdown functions and both bespoke parsers stay live. The
+       vendored THIRD_PARTY_NOTICES beside the engine is licence material and
+       is deliberately NOT a script. -->
+  <script src="./renderer/markdown/vendor/markdown-it/markdown-it.umd.min.js"></script>
+  <script src="./renderer/markdown/h2o-gfm.v1.js"></script>
+  <script src="./renderer/markdown/markdown-engine.v1.js"></script>
+  <script src="./renderer/markdown/markdown-ir-adapter.v1.js"></script>
   <!-- Canonical base transcript Renderer. Loads after the shared sanitizer
        and selector contract, and before studio.js Reader orchestration. -->
   <script src="./renderer/chat-renderer.studio.js"></script>

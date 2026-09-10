@@ -132,6 +132,10 @@ const STUDIO_REQUIRED_ORDER = Object.freeze([
   "renderer/safety/sanitizer-policy.v1.js",
   "renderer/safety/vendor/dompurify/purify.js",
   "renderer/safety/html-sanitizer.v2.js",
+  "renderer/markdown/vendor/markdown-it/markdown-it.umd.min.js",
+  "renderer/markdown/h2o-gfm.v1.js",
+  "renderer/markdown/markdown-engine.v1.js",
+  "renderer/markdown/markdown-ir-adapter.v1.js",
   "renderer/chat-renderer.studio.js",
   "studio.js",
 ]);
