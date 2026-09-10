@@ -134,6 +134,12 @@ const state = {
   lastFolderId: "",
   lastFetchDiag: null,
   currentReaderSnapshot: null,
+  // Explicit, navigation-safe publication target. currentReaderSnapshot is
+  // transient — settings/library navigation clears it by design — but a
+  // publication flow reached FROM Settings still needs to know which saved
+  // chat the operator was last reading. Kept separate so route scope can keep
+  // clearing the reader without erasing the operator's intended target.
+  publicationTarget: null,
   activeRoute: "list",
   sidebarExpanded: true,
   density: "cozy",
@@ -165,9 +171,31 @@ let activeRailPopoverButton = null;
 
   H2O.Studio.getReaderContext = function () {
     const snap = state.currentReaderSnapshot;
+    const meta = snap && snap.meta && typeof snap.meta === "object" ? snap.meta : null;
     return {
       snapshotId: snap && snap.snapshotId ? String(snap.snapshotId) : "",
       chatId:     snap && snap.chatId     ? String(snap.chatId)     : "",
+      // Item 10: display-only title for the SAME snapshot read above, so a
+      // caller that shows the open chat and a caller that acts on it can
+      // never disagree about which chat that is. Same projection the reader
+      // header uses (meta.title); empty when the snapshot records none —
+      // never invented, never an id in disguise. chatId stays the only
+      // object authority; this is informational.
+      title:      meta && meta.title ? String(meta.title) : "",
+    };
+  };
+
+  // Item 10: the publication target is captured whenever an eligible saved
+  // chat becomes the active reader snapshot, and deliberately SURVIVES the
+  // route-scope clear so Browser Delivery can still name it. It updates when
+  // another eligible chat opens and is invalidated when its chat is deleted.
+  // Runtime/session state only — never persisted.
+  H2O.Studio.getPublicationTarget = function () {
+    const target = state.publicationTarget;
+    return {
+      snapshotId: target && target.snapshotId ? String(target.snapshotId) : "",
+      chatId:     target && target.chatId     ? String(target.chatId)     : "",
+      title:      target && target.title      ? String(target.title)      : "",
     };
   };
 
@@ -476,6 +504,7 @@ function persistEditToExtensionSnapshot(snapshotId, turnIdx, newText){
   // Keep in-memory snapshot current so subsequent edits in this session build on the
   // correct state (each edit would otherwise use the original captured text as base).
   state.currentReaderSnapshot = { ...snap, messages: editedMessages };
+  rememberPublicationTarget(state.currentReaderSnapshot);
   const meta = {
     ...(snap.meta && typeof snap.meta === "object" ? snap.meta : {}),
     updatedAt: nowStr,
@@ -563,6 +592,7 @@ async function executeDeleteChat(chatId, snapshotId, articleEl){
     articleEl.remove();
 
     // If the deleted chat was open in the reader, navigate back to list
+    forgetPublicationTarget(chatId);
     if (state.selectedChatId === chatId || state.currentReaderSnapshot?.chatId === chatId){
       state.selectedSnapshotId = "";
       state.selectedChatId = "";
@@ -1466,6 +1496,27 @@ function applyDesktopReaderRibbonSession(){
   setDesktopReaderRibbonHidden(!open);
 }
 
+// Item 10 publication target maintenance. Called wherever an eligible saved
+// chat becomes (or stops being) the active reader snapshot.
+function rememberPublicationTarget(snap){
+  const chatId = String(snap && snap.chatId || "").trim();
+  const snapshotId = String(snap && snap.snapshotId || "").trim();
+  if (!chatId || !snapshotId) return;
+  const meta = snap && snap.meta && typeof snap.meta === "object" ? snap.meta : null;
+  state.publicationTarget = {
+    chatId,
+    snapshotId,
+    title: meta && meta.title ? String(meta.title) : "",
+  };
+}
+
+function forgetPublicationTarget(chatId){
+  const wanted = String(chatId || "").trim();
+  if (!state.publicationTarget) return;
+  if (wanted && state.publicationTarget.chatId !== wanted) return;
+  state.publicationTarget = null;
+}
+
 function setStudioRouteScope(routeName, opts = {}){
   state.activeRoute = normalizeStudioRouteScope(routeName);
   if (opts && opts.clearReader) state.currentReaderSnapshot = null;
@@ -1753,6 +1804,22 @@ function parseHash(){
   // Settings page — sidebar entry-point that exposes #/migrate/* through
   // user-facing cards. Owned by renderSettingsRoute below.
   if (parts[0] === "settings") {
+    const requestedPath = "#/" + parts.join("/");
+    const settingsRouteApi = W.H2O?.Studio?.settings?.routes;
+    const settingsRoute = settingsRouteApi?.resolveHash?.(requestedPath) || null;
+    if (settingsRoute) {
+      const prefix = `#/settings/${settingsRoute.domain}/`;
+      const subsection = settingsRoute.path.startsWith(prefix)
+        ? settingsRoute.path.slice(prefix.length)
+        : "";
+      return {
+        name: "settings",
+        section: settingsRoute.domain,
+        subsection,
+        settingsRouteId: settingsRoute.id,
+        settingsRoute,
+      };
+    }
     let section = "account";
     let subsection = "";
     try { section = decodeURIComponent(parts[1] || "account").toLowerCase(); }
@@ -3165,6 +3232,7 @@ function applySnapshotCategoryUpdate(snap){
         ...meta,
       },
     };
+    rememberPublicationTarget(state.currentReaderSnapshot);
   }
 }
 
@@ -5299,6 +5367,7 @@ async function renderReader(snapshotId){
     }
 
     state.currentReaderSnapshot = snap;
+    rememberPublicationTarget(snap);
     state.selectedSnapshotId = String(snap.snapshotId || "").trim();
     state.selectedChatId = String(snap.chatId || "").trim();
 
@@ -6428,34 +6497,50 @@ function settingsHideOtherPanels(){
   if (migratePanel) migratePanel.hidden = true;
 }
 
-const SETTINGS_SYNC_SUBROUTES = Object.freeze({
-  status: { label: "Status", hash: "#/settings/sync/status" },
-  outbox: { label: "Outbox", hash: "#/settings/sync/outbox" },
-  inbox: { label: "Inbox", hash: "#/settings/sync/inbox" },
-  relay: { label: "Relay", hash: "#/settings/sync/relay" },
-  "proposal-review": { label: "Proposal Review", hash: "#/settings/sync/proposal-review" },
-  "conflict-review": { label: "Conflict Review", hash: "#/settings/sync/conflict-review" },
-  "apply-log": { label: "Apply Log", hash: "#/settings/sync/apply-log" },
-  webdav: { label: "WebDAV", hash: "#/settings/sync/webdav" },
-});
+function settingsRouteRegistry(){
+  return W.H2O?.Studio?.settings?.routes || null;
+}
 
-const SETTINGS_CONVERGENCE_SUBROUTES = Object.freeze({
-  review: { label: "Review", hash: "#/settings/convergence/review" },
-  color: { label: "Color", hash: "#/settings/convergence/color" },
-  rename: { label: "Rename", hash: "#/settings/convergence/rename" },
-  move: { label: "Move", hash: "#/settings/convergence/move" },
-  delete: { label: "Delete", hash: "#/settings/convergence/delete" },
-  binding: { label: "Binding", hash: "#/settings/convergence/binding" },
-  snapshot: { label: "Snapshot", hash: "#/settings/convergence/snapshot" },
-  "library-sync": { label: "Library Sync", hash: "#/settings/convergence/library-sync" },
-  execute: { label: "Execute", hash: "#/settings/convergence/execute" },
-});
+function settingsDomainPanelRegistry(){
+  return W.H2O?.Studio?.settings?.domainPanels || null;
+}
+
+function settingsRouteSlug(route){
+  if (!route || route.domain === "activity") return "";
+  const prefix = `#/settings/${route.domain}/`;
+  return route.path.startsWith(prefix) ? route.path.slice(prefix.length) : "";
+}
+
+function settingsRouteMap(domain){
+  const routes = settingsRouteRegistry()?.list?.(domain) || [];
+  return Object.freeze(Object.fromEntries(routes.map((route) => [
+    settingsRouteSlug(route),
+    Object.freeze({
+      id: route.id,
+      label: route.label,
+      hash: route.path,
+      domain: route.domain,
+      targetHostId: route.targetHostId,
+    }),
+  ])));
+}
+
+function settingsResolveRoute(section, subsection, route = null){
+  if (route?.settingsRoute) return route.settingsRoute;
+  if (route?.id && route?.path && route?.domain) return route;
+  return settingsRouteRegistry()?.resolve?.(section, subsection) || null;
+}
+
+const SETTINGS_LEGACY_SYNC_SUBROUTES = settingsRouteMap("sync");
+const SETTINGS_NEW_SYNC_SUBROUTES = settingsRouteMap("sync-new");
+const SETTINGS_CONVERGENCE_SUBROUTES = settingsRouteMap("convergence");
 
 const SETTINGS_TOP_LEVEL_ROUTES = Object.freeze({
   account: { label: "Account", hash: "#/settings/account" },
   library: { label: "Library", hash: "#/settings/library" },
-  sync: { label: "Sync", hash: "#/settings/sync" },
-  convergence: { label: "Convergence", hash: "#/settings/convergence" },
+  sync: { label: "Sync", hash: "#/settings/sync/status" },
+  convergence: { label: "Convergence", hash: "#/settings/convergence/relay-exchange" },
+  activity: { label: "Activity & Audit", hash: "#/settings/activity" },
   diagnostics: { label: "Diagnostics", hash: "#/settings/diagnostics" },
   data: { label: "Data", hash: "#/settings/data" },
   about: { label: "About", hash: "#/settings/about" },
@@ -6501,6 +6586,7 @@ const SETTINGS_EVALUATION_PARITY_ROUTES = Object.freeze([
   ["Floating Manual Sync - Proposal Review", "#/settings/sync/proposal-review"],
   ["Floating Manual Sync - Conflict Review", "#/settings/sync/conflict-review"],
   ["Floating Manual Sync - Apply Log", "#/settings/sync/apply-log"],
+  ["Floating Manual Sync - Object Sync", "#/settings/sync/object-sync"],
   ["Legacy Folder Parity / Cleanup diagnostics", "#/settings/diagnostics/folder-parity"],
   ["Legacy Storage Diagnostics", "#/settings/diagnostics"],
   ["Floating Convergence Review", "#/settings/convergence/review"],
@@ -6613,6 +6699,14 @@ function settingsEvaluationParityTableHtml(){
   `;
 }
 
+function settingsEvaluationConvergenceControlHtml(state){
+  if (!STUDIO_isTauri()) return "";
+  return `<label style="display:flex;flex-direction:column;gap:4px;font-size:12px">
+          <span style="opacity:.72">Convergence Access</span>
+          ${settingsEvaluationSelectHtml("convergenceAccess", state.convergenceAccess, SETTINGS_EVALUATION_CONVERGENCE_ACCESS)}
+        </label>`;
+}
+
 function settingsEvaluationPanelHtml(){
   const state = settingsEvaluationRead();
   const resolved = settingsEvaluationResolvedLayout();
@@ -6632,10 +6726,7 @@ function settingsEvaluationPanelHtml(){
           <span style="opacity:.72">Settings Layout</span>
           ${settingsEvaluationSelectHtml("settingsLayout", state.settingsLayout, SETTINGS_EVALUATION_LAYOUTS)}
         </label>
-        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px">
-          <span style="opacity:.72">Convergence Access</span>
-          ${settingsEvaluationSelectHtml("convergenceAccess", state.convergenceAccess, SETTINGS_EVALUATION_CONVERGENCE_ACCESS)}
-        </label>
+        ${settingsEvaluationConvergenceControlHtml(state)}
       </div>
       ${settingsEvaluationParityTableHtml()}
     </section>
@@ -6718,8 +6809,16 @@ function settingsEvaluationShellPrefixHtml(){
 }
 
 function settingsReleaseEmbeddedToolPanels(){
+  if (typeof document === "undefined" || !document.body) return;
   const settingsPanel = document.getElementById("viewSettingsPanel");
-  if (!settingsPanel || typeof document === "undefined" || !document.body) return;
+  if (!settingsPanel) return;
+  const domainPanels = settingsDomainPanelRegistry();
+  if (domainPanels && typeof domainPanels.unmount === "function") {
+    void domainPanels.unmount("settings-release");
+  }
+  const domainHost = settingsPanel.querySelector("#wbSettingsEmbeddedToolHost");
+  try { domainHost?.__h2oSettingsManualSyncObserver?.disconnect?.(); } catch {}
+  try { delete domainHost.__h2oSettingsManualSyncObserver; } catch {}
   for (const id of SETTINGS_EMBEDDED_TOOL_PANEL_IDS) {
     const node = settingsPanel.querySelector("#" + id);
     if (!node) continue;
@@ -6732,8 +6831,8 @@ function settingsReleaseEmbeddedToolPanels(){
 
 function settingsNormalizeSubroute(section, subsection){
   const raw = String(subsection || "").toLowerCase();
-  if (section === "sync") return SETTINGS_SYNC_SUBROUTES[raw] ? raw : "status";
-  if (section === "convergence") return SETTINGS_CONVERGENCE_SUBROUTES[raw] ? raw : "review";
+  const resolved = settingsResolveRoute(section, raw);
+  if (resolved) return settingsRouteSlug(resolved);
   return raw;
 }
 
@@ -6741,17 +6840,71 @@ function settingsNavLinkHtml(label, hash, active){
   return `<a class="wbSettingsShellLink${active ? " isActive" : ""}" href="${esc(hash)}" ${active ? 'aria-current="page"' : ""}>${esc(label)}</a>`;
 }
 
+function settingsSyncArchitecture(section){
+  const active = String(section || "").toLowerCase();
+  if (active === "sync") return "legacy";
+  if (active === "sync-new") return "new";
+  return settingsEvaluationResolvedLayout() === "legacy" ? "legacy" : "new";
+}
+
+function settingsSyncLayoutDefinition(architecture){
+  const layouts = settingsRouteRegistry()?.syncLayouts || [];
+  return layouts.find((layout) => layout.id === architecture) || null;
+}
+
+function settingsSyncDefaultHash(section){
+  const architecture = settingsSyncArchitecture(section);
+  return settingsSyncLayoutDefinition(architecture)?.defaultPath
+    || (architecture === "legacy" ? "#/settings/sync/status" : "#/settings/sync-new/local-folder");
+}
+
 function settingsShellRailHtml(activeSection){
   const active = String(activeSection || "account").toLowerCase();
   return Object.keys(SETTINGS_TOP_LEVEL_ROUTES).map((key) => {
-    if (key === "convergence" && !settingsEvaluationHostedConvergenceVisible()) return "";
+    if (key === "convergence" && STUDIO_isTauri() && !settingsEvaluationHostedConvergenceVisible()) return "";
     const item = SETTINGS_TOP_LEVEL_ROUTES[key];
-    return settingsNavLinkHtml(item.label, item.hash, key === active);
+    const isSyncEntry = key === "sync";
+    const hash = isSyncEntry ? settingsSyncDefaultHash(active) : item.hash;
+    const isActive = isSyncEntry ? active === "sync" || active === "sync-new" : key === active;
+    return settingsNavLinkHtml(item.label, hash, isActive);
   }).join("");
 }
 
+function settingsSyncLayoutSwitchHtml(route){
+  if (route?.architecture !== "legacy" && route?.architecture !== "new") return "";
+  const selected = route.architecture;
+  const layouts = settingsRouteRegistry()?.syncLayouts || [];
+  return `
+    <nav class="wbSettingsSyncLayoutSwitch" aria-label="Sync layout">
+      ${layouts.map((layout) => {
+        const active = layout.id === selected;
+        const hash = active ? route.path : layout.defaultPath;
+        return `<a class="wbSettingsSyncLayoutOption${active ? " isActive" : ""}" data-settings-sync-layout="${esc(layout.id)}" href="${esc(hash)}" ${active ? 'aria-current="page"' : ""}>${esc(layout.label)}</a>`;
+      }).join("")}
+    </nav>
+  `;
+}
+
 function settingsSubnavHtml(section, activeSubroute){
-  const map = section === "sync" ? SETTINGS_SYNC_SUBROUTES : SETTINGS_CONVERGENCE_SUBROUTES;
+  const map = section === "sync"
+    ? SETTINGS_LEGACY_SYNC_SUBROUTES
+    : section === "sync-new"
+      ? SETTINGS_NEW_SYNC_SUBROUTES
+      : section === "convergence"
+        ? SETTINGS_CONVERGENCE_SUBROUTES
+        : Object.freeze({});
+  if (section === "sync-new") {
+    const group = (label, keys) => `
+      <span class="wbSettingsSubnavGroup" data-settings-subnav-group="${esc(label)}">
+        <span class="wbSettingsSubnavGroupLabel">${esc(label)}</span>
+        <span class="wbSettingsSubnavGroupLinks">${keys.map((key) => settingsNavLinkHtml(map[key].label, map[key].hash, key === activeSubroute)).join("")}</span>
+      </span>`;
+    return [
+      group("Local Desktop ↔ Chrome", ["local-folder", "browser-delivery"]),
+      group("Remote", ["webdav"]),
+      group("Maintenance", ["automation", "archive-recovery", "advanced"]),
+    ].join("");
+  }
   return Object.keys(map).map((key) => settingsNavLinkHtml(map[key].label, map[key].hash, key === activeSubroute)).join("");
 }
 
@@ -6932,6 +7085,31 @@ function settingsStorageDiagnosticsHtml(meta, cardStyle){
   `;
 }
 
+function settingsDesktopBuildIdentityApi(){
+  return W.H2O?.Studio?.settingsBuildIdentity || null;
+}
+
+function settingsDesktopBuildIdentityBadgeHtml(){
+  if (!STUDIO_isTauri()) return "";
+  const api = settingsDesktopBuildIdentityApi();
+  if (api && typeof api.badgeHtml === "function") return api.badgeHtml();
+  return `<div class="wbSettingsBuildIdentityBadge isUnstamped" data-h2o-desktop-build-badge="1" role="status"><span data-h2o-build-badge-title="1">🔴 UNSTAMPED BUILD</span><span class="wbSettingsBuildIdentityBadgeMeta">Build identity module unavailable</span></div>`;
+}
+
+function settingsDesktopBuildIdentityAboutHtml(cardStyle){
+  if (!STUDIO_isTauri()) return "";
+  const api = settingsDesktopBuildIdentityApi();
+  if (api && typeof api.aboutHtml === "function") return api.aboutHtml(cardStyle);
+  return settingsInfoCardHtml("Desktop Build Identity", "<strong>UNSTAMPED BUILD</strong> — native build identity module unavailable.", "", cardStyle);
+}
+
+function settingsHydrateDesktopBuildIdentity(panel){
+  if (!STUDIO_isTauri()) return;
+  const api = settingsDesktopBuildIdentityApi();
+  if (!api || typeof api.hydrate !== "function") return;
+  Promise.resolve(api.hydrate(panel)).catch(() => { /* UI module renders fail-closed state */ });
+}
+
 function settingsArchiveHealthCardHtml(cardStyle){
   return `
     <section data-settings-archive-health-section="1">
@@ -7019,6 +7197,7 @@ function settingsTopLevelContentHtml(section, cardStyle, btnStyle, meta){
   if (section === "about") {
     return `
       <div style="display:flex;flex-direction:column;gap:12px">
+        ${settingsDesktopBuildIdentityAboutHtml(cardStyle)}
         ${settingsStorageDiagnosticsHtml(meta, cardStyle)}
         ${settingsInfoCardHtml("Documentation", "About/documentation links can be added here in a later phase. This repair only establishes the global Settings shell.", "", cardStyle)}
       </div>
@@ -7032,24 +7211,75 @@ function settingsTopLevelContentHtml(section, cardStyle, btnStyle, meta){
   `;
 }
 
-function settingsToolSpec(section, subsection){
-  if (section === "sync") {
-    if (subsection === "webdav") {
-      return {
-        title: "WebDAV",
-        eyebrow: "Transport setup",
-        description: "Prepare the Desktop WebDAV resolver configuration. Setup only: no probe, no sync, no write.",
-        panelId: "wbRealTransportWebDavSetupSubtab",
-        open: () => W.H2O?.Studio?.sync?.realTransportWebDavSetupUi?.openSettingsSubtab?.(),
-      };
-    }
+function settingsToolSpec(section, subsection, route = null){
+  const settingsRoute = settingsResolveRoute(section, subsection, route);
+  const transition = settingsRoute?.transition || {};
+  if (transition.kind === "domain-panel") {
+    const copy = {
+      "settings.sync-new.local-folder": ["Local folder capability", "Configure and inspect the existing local folder authority for this platform."],
+      "settings.sync-new.webdav": ["Remote transport", "Inspect the existing WebDAV setup and operation authority without coupling local domains."],
+      "settings.sync-new.browser-delivery": ["Desktop → Chrome", "Transfer revisions locally between Desktop Studio and Chrome Studio."],
+      "settings.sync-new.archive-recovery": ["Local data safety", "Inspect archive health and use the existing verification-gated recovery authorities."],
+      "settings.convergence.relay-exchange": ["Convergence exchange", "Inspect the existing Outbox, Pull / Relay, and Inbox as one transport-neutral exchange."],
+      "settings.activity.audit": ["Read-only activity", "Review existing apply-event receipt families without creating an audit store."],
+    }[settingsRoute.id] || ["Settings domain", "Presentation over an existing runtime authority."];
     return {
-      title: "Sync",
-      eyebrow: "Manual relay tools",
-      description: "Existing manual sync UI, hosted inside Settings. Manual only: no automatic sync, no convergence, no apply.",
-      panelId: "h2o-manual-sync-panel",
+      route: settingsRoute,
+      transition,
+      title: settingsRoute.label,
+      eyebrow: copy[0],
+      description: copy[1],
+      panelId: transition.panelId || settingsRoute.targetHostId,
+    };
+  }
+  if (transition.kind === "webdav") {
+    return {
+      route: settingsRoute,
+      transition,
+      title: settingsRoute.label,
+      eyebrow: "Transport setup",
+      description: "Prepare the Desktop WebDAV resolver configuration. Setup only: no probe, no sync, no write.",
+      panelId: settingsRoute.targetHostId,
+      open: () => W.H2O?.Studio?.sync?.realTransportWebDavSetupUi?.openSettingsSubtab?.(),
+    };
+  }
+  if (transition.kind === "manual-sync") {
+    const legacyObjectSync = settingsRoute.id === "legacy.sync.object-sync";
+    const legacySync = settingsRoute.domain === "sync";
+    const title = legacyObjectSync ? "Object Sync" : legacySync ? "Sync" : settingsRoute.label;
+    const eyebrow = legacyObjectSync
+      ? "Single-object synchronization"
+      : legacySync
+        ? "Manual relay tools"
+        : settingsRoute.domain === "activity"
+          ? "Read-only activity"
+          : settingsRoute.domain === "convergence"
+            ? "Convergence exchange"
+            : "New Sync Settings";
+    const description = legacyObjectSync
+      ? "Canonical Settings home for explicit Round 2A inspection, publication, pull/apply, status, and redacted results."
+      : legacySync
+        ? "Existing manual sync UI, hosted inside Settings. Manual only: no automatic sync, no convergence, no apply."
+        : "Existing Sync content hosted through a stable transitional route. Legacy and New views share the same runtime and persistence authority.";
+    return {
+      route: settingsRoute,
+      transition,
+      title,
+      eyebrow,
+      description,
+      panelId: settingsRoute.targetHostId,
       open: () => W.H2O?.Desktop?.Sync?.openManualSyncPanel?.(),
-      filter: () => settingsFocusManualSyncSection(subsection),
+      filter: () => settingsFocusManualSyncRoute(section, subsection, settingsRoute),
+    };
+  }
+  if (transition.kind === "link" || transition.kind === "placeholder") {
+    return {
+      route: settingsRoute,
+      transition,
+      title: settingsRoute.label,
+      eyebrow: "Transitional Settings host",
+      description: "This stable Settings route is reserved for the M3 domain panel. Existing runtime authority remains in its current owner.",
+      panelId: settingsRoute.targetHostId,
     };
   }
   const convergence = {
@@ -7108,82 +7338,189 @@ function settingsToolSpec(section, subsection){
       open: () => W.H2O?.Desktop?.Sync?.openExecuteLanePanel?.({ settingsHosted: true }),
     },
   };
-  const item = convergence[subsection] || convergence.review;
+  const item = convergence[transition.tool] || convergence.review;
   return {
+    route: settingsRoute,
+    transition,
     eyebrow: "Convergence tools",
     ...item,
   };
 }
 
-function renderSettingsToolShell(panel, section, subsection){
-  const spec = settingsToolSpec(section, subsection);
-  const syncActive = section === "sync";
-  const convActive = section === "convergence";
+function renderSettingsToolShell(panel, section, subsection, route = null){
+  const spec = settingsToolSpec(section, subsection, route);
+  const subnavHtml = settingsSubnavHtml(section, subsection);
+  const syncLayoutHtml = settingsSyncLayoutSwitchHtml(spec.route);
+  const syncArchitectureRoute = spec.route?.architecture === "legacy" || spec.route?.architecture === "new";
+  const shellTitle = syncArchitectureRoute ? "Sync" : spec.title;
+  const shellEyebrow = syncArchitectureRoute
+    ? `${spec.route.architecture === "legacy" ? "Legacy" : "New"} layout · ${spec.title}`
+    : spec.eyebrow;
   const cardStyle = "display:flex;flex-direction:column;gap:8px;padding:16px;border:1px solid rgba(255,255,255,.08);border-radius:10px;background:rgba(255,255,255,.02)";
   const btnStyle = "padding:8px 14px;border-radius:6px;cursor:pointer;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:inherit;font:inherit;text-decoration:none;display:inline-block";
-  const statusHtml = syncActive && subsection === "status" ? settingsLegacySyncStatusHtml(cardStyle, btnStyle) : "";
+  const statusHtml = spec.transition.sectionIds?.includes?.("h2o-sync-section-status")
+    ? settingsLegacySyncStatusHtml(cardStyle, btnStyle)
+    : "";
   panel.innerHTML = `
     ${settingsEvaluationShellPrefixHtml()}
     <div class="wbSettingsShell">
       <nav class="wbSettingsShellRail" aria-label="Settings sections">
         ${settingsShellRailHtml(section)}
       </nav>
-      <section class="wbSettingsShellMain" aria-label="${esc(spec.title)}">
+      <section class="wbSettingsShellMain" aria-label="${esc(shellTitle)}">
+        ${settingsDesktopBuildIdentityBadgeHtml()}
         <div class="wbSettingsShellHeader">
           <div>
-            <div class="wbSettingsShellEyebrow">${esc(spec.eyebrow)}</div>
-            <h2 class="wbSettingsShellTitle">${esc(spec.title)}</h2>
+            <div class="wbSettingsShellEyebrow">${esc(shellEyebrow)}</div>
+            <h2 class="wbSettingsShellTitle">${esc(shellTitle)}</h2>
             <p class="wbSettingsShellCopy">${esc(spec.description)}</p>
           </div>
+          ${syncLayoutHtml}
         </div>
-        <nav class="wbSettingsSubnav" aria-label="${syncActive ? "Sync" : "Convergence"} tools">
-          ${settingsSubnavHtml(section, subsection)}
-        </nav>
+        ${subnavHtml ? `<nav class="wbSettingsSubnav" aria-label="${esc(section)} tools">${subnavHtml}</nav>` : ""}
         ${statusHtml}
-        <div id="wbSettingsEmbeddedToolHost" class="wbSettingsEmbeddedTool" data-settings-tool-section="${esc(section)}" data-settings-tool-subroute="${esc(subsection)}">
+        <div id="wbSettingsEmbeddedToolHost" class="wbSettingsEmbeddedTool" data-settings-route-id="${esc(spec.route?.id || "")}" data-settings-tool-section="${esc(section)}" data-settings-tool-subroute="${esc(subsection)}">
           <div class="wbSettingsCard wbSettingsEmbeddedLoading">Opening existing ${esc(spec.title)} panel…</div>
         </div>
       </section>
     </div>
   `;
   settingsBindEvaluationControls(panel);
+  settingsHydrateDesktopBuildIdentity(panel);
 }
 
-function settingsFocusManualSyncSection(subsection){
+const SETTINGS_MANUAL_SYNC_UNAVAILABLE_ID = "wbSettingsManualSyncRouteUnavailable";
+
+function settingsClearManualSyncRouteUnavailable(panel){
+  const existing = panel.querySelector("#" + SETTINGS_MANUAL_SYNC_UNAVAILABLE_ID);
+  if (existing) existing.remove();
+}
+
+/* An accepted Settings route whose manual-sync section this build does not ship
+ * has to say so. Hiding every section instead leaves a silent empty surface that
+ * reads as "there is nothing here" rather than "this capability is not in this
+ * build" — the difference between a truthful and a misleading unavailable state.
+ * This is presentation only: no Sync authority is read, created or substituted. */
+function settingsShowManualSyncRouteUnavailable(panel, sections, settingsRoute){
+  for (const panelSection of sections) {
+    panelSection.hidden = true;
+    panelSection.style.display = "none";
+  }
+  const routeId = String(settingsRoute?.id || "");
+  const existing = panel.querySelector("#" + SETTINGS_MANUAL_SYNC_UNAVAILABLE_ID);
+  /* Re-entry must not write to the DOM. This filter is re-invoked by a childList
+   * MutationObserver on the host, so an unconditional replace would loop. */
+  if (existing && existing.dataset.settingsUnavailableRoute === routeId) return true;
+  if (existing) existing.remove();
+  const notice = document.createElement("div");
+  notice.id = SETTINGS_MANUAL_SYNC_UNAVAILABLE_ID;
+  notice.className = "wbSettingsCard";
+  notice.setAttribute("role", "status");
+  notice.dataset.settingsUnavailableRoute = routeId;
+  const title = document.createElement("h3");
+  title.style.cssText = "margin:0;font-size:14px";
+  title.textContent = String(settingsRoute?.label || "This section") + " is not available in this build";
+  const body = document.createElement("p");
+  body.style.cssText = "margin:0;opacity:.72;font-size:12px;line-height:1.5";
+  body.textContent = "This Settings route is part of the accepted New-UI architecture, but the manual-sync section it opens is not included in this build. Nothing was opened, and no Sync state was read or changed.";
+  notice.append(title, body);
+  panel.prepend(notice);
+  return true;
+}
+
+function settingsFocusManualSyncRoute(section, subsection, route = null){
   const host = document.getElementById("wbSettingsEmbeddedToolHost");
-  if (!host) return;
+  if (!host) return false;
   const panel = host.querySelector("#h2o-manual-sync-panel");
-  if (!panel) return;
-  const sectionMatchers = {
-    status: [/Sync Status/i],
-    outbox: [/Outbox/i],
-    inbox: [/Inbox/i],
-    relay: [/Pull/i],
-    "proposal-review": [/Proposal Review/i],
-    "conflict-review": [/Conflict Review/i],
-    "apply-log": [/Apply Log/i],
-  };
-  const matchers = sectionMatchers[subsection] || sectionMatchers.status;
+  if (!panel) return false;
+  const settingsRoute = settingsResolveRoute(section, subsection, route);
+  const visibleSectionIds = new Set(settingsRoute?.transition?.sectionIds || []);
+  if (!visibleSectionIds.size) return false;
   const sections = Array.from(panel.querySelectorAll(".h2oSyncSection"));
-  for (const section of sections) {
-    const summary = section.querySelector("summary");
-    const label = String(summary && summary.textContent || "");
-    const visible = matchers.some((re) => re.test(label));
-    section.hidden = !visible;
-    section.style.display = visible ? "" : "none";
+  /* Nothing rendered yet: stay silent and let the observer re-run rather than
+   * declaring a capability missing while the panel is still mounting. */
+  if (!sections.length) return false;
+  if (!sections.some((panelSection) => visibleSectionIds.has(panelSection.id))) {
+    return settingsShowManualSyncRouteUnavailable(panel, sections, settingsRoute);
+  }
+  settingsClearManualSyncRouteUnavailable(panel);
+  for (const panelSection of sections) {
+    const visible = visibleSectionIds.has(panelSection.id);
+    panelSection.hidden = !visible;
+    panelSection.style.display = visible ? "" : "none";
     if (visible) {
-      try { section.open = true; } catch (_) { /* ignore */ }
+      try { panelSection.open = true; } catch (_) { /* ignore */ }
     }
   }
+  return true;
 }
 
-function settingsInstallManualSyncFilter(host, subsection){
+const SETTINGS_MANUAL_SYNC_OBJECT_HASH = "#/settings/sync/object-sync";
+let settingsManualSyncObjectFocusPending = false;
+let settingsManualSyncObjectRenderPending = false;
+
+function settingsFocusManualSyncObjectControl(){
+  const host = document.getElementById("wbSettingsEmbeddedToolHost");
+  if (!host || host.dataset.settingsRouteId !== "legacy.sync.object-sync") return false;
+  const panel = host.querySelector("#h2o-manual-sync-panel");
+  const section = panel?.querySelector?.("#h2o-round2a-operator-panel");
+  if (!section || section.hidden || section.style?.display === "none") return false;
+  try { section.open = true; } catch (_) { /* ignore */ }
+  try { section.scrollIntoView?.({ block: "nearest" }); } catch (_) { /* ignore */ }
+  const input = section.querySelector?.("#h2o-round2a-object-id");
+  try { input?.focus?.({ preventScroll: true }); } catch (_) {
+    try { input?.focus?.(); } catch (_) { /* ignore */ }
+  }
+  return true;
+}
+
+function settingsCompleteManualSyncObjectFocus(section, subsection, route = null){
+  const settingsRoute = settingsResolveRoute(section, subsection, route);
+  if (!settingsRoute?.transition?.sectionIds?.includes?.("h2o-round2a-operator-panel") || !settingsManualSyncObjectFocusPending) return false;
+  settingsManualSyncObjectFocusPending = false;
+  return settingsFocusManualSyncObjectControl();
+}
+
+function settingsOpenManualSyncObjectSettings(){
+  settingsManualSyncObjectFocusPending = true;
+  const currentHash = String(location.hash || "");
+  if (currentHash !== SETTINGS_MANUAL_SYNC_OBJECT_HASH) {
+    if (!settingsManualSyncObjectRenderPending) {
+      settingsManualSyncObjectRenderPending = true;
+      location.hash = SETTINGS_MANUAL_SYNC_OBJECT_HASH;
+    }
+    return true;
+  }
+  if (settingsFocusManualSyncObjectControl()) {
+    settingsManualSyncObjectFocusPending = false;
+    settingsManualSyncObjectRenderPending = false;
+    return true;
+  }
+  if (settingsManualSyncObjectRenderPending) return true;
+  settingsManualSyncObjectRenderPending = true;
+  Promise.resolve(renderRoute({ force: true })).catch(() => {
+    settingsManualSyncObjectFocusPending = false;
+  }).finally(() => {
+    settingsManualSyncObjectRenderPending = false;
+    settingsCompleteManualSyncObjectFocus("sync", "object-sync");
+  });
+  return true;
+}
+
+function settingsInstallManualSyncObjectSettingsBridge(){
+  const sync = W.H2O?.Desktop?.Sync;
+  if (!sync) return false;
+  sync.openManualSyncSettings = settingsOpenManualSyncObjectSettings;
+  return true;
+}
+
+function settingsInstallManualSyncFilter(host, section, subsection, route = null){
   if (!host || typeof MutationObserver !== "function") return;
   try { host.__h2oSettingsManualSyncObserver?.disconnect?.(); } catch {}
   let pending = false;
   const run = () => {
     pending = false;
-    settingsFocusManualSyncSection(subsection);
+    settingsFocusManualSyncRoute(section, subsection, route);
   };
   const observer = new MutationObserver(() => {
     if (pending) return;
@@ -7194,20 +7531,39 @@ function settingsInstallManualSyncFilter(host, subsection){
   host.__h2oSettingsManualSyncObserver = observer;
 }
 
-async function settingsMountEmbeddedTool(section, subsection){
+async function settingsMountEmbeddedTool(section, subsection, route = null){
   const host = document.getElementById("wbSettingsEmbeddedToolHost");
   if (!host) return;
-  const spec = settingsToolSpec(section, subsection);
+  const spec = settingsToolSpec(section, subsection, route);
   try {
+    if (spec.transition.kind === "domain-panel") {
+      const registry = settingsDomainPanelRegistry();
+      if (!registry || typeof registry.mount !== "function") {
+        host.innerHTML = `<div class="wbSettingsCard wbSettingsEmbeddedLoading">${esc(spec.title)} panel registry is not installed.</div>`;
+        return;
+      }
+      await registry.mount(spec.route.id, host, {
+        route: spec.route,
+        platform: STUDIO_isTauri() ? "desktop" : "chrome",
+      });
+      return;
+    }
+    if (spec.transition.kind === "link" || spec.transition.kind === "placeholder") {
+      const action = spec.transition.kind === "link"
+        ? `<a class="wbSettingsShellLink" href="${esc(spec.transition.path)}">Open existing ${esc(spec.title)} authority</a>`
+        : `<div style="opacity:.7;font-size:12px">This route remains transitional until its explicitly authorized M4 panel work.</div>`;
+      host.innerHTML = `<div class="wbSettingsCard" data-settings-transition-kind="${esc(spec.transition.kind)}" style="display:flex;flex-direction:column;gap:10px;padding:16px"><div style="font-weight:600">${esc(spec.title)}</div>${action}</div>`;
+      return;
+    }
     if (!STUDIO_isTauri()) {
       host.innerHTML = `<div class="wbSettingsCard wbSettingsEmbeddedLoading">This Settings-hosted ${esc(spec.title)} panel is available in Desktop Studio.</div>`;
       return;
     }
-    if (typeof spec.open !== "function" || !W.H2O?.Desktop?.Sync) {
+    if (typeof spec.open !== "function" || (spec.transition.kind !== "webdav" && !W.H2O?.Desktop?.Sync)) {
       host.innerHTML = `<div class="wbSettingsCard wbSettingsEmbeddedLoading">${esc(spec.title)} API is not installed in this runtime.</div>`;
       return;
     }
-    if (section === "sync" && subsection === "webdav") {
+    if (spec.transition.kind === "webdav") {
       const existingWebDavPanel = document.getElementById(spec.panelId);
       if (existingWebDavPanel && existingWebDavPanel.parentElement === host) {
         existingWebDavPanel.setAttribute("data-settings-hosted", "true");
@@ -7224,6 +7580,19 @@ async function settingsMountEmbeddedTool(section, subsection){
       webDavPanel.setAttribute("data-settings-hosted", "true");
       return;
     }
+    const existingToolPanel = document.getElementById(spec.panelId);
+    if (existingToolPanel && existingToolPanel.parentElement === host) {
+      existingToolPanel.setAttribute("data-settings-hosted", "true");
+      if (spec.transition.kind === "manual-sync") {
+        settingsFocusManualSyncRoute(section, subsection, spec.route);
+        settingsInstallManualSyncFilter(host, section, subsection, spec.route);
+        if (spec.transition.sectionIds?.includes?.("h2o-round2a-operator-panel")) {
+          settingsManualSyncObjectRenderPending = false;
+          settingsCompleteManualSyncObjectFocus(section, subsection, spec.route);
+        }
+      }
+      return;
+    }
     await spec.open();
     const toolPanel = document.getElementById(spec.panelId);
     if (!toolPanel) {
@@ -7233,30 +7602,42 @@ async function settingsMountEmbeddedTool(section, subsection){
     host.innerHTML = "";
     toolPanel.setAttribute("data-settings-hosted", "true");
     host.appendChild(toolPanel);
-    if (section === "sync" && subsection !== "webdav") {
-      settingsFocusManualSyncSection(subsection);
-      settingsInstallManualSyncFilter(host, subsection);
+    if (spec.transition.kind === "manual-sync") {
+      settingsFocusManualSyncRoute(section, subsection, spec.route);
+      settingsInstallManualSyncFilter(host, section, subsection, spec.route);
+      if (spec.transition.sectionIds?.includes?.("h2o-round2a-operator-panel")) {
+        settingsManualSyncObjectRenderPending = false;
+        settingsCompleteManualSyncObjectFocus(section, subsection, spec.route);
+      }
     }
   } catch (err) {
     host.innerHTML = `<div class="wbSettingsCard wbSettingsEmbeddedLoading">Failed to open ${esc(spec.title)}: ${esc(err && (err.message || err))}</div>`;
   }
 }
 
+settingsInstallManualSyncObjectSettingsBridge();
+
 async function renderSettingsToolRoute(panel, route){
   const section = String(route && route.section || "").toLowerCase();
   const subsection = settingsNormalizeSubroute(section, route && route.subsection);
-  const routeKey = section + "/" + subsection;
+  const settingsRoute = settingsResolveRoute(section, subsection, route);
+  const routeKey = settingsRoute?.id || section + "/" + subsection;
+  const domainPanels = settingsDomainPanelRegistry();
+  if (domainPanels?.activeRouteId?.() && domainPanels.activeRouteId() !== settingsRoute?.id) {
+    await domainPanels.unmount("settings-route-change");
+  }
+  const showsLegacyStatus = settingsRoute?.transition?.sectionIds?.includes?.("h2o-sync-section-status");
   if (panel.dataset.settingsRendered === "1" && panel.dataset.settingsRenderedKey === routeKey && panel.firstChild) {
-    if (section === "sync" && subsection === "status") settingsBindLegacySyncStatus(panel);
-    await settingsMountEmbeddedTool(section, subsection);
+    if (showsLegacyStatus) settingsBindLegacySyncStatus(panel);
+    await settingsMountEmbeddedTool(section, subsection, settingsRoute);
     return;
   }
   panel.dataset.settingsRendered = "1";
   panel.dataset.settingsRenderedKey = routeKey;
   delete panel.dataset.syncControlsBound;
-  renderSettingsToolShell(panel, section, subsection);
-  if (section === "sync" && subsection === "status") settingsBindLegacySyncStatus(panel);
-  await settingsMountEmbeddedTool(section, subsection);
+  renderSettingsToolShell(panel, section, subsection, settingsRoute);
+  if (showsLegacyStatus) settingsBindLegacySyncStatus(panel);
+  await settingsMountEmbeddedTool(section, subsection, settingsRoute);
 }
 
 function settingsBindLegacySyncStatus(panel){
@@ -7318,6 +7699,7 @@ function renderSettingsSectionShell(panel, section){
         ${settingsShellRailHtml(key)}
       </nav>
       <section class="wbSettingsShellMain" aria-label="${esc(meta.title)}">
+        ${settingsDesktopBuildIdentityBadgeHtml()}
         <div class="wbSettingsShellHeader">
           <div>
             <div class="wbSettingsShellEyebrow">${esc(meta.eyebrow)}</div>
@@ -7334,6 +7716,7 @@ function renderSettingsSectionShell(panel, section){
   `;
   settingsBindEvaluationControls(panel);
   settingsBindFolderOperatorModeControls(panel);
+  settingsHydrateDesktopBuildIdentity(panel);
   if (key === "diagnostics") mountSettingsArchiveHealthCard(panel);
   if (key === "diagnostics") mountSettingsArchiveRequestDeliveryCard(panel);
   if (key === "diagnostics" || key === "about") refreshSettingsDiagnostics(panel);
@@ -7383,6 +7766,7 @@ function settingsWrapFolderParityRoute(panel, parityNode){
         ${settingsShellRailHtml("diagnostics")}
       </nav>
       <section class="wbSettingsShellMain" aria-label="Folder Parity Diagnostics">
+        ${settingsDesktopBuildIdentityBadgeHtml()}
         <div class="wbSettingsShellHeader">
           <div>
             <div class="wbSettingsShellEyebrow">Diagnostics</div>
@@ -7406,6 +7790,7 @@ function settingsWrapFolderParityRoute(panel, parityNode){
   if (host && parityNode) host.appendChild(parityNode);
   settingsBindEvaluationControls(panel);
   settingsBindFolderOperatorModeControls(panel);
+  settingsHydrateDesktopBuildIdentity(panel);
   panel.dataset.settingsRendered = "1";
   panel.dataset.settingsRenderedKey = "diagnostics/folder-parity";
   delete panel.dataset.syncControlsBound;
@@ -7418,8 +7803,9 @@ function settingsWrapFolderParityRoute(panel, parityNode){
 }
 
 function renderSettingsHostedConvergenceHidden(panel, route){
+  settingsReleaseEmbeddedToolPanels();
   const subsection = settingsNormalizeSubroute("convergence", route && route.subsection);
-  const spec = settingsToolSpec("convergence", subsection);
+  const spec = settingsToolSpec("convergence", subsection, route);
   const btnStyle = "padding:8px 14px;border-radius:6px;cursor:pointer;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:inherit;font:inherit;text-decoration:none;display:inline-block";
   panel.dataset.settingsRendered = "1";
   panel.dataset.settingsRenderedKey = "convergence-hidden/" + subsection;
@@ -7431,6 +7817,7 @@ function renderSettingsHostedConvergenceHidden(panel, route){
         ${settingsShellRailHtml("convergence")}
       </nav>
       <section class="wbSettingsShellMain" aria-label="${esc(spec.title)} hidden">
+        ${settingsDesktopBuildIdentityBadgeHtml()}
         <div class="wbSettingsShellHeader">
           <div>
             <div class="wbSettingsShellEyebrow">Convergence access</div>
@@ -7447,21 +7834,65 @@ function renderSettingsHostedConvergenceHidden(panel, route){
     </div>
   `;
   settingsBindEvaluationControls(panel);
+  settingsHydrateDesktopBuildIdentity(panel);
+}
+
+function renderSettingsChromeConvergenceUnavailable(panel){
+  settingsReleaseEmbeddedToolPanels();
+  panel.dataset.settingsRendered = "1";
+  panel.dataset.settingsRenderedKey = "convergence-chrome-desktop-only";
+  delete panel.dataset.syncControlsBound;
+  panel.innerHTML = `
+    ${settingsEvaluationShellPrefixHtml()}
+    <div class="wbSettingsShell">
+      <nav class="wbSettingsShellRail" aria-label="Settings sections">
+        ${settingsShellRailHtml("convergence")}
+      </nav>
+      <section class="wbSettingsShellMain" aria-label="Convergence">
+        ${settingsDesktopBuildIdentityBadgeHtml()}
+        <div class="wbSettingsShellHeader">
+          <div>
+            <div class="wbSettingsShellEyebrow">Convergence</div>
+            <h2 class="wbSettingsShellTitle">Convergence</h2>
+            <p class="wbSettingsShellCopy">Conflicts and reviews are handled by the authoritative Desktop Studio runtime.</p>
+          </div>
+        </div>
+        <div class="wbSettingsCard" data-settings-convergence-availability="desktop-only" role="status" style="display:flex;flex-direction:column;gap:8px;padding:16px;border:1px solid rgba(255,255,255,.08);border-radius:10px;background:rgba(255,255,255,.02)">
+          <div style="font-size:12px;opacity:.72">Convergence Access</div>
+          <div style="font-weight:650">Desktop Studio only</div>
+          <div style="opacity:.72;font-size:12px;line-height:1.45">Floating and hosted Convergence controls run in Desktop Studio.</div>
+          <div style="opacity:.72;font-size:12px;line-height:1.45">Open H2O Studio Desktop to use Convergence.</div>
+        </div>
+      </section>
+    </div>
+  `;
+  settingsBindEvaluationControls(panel);
+  settingsHydrateDesktopBuildIdentity(panel);
 }
 
 async function renderSettingsRoute(route = { section: "account", subsection: "" }){
   settingsHideOtherPanels();
   const settingsSection = String(route && route.section || "account").toLowerCase();
-  const isSyncToolRoute = settingsSection === "sync";
+  const isLegacySyncToolRoute = settingsSection === "sync";
+  const isNewSyncToolRoute = settingsSection === "sync-new";
+  const isSyncToolRoute = isLegacySyncToolRoute || isNewSyncToolRoute;
   const isConvergenceToolRoute = settingsSection === "convergence";
+  const isActivityToolRoute = settingsSection === "activity";
   const isFolderParityRoute = settingsSection === "diagnostics"
     && String(route && route.subsection || "").toLowerCase() === "folder-parity";
+  if (!isSyncToolRoute && !isConvergenceToolRoute && !isActivityToolRoute) {
+    settingsReleaseEmbeddedToolPanels();
+  }
   setRouteMeta("Settings", "Studio Settings", "Studio configuration · data & migration · storage diagnostics");
   const panel = settingsOverlayEnsure();
   if (!panel) return;
   panel.hidden = false;
   settingsApplyConvergenceAccess();
   if (isConvergenceToolRoute) {
+    if (!STUDIO_isTauri()) {
+      renderSettingsChromeConvergenceUnavailable(panel);
+      return;
+    }
     if (!settingsEvaluationHostedConvergenceVisible()) {
       renderSettingsHostedConvergenceHidden(panel, route);
       return;
@@ -7469,11 +7900,15 @@ async function renderSettingsRoute(route = { section: "account", subsection: "" 
     await renderSettingsToolRoute(panel, route);
     return;
   }
+  if (isActivityToolRoute) {
+    await renderSettingsToolRoute(panel, route);
+    return;
+  }
+  if (isSyncToolRoute) {
+    await renderSettingsToolRoute(panel, route);
+    return;
+  }
   if (settingsEvaluationUseNewSettings()) {
-    if (isSyncToolRoute) {
-      await renderSettingsToolRoute(panel, route);
-      return;
-    }
     if (!isFolderParityRoute) {
       await renderSettingsTopLevelRoute(panel, route);
       return;
@@ -7507,6 +7942,7 @@ async function renderSettingsRoute(route = { section: "account", subsection: "" 
   }
 
   panel.innerHTML = `
+    ${settingsDesktopBuildIdentityBadgeHtml()}
     <h2 style="margin:0 0 4px;font-size:22px;font-weight:600">Studio Settings</h2>
     <div style="margin:0 0 24px;opacity:.7;font-size:12px">Studio configuration, data tools, and diagnostics.</div>
 
@@ -8019,6 +8455,7 @@ async function renderSettingsRoute(route = { section: "account", subsection: "" 
   }
 
   settingsBindFolderOperatorModeControls(panel);
+  settingsHydrateDesktopBuildIdentity(panel);
   bindSettingsSyncControls(panel);
   mountSettingsArchiveHealthCard(panel);
   mountSettingsArchiveRequestDeliveryCard(panel);

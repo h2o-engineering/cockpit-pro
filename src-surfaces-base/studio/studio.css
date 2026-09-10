@@ -1062,11 +1062,26 @@ body[data-route="reader"] .wbMain{
 
 body[data-route="list"] .wbMain,
 body[data-route="library"] .wbMain,
-body[data-route="settings"] .wbMain,
 body[data-route="migrate"] .wbMain{
   overflow-y:auto;
   overflow-x:hidden;
   overscroll-behavior:contain;
+}
+
+/* Settings owns one page scroll root. Domain panels stay flow content; only
+   bounded result/log surfaces may own local overflow. */
+body[data-route="settings"] .wbMain{
+  overflow-y:auto;
+  overflow-x:hidden;
+  overscroll-behavior:contain;
+}
+
+body[data-route="settings"] #viewSettingsPanel{
+  min-height:0;
+  height:auto;
+  max-height:none;
+  overflow:visible;
+  overscroll-behavior:auto;
 }
 
 body[data-route="list"] .wbMain{
@@ -10480,9 +10495,84 @@ html[data-h2o-plain-text="on"] .wbReader .cgxui-mnmp-wash-orange::before{
   gap:14px;
 }
 
+.wbSettingsBuildIdentityBadge{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  flex-wrap:wrap;
+  gap:8px 16px;
+  width:100%;
+  padding:13px 16px;
+  border:2px solid rgba(239,68,68,.88);
+  border-radius:14px;
+  background:rgba(127,29,29,.42);
+  color:#fecaca;
+  box-shadow:0 0 0 1px rgba(239,68,68,.18),0 8px 24px rgba(127,29,29,.18);
+  font-size:16px;
+  font-weight:850;
+  letter-spacing:.045em;
+  line-height:1.2;
+}
+
+.wbSettingsBuildIdentityBadge.isLoading{
+  border-color:var(--wb-settings-card-border);
+  background:var(--wb-settings-card-bg);
+  color:var(--wb-muted);
+  box-shadow:var(--wb-settings-card-shadow);
+  font-size:13px;
+  font-weight:650;
+  letter-spacing:0;
+}
+
+.wbSettingsBuildIdentityBadge.isUnstamped{
+  border-style:dashed;
+  background:rgba(127,29,29,.58);
+}
+
+.wbSettingsBuildIdentityBadgeMeta{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+  font-size:11px;
+  font-weight:650;
+  letter-spacing:0;
+  opacity:.86;
+}
+
+.wbSettingsBuildIdentityCardTitle{
+  font-weight:750;
+}
+
+.wbSettingsBuildIdentityGrid{
+  display:grid;
+  grid-template-columns:max-content minmax(0,1fr);
+  gap:7px 16px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+  font-size:12px;
+}
+
+.wbSettingsBuildIdentityLabel{
+  color:var(--wb-muted);
+}
+
+.wbSettingsBuildIdentityValue{
+  min-width:0;
+  overflow-wrap:anywhere;
+}
+
+.wbSettingsBuildIdentityActions{
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:10px;
+  min-height:32px;
+  color:var(--wb-muted);
+  font-size:12px;
+}
+
 .wbSettingsShellHeader{
   display:flex;
   justify-content:space-between;
+  align-items:flex-start;
+  flex-wrap:wrap;
   gap:16px;
   padding:16px;
   border:1px solid var(--wb-settings-card-border);
@@ -10511,12 +10601,79 @@ html[data-h2o-plain-text="on"] .wbReader .cgxui-mnmp-wash-orange::before{
   font-size:13px;
 }
 
+.wbSettingsSyncLayoutSwitch{
+  display:inline-flex;
+  flex:0 0 auto;
+  gap:3px;
+  padding:3px;
+  border:1px solid var(--wb-settings-card-border);
+  border-radius:13px;
+  background:var(--wb-settings-btn-bg);
+}
+
+.wbSettingsSyncLayoutOption{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-width:72px;
+  min-height:32px;
+  padding:6px 12px;
+  border:1px solid transparent;
+  border-radius:10px;
+  color:var(--wb-muted);
+  text-decoration:none;
+  font-size:13px;
+  font-weight:650;
+}
+
+.wbSettingsSyncLayoutOption:hover{
+  color:var(--wb-text);
+  background:var(--wb-settings-btn-hover-bg);
+  border-color:var(--wb-settings-btn-hover-border);
+}
+
+.wbSettingsSyncLayoutOption.isActive,
+.wbSettingsSyncLayoutOption[aria-current="page"]{
+  color:var(--wb-text);
+  background:var(--wb-settings-card-bg);
+  border-color:var(--wb-settings-btn-border);
+  box-shadow:var(--wb-settings-card-shadow);
+}
+
 .wbSettingsSubnav{
   flex-wrap:wrap;
   padding:10px;
   border:1px solid var(--wb-settings-card-border);
   border-radius:16px;
   background:var(--wb-settings-card-bg);
+}
+
+.wbSettingsSubnavGroup{
+  display:inline-flex;
+  flex-direction:column;
+  gap:5px;
+  padding-right:10px;
+  border-right:1px solid var(--wb-settings-divider);
+}
+
+.wbSettingsSubnavGroup:last-child{
+  padding-right:0;
+  border-right:0;
+}
+
+.wbSettingsSubnavGroupLabel{
+  padding:0 8px;
+  color:var(--wb-muted);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.07em;
+  text-transform:uppercase;
+}
+
+.wbSettingsSubnavGroupLinks{
+  display:flex;
+  flex-wrap:wrap;
+  gap:4px;
 }
 
 .wbSettingsShellLink{

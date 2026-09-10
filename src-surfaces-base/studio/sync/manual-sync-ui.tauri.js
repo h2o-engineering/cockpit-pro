@@ -361,7 +361,7 @@
       '<button class="h2oSyncBtn h2oSyncDanger h2oSyncClose" id="h2o-sync-close" type="button" aria-label="Close Manual Sync panel" title="Close">×</button></div>' +
       '</div><div class="h2oSyncBody">' +
       (state.message ? '<div class="h2oSyncCard">' + escapeHtml(state.message) + '</div>' : '') +
-      '<section class="h2oSyncSection" open><summary>1. Sync Status</summary><div class="h2oSyncSectionBody">' +
+      '<section class="h2oSyncSection" id="h2o-sync-section-status" open><summary>1. Sync Status</summary><div class="h2oSyncSectionBody">' +
       '<div class="h2oSyncGrid">' +
       metric('outbox pending-upload', outbox.counts.pendingUpload) +
       metric('outbox uploaded', outbox.counts.uploaded) +
@@ -381,32 +381,32 @@
       codes('outbox blockers', outbox.blockers) + codes('inbox blockers', inbox.blockers) +
       codes('index warnings', index.warnings) +
       '</div></section>' +
-      '<section class="h2oSyncSection" open><summary>2. Outbox</summary><div class="h2oSyncSectionBody">' +
+      '<section class="h2oSyncSection" id="h2o-sync-section-outbox" open><summary>2. Outbox</summary><div class="h2oSyncSectionBody">' +
       '<p class="h2oSyncNote">Pending envelopes can be published manually. Upload marks relay rows as uploaded only through the existing relay adapter.</p>' +
       configForm() +
       '<button class="h2oSyncBtn h2oSyncPrimary" id="h2o-sync-publish">Publish pending outbox</button>' +
       rowList(index.entries.filter(function (entry) { return entry.direction === 'outbox' && entry.relayStatus === 'pending-upload'; }), 'No pending-upload envelopes.') +
       '</div></section>' +
-      '<section class="h2oSyncSection"><summary>3. Pull</summary><div class="h2oSyncSectionBody">' +
+      '<section class="h2oSyncSection" id="h2o-sync-section-relay"><summary>3. Pull</summary><div class="h2oSyncSectionBody">' +
       '<p class="h2oSyncNote">Pull is manual only. Downloaded envelopes go to local inbox validation and pending review/quarantine; they do not mutate state.</p>' +
       '<button class="h2oSyncBtn h2oSyncPrimary" id="h2o-sync-pull">Pull relay inbox</button>' +
       '</div></section>' +
-      '<section class="h2oSyncSection"><summary>4. Inbox</summary><div class="h2oSyncSectionBody">' +
+      '<section class="h2oSyncSection" id="h2o-sync-section-inbox"><summary>4. Inbox</summary><div class="h2oSyncSectionBody">' +
       '<div class="h2oSyncGrid">' + metric('accepted', accepted) + metric('deduped', deduped) +
       metric('expired', expired) + metric('blocked', blocked) + '</div>' +
       rowList(index.entries.filter(function (entry) { return entry.direction === 'inbox'; }), 'No inbox entries.') +
       '</div></section>' +
-      '<section class="h2oSyncSection"><summary>5. Proposal Review (preview only)</summary><div class="h2oSyncSectionBody">' +
+      '<section class="h2oSyncSection" id="h2o-sync-section-proposal-review"><summary>5. Proposal Review (preview only)</summary><div class="h2oSyncSectionBody">' +
       '<p class="h2oSyncNote">Preview generator available: ' + escapeHtml(sections.proposalPreviewAvailable ? 'yes' : 'no') +
       '. This section does not approve or apply proposals.</p>' +
       rowList(sections.previewEntries, 'No preview/proposal envelopes in the relay ledger.') +
       '</div></section>' +
-      '<section class="h2oSyncSection"><summary>6. Conflict Review (preview only)</summary><div class="h2oSyncSectionBody">' +
+      '<section class="h2oSyncSection" id="h2o-sync-section-conflict-review"><summary>6. Conflict Review (preview only)</summary><div class="h2oSyncSectionBody">' +
       '<p class="h2oSyncNote">Conflict report builder available: ' + escapeHtml(sections.conflictReportAvailable ? 'yes' : 'no') +
       '. This section does not auto-resolve conflicts.</p>' +
       rowList(sections.conflictEntries, 'No conflict or blocker entries in the relay ledger.') +
       '</div></section>' +
-      '<section class="h2oSyncSection"><summary>7. Apply Log (read-only)</summary><div class="h2oSyncSectionBody">' +
+      '<section class="h2oSyncSection" id="h2o-sync-section-apply-log"><summary>7. Apply Log (read-only)</summary><div class="h2oSyncSectionBody">' +
       '<p class="h2oSyncNote">Apply receipt builder available: ' + escapeHtml(sections.applyEventBuilderAvailable ? 'yes' : 'no') +
       '. Receipts are evidence only and are not remote commands.</p>' +
       rowList(sections.applyEntries, 'No apply receipt entries in the relay ledger.') +

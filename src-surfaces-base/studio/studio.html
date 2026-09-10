@@ -1624,6 +1624,27 @@
        from durable outbox/inbox stores only. No writes, transport,
        convergence, apply, or automatic sync. -->
   <script src="./sync/relay-index.tauri.js"></script>
+  <!-- Sync Settings M1: passive parallel Legacy/New route registry. It owns
+       route/domain/transitional-host metadata only; both views reuse existing
+       panels and state. No panel mount, readiness, transport, or mutation. -->
+  <script src="./settings/settings-routes.studio.js"></script>
+  <!-- Sync Settings M3: deterministic presentation-only domain panel
+       lifecycle plus real New Local Folder, WebDAV, Browser Delivery,
+       Archive/Recovery, Relay Exchange, and Activity/Audit adapters. These
+       modules create no Sync persistence or transport authority. -->
+  <script src="./settings/domain-panel-runtime.studio.js"></script>
+  <!-- Desktop-only, binary-backed build provenance for the Settings badge and
+       About panel. Shared packaging is safe: the module renders nothing unless
+       the Tauri platform adapter positively identifies the native runtime. -->
+  <script src="./settings/build-identity.panel.js"></script>
+  <script src="./settings/local-folder-sync.panel.js"></script>
+  <script src="./settings/webdav.panel.js"></script>
+  <script src="./settings/browser-delivery.panel.js"></script>
+  <script src="./settings/archive-recovery.panel.js"></script>
+  <script src="./settings/automation.panel.js"></script>
+  <script src="./settings/advanced-diagnostics.panel.js"></script>
+  <script src="./settings/relay-exchange.panel.js"></script>
+  <script src="./settings/activity-audit.panel.js"></script>
   <!-- F10.8.5: Desktop/Tauri-only manual sync UI. Counts-first operator
        surface over outbox, inbox, relay index, preview/conflict/apply receipts.
        No automatic sync, convergence, merge, or apply. -->
