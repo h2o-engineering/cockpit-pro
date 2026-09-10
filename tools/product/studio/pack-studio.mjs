@@ -1296,6 +1296,19 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   // flag-gated + opt-in, default off). Keep parallel to
   // ARCHIVE_WORKBENCH_OUT_FILES below.
   "reader-notes/annotation-report.studio.js",
+
+  // Knowledge Model v0 — Studio distribution mirrors of the canonical pure
+  // cores in shared/knowledge/. studio.html loads both, so both must be
+  // packed or they 404 at runtime. Contracts first; the adapter reads
+  // H2O.Knowledge.ContractsV0. Keep parallel to
+  // ARCHIVE_WORKBENCH_OUT_FILES below.
+  "knowledge/contracts-v0.studio.js",
+  "knowledge/captured-chat-highlight-adapter-v0.studio.js",
+
+  // Knowledge Model v0 — exact-reference runtime consumer. Studio-owned by
+  // placement only; the Knowledge Lane owns its semantics. Loads last in
+  // the Knowledge cluster. Keep parallel to ARCHIVE_WORKBENCH_OUT_FILES.
+  "knowledge/exact-reference-consumer.studio.js",
 ]);
 export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   "studio.html",
@@ -1671,6 +1684,13 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
 
   // Reader & Notes — NV1 annotation report consumer — see SOURCE_FILES.
   "reader-notes/annotation-report.studio.js",
+
+  // Knowledge Model v0 — Studio distribution mirrors — see SOURCE_FILES.
+  "knowledge/contracts-v0.studio.js",
+  "knowledge/captured-chat-highlight-adapter-v0.studio.js",
+
+  // Knowledge Model v0 — exact-reference runtime consumer — see SOURCE_FILES.
+  "knowledge/exact-reference-consumer.studio.js",
 ]);
 
 function ensureDir(dirPath) {

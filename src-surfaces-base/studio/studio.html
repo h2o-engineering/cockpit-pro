@@ -2037,6 +2037,28 @@
        data only and performs no rendering, XPath, A2b, storage write, or DOM
        mutation. -->
   <script src="./reader-notes/annotation-report.studio.js"></script>
+  <!-- Knowledge Model v0 — Studio distribution mirrors of the canonical pure
+       cores in shared/knowledge/. Loaded here because Studio resolves modules
+       through ./-relative tags rooted at this directory and cannot read
+       shared/ directly; the canonical files remain the semantic authority and
+       tools/validation/knowledge/validate-knowledge-studio-mirror-parity.mjs
+       enforces byte-identical IIFE bodies. Contracts load first because the
+       adapter reads H2O.Knowledge.ContractsV0. Both are inert on load: they
+       attach frozen read-only namespaces and nothing invokes them until the
+       Knowledge runtime consumer exists, so this admission changes no
+       behavior, mounts no UI, starts no resolution, and adds no flag. -->
+  <script src="./knowledge/contracts-v0.studio.js"></script>
+  <script src="./knowledge/captured-chat-highlight-adapter-v0.studio.js"></script>
+  <!-- Knowledge Model v0 — exact-reference runtime consumer. Loads last in
+       the Knowledge cluster: it reads H2O.Knowledge.ContractsV0 and the
+       captured-chat adapter, plus the Reader & Notes typed view, annotation
+       facade and highlight resolution consumer above, and the Saved-Chats
+       coverage API loaded earlier. The flag
+       'studio.knowledge.exactReferences.enabled' defaults off; this module
+       attaches a frozen read-only namespace and performs no work until
+       describeForItemV1 is explicitly called. No UI, no DOM, no storage, no
+       network, no navigation, no watcher or poller, and no write-back. -->
+  <script src="./knowledge/exact-reference-consumer.studio.js"></script>
   <!-- R4.5.1.a — Desktop-first folder organization modals (folders only in this
        slice; categories / labels / tags follow in R4.5.2 / R4.5.3). Tauri-gated;
        silent no-op on MV3. Calls H2O.Studio.actions.folders.* — no SQLite / no
