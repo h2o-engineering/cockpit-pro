@@ -41,6 +41,26 @@ function extractFunction(source, name) {
   throw new Error(`extractFunction: unterminated '${name}'`);
 }
 
+function stripJsComments(source) {
+  let out = '';
+  let i = 0;
+  let quote = '';
+  while (i < source.length) {
+    const ch = source[i];
+    const next = source[i + 1];
+    if (quote) {
+      if (ch === '\\') { out += ch + (next ?? ''); i += 2; continue; }
+      if (ch === quote) quote = '';
+      out += ch; i += 1; continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; out += ch; i += 1; continue; }
+    if (ch === '/' && next === '*') { const e = source.indexOf('*/', i + 2); i = e === -1 ? source.length : e + 2; out += ' '; continue; }
+    if (ch === '/' && next === '/') { const e = source.indexOf('\n', i); i = e === -1 ? source.length : e; out += ' '; continue; }
+    out += ch; i += 1;
+  }
+  return out;
+}
+
 const studioSource = readRepo(STUDIO_REL);
 const rendererSource = readRepo(RENDERER_REL);
 const studioHtmlSource = readRepo(STUDIO_HTML_REL);
@@ -245,40 +265,50 @@ class FakeElement {
     this.role = role;
     this.message = null;
     this.removed = false;
+    this.appended = [];
     this.classList = { add() {} };
   }
+  appendChild(node) { this.appended.push(node); return node; }
   remove() { this.removed = true; }
 }
 
+/*
+ * M03 P1 S1A T1: the rich path now runs
+ *   owner record -> Stage 0 inert compat -> sanitizer v2 fragment -> H2O shells.
+ * The harness stubs that seam, so role and identity reaching the shell can only
+ * have come from the owner record, never from provider markup.
+ */
 function createRichMountHarness() {
-  const decorated = [];
+  const shells = [];
   const attachedUsers = [];
+  const sanitizedContent = [];
   const globals = {
     Element: FakeElement,
     normalizeRichTurns: (rows) => Array.isArray(rows) ? rows : [],
     resolveSnapshotTurnCreateTime: () => 0,
     normalizeAttachments: () => [],
-    sanitizeRichTurnElement: (html) => {
-      if (html === 'INVALID') return null;
-      const host = new FakeElement(String(html));
-      host.message = new FakeElement(String(html));
-      return host;
-    },
     normalizeRole: (raw) => ['user', 'assistant', 'system', 'tool'].includes(String(raw).toLowerCase())
       ? String(raw).toLowerCase() : '',
-    findRoleHostInTurn: (host) => host.message,
-    inferTurnRole: (host, fallback) => {
-      const role = String(host.role || fallback).toLowerCase();
-      return ['user', 'assistant', 'system', 'tool'].includes(role) ? role : '';
+    extractRichTurnContentHtml: (html) => String(html || ''),
+    sanitizeRichContentFragment: (html) => {
+      if (html === 'INVALID') return null;
+      sanitizedContent.push(html);
+      return { nodeType: 11, html };
     },
-    decorateReplayTurn: (_host, _message, role, meta) => decorated.push({ role, answerIdx: meta.answerIdx }),
+    buildRichTurnShell: (role, meta) => {
+      shells.push({ role, answerIdx: meta.answerIdx, messageId: meta.messageId, turnId: meta.turnId, turnNo: meta.turnNo });
+      const turn = new FakeElement(role);
+      turn.message = new FakeElement(role);
+      return { turn, messageEl: turn.message };
+    },
+    projectRichContent() {},
     cleanReaderUserTextNodeLeaks() {},
     getEditOverride: () => null,
     applyEditedMessageBody() {},
     attachUserAttachmentsToTurn: (host) => attachedUsers.push(host),
   };
   const { fn } = loadFunction(rendererSource, 'mountRichTurns', globals);
-  return { fn, decorated, attachedUsers };
+  return { fn, decorated: shells, shells, attachedUsers, sanitizedContent };
 }
 
 function runRichMount(fn, rows) {
@@ -441,49 +471,75 @@ function validateRendererAccessibilityContract() {
   assert.equal(externalLink.getAttribute('rel'), 'noreferrer noopener');
 }
 
-function validateSharedSanitizerOrder() {
-  const events = [];
-  const sandbox = vm.createContext({ console });
-  sandbox.globalThis = sandbox;
-  vm.runInContext(readRepo(SANITIZER_REL), sandbox, { filename: SANITIZER_REL });
+/*
+ * M03 P1 S1A T1 — rich replay consumes Renderer sanitizer v2, never v1.
+ */
+function validateRendererSanitizerV2Migration() {
+  /* 1. chat-renderer no longer resolves the shared v1 surface at all. */
+  const code = stripJsComments(rendererSource);
+  assert.doesNotMatch(code, /html\s*[?.]*\.\s*sanitize\b/,
+    'chat-renderer must not resolve H2O.Studio.html.sanitize for rich replay');
+  assert.match(code, /Renderer\s*[?.]*\.\s*htmlSanitizer/,
+    'chat-renderer must resolve the Renderer sanitizer v2');
+  assert.match(code, /sanitizeToFragment\s*\(/,
+    'rich replay must use the v2 fragment path');
+  assert.doesNotMatch(code, /tpl\.innerHTML\s*=\s*sanitized/,
+    'no sanitized-string to template reparse may remain after v2');
 
-  const sanitizeApi = sandbox.H2O.Studio.html.sanitize;
-  const realSanitizeHtml = sanitizeApi.sanitizeHtml;
-  sanitizeApi.sanitizeHtml = (html) => {
-    events.push('shared-sanitize');
-    return realSanitizeHtml(html);
-  };
+  /* 2. Stage 0 is an inert compatibility stage with no security authority.
+   *    Its real-DOM parsing behaviour is proven by the browser harness; here we
+   *    assert it stays inert and never duplicates sanitizer policy. */
+  assert.match(code, /createElement\("template"\)/,
+    'Stage 0 must parse through an inert template');
+  const stage0 = code.slice(code.indexOf('function stage0CompatCleanup'), code.indexOf('function extractRichTurnContentHtml'));
+  assert.doesNotMatch(stage0, /removeAttribute|javascript:|\bon\[a-z\]/i,
+    'Stage 0 must not duplicate sanitizer security policy');
 
-  let parsedHtml = '';
-  const cleanTurn = {};
-  const turnEl = { cloneNode: () => cleanTurn };
-  Object.assign(sandbox, {
-    W: { H2O: sandbox.H2O },
-    document: {
-      createElement: () => ({
-        content: { querySelectorAll: () => [] },
-        set innerHTML(value) {
-          events.push('parse');
-          parsedHtml = value;
-        },
-      }),
-    },
-    findConversationTurnElement: () => turnEl,
-    scrubReplayNode: () => events.push('renderer-scrub'),
-    cleanReaderUserTextNodeLeaks() {},
-    neutralizeExternalUseHrefs() {},
-  });
-  vm.runInContext(`${extractFunction(rendererSource, 'sanitizeRichTurnElement')}\nthis.sanitizeRichTurnElementResult = sanitizeRichTurnElement;`, sandbox);
+  /* 3. v2 failure modes all fail closed to null — never to v1. */
+  const makeFragmentFn = (engine) => loadFunction(rendererSource, 'sanitizeRichContentFragment', {
+    String, W: { H2O: { Studio: { Renderer: { htmlSanitizer: engine } } } },
+  }).fn;
+  const good = { nodeType: 11 };
+  assert.equal(makeFragmentFn({ isSupported: () => true, sanitizeToFragment: () => good })('<p>x</p>'), good);
+  assert.equal(makeFragmentFn(undefined)('<p>x</p>'), null, 'absent v2 must fail closed');
+  assert.equal(makeFragmentFn({ isSupported: () => false, sanitizeToFragment: () => good })('<p>x</p>'), null,
+    'unsupported v2 must fail closed');
+  assert.equal(makeFragmentFn({ isSupported: () => true, sanitizeToFragment: () => { throw new Error('boom'); } })('<p>x</p>'), null,
+    'throwing v2 must fail closed');
+  assert.equal(makeFragmentFn({ isSupported: () => true, sanitizeToFragment: () => 'a string' })('<p>x</p>'), null,
+    'non-fragment v2 result must fail closed');
 
-  const unsafe = '<section data-testid="conversation-turn" onclick="evil()">'
-    + '<div data-message-author-role="user"><script>evil()</script>'
-    + '<a href="javascript:evil()">safe text</a></div></section>';
-  const result = sandbox.sanitizeRichTurnElementResult(unsafe);
-  assert.equal(result, cleanTurn);
-  assert.doesNotMatch(parsedHtml, /<script|onclick|javascript:/i, 'unsafe rich HTML reached the DOM parser');
-  assert.match(parsedHtml, /href="#"/, 'unsafe rich URL was not neutralized by the shared sanitizer');
-  assert.ok(events.indexOf('shared-sanitize') < events.indexOf('parse'), 'shared sanitizer must run before DOM parsing');
-  assert.ok(events.indexOf('parse') < events.indexOf('renderer-scrub'), 'renderer replay cleanup must run after shared sanitization and parsing');
+  /* 4. v2 failure yields a whole-transcript canonical fallback, no partial mount. */
+  const h = createRichMountHarness();
+  const appended = [];
+  const result = h.fn({ appendChild: (n) => appended.push(n) },
+    [{ turnIdx: 1, role: 'user', outerHTML: 'user' }, { turnIdx: 2, role: 'assistant', outerHTML: 'INVALID' }],
+    '', { messages: [] }, { getEditOverride: () => null });
+  assert.equal(result.fallbackRequired, true, 'v2 failure must request canonical fallback');
+  assert.equal(result.mountedTurnCount, 0);
+  assert.equal(appended.length, 0, 'no hybrid partial rich transcript may remain');
+}
+
+/*
+ * Provider markup must never win structure, role or identity.
+ */
+function validateProviderSpoofRejected() {
+  const h = createRichMountHarness();
+  const appended = [];
+  const spoof = '<section data-testid="conversation-turn-99" data-turn="assistant">'
+    + '<div data-message-author-role="assistant" data-message-id="SPOOFED-MSG" data-turn-id="SPOOFED-TURN">x</div></section>';
+  const result = h.fn({ appendChild: (n) => appended.push(n) }, [{
+    turnIdx: 1, role: 'user', outerHTML: spoof, messageId: 'owner-msg-1', turnId: 'owner-turn-1',
+  }], '', { messages: [] }, { getEditOverride: () => null });
+
+  assert.equal(result.fallbackRequired, false);
+  assert.equal(h.shells.length, 1);
+  const shell = h.shells[0];
+  assert.equal(shell.role, 'user', 'shell role must come from the owner record, not provider markup');
+  assert.equal(shell.messageId, 'owner-msg-1', 'shell message identity must come from the owner record');
+  assert.equal(shell.turnId, 'owner-turn-1', 'shell turn identity must come from the owner record');
+  assert.equal(shell.turnNo, 1, 'turn ordering must come from the owner record');
+  assert.equal(appended[0].role, 'user');
 }
 
 class FakeClassList {
@@ -628,7 +684,8 @@ validateRendererInputContract();
 validateRichMountContract();
 validateRichIdentityResilience();
 validateRendererAccessibilityContract();
-validateSharedSanitizerOrder();
+validateRendererSanitizerV2Migration();
+validateProviderSpoofRejected();
 validateBuildFallbackDecision();
 validateExtractedRendererBoundary();
 

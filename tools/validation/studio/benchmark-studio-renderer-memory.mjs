@@ -22,6 +22,9 @@ const studioRoot = path.join(repoRoot, "src-surfaces-base/studio");
 const files = {
   selectors: path.join(studioRoot, "platform/selectors.contract.js"),
   sanitizer: path.join(studioRoot, "platform/html-sanitizer.js"),
+  sanitizerPolicyV2: path.join(studioRoot, "renderer/safety/sanitizer-policy.v1.js"),
+  sanitizerEngineV2: path.join(studioRoot, "renderer/safety/vendor/dompurify/purify.js"),
+  sanitizerV2: path.join(studioRoot, "renderer/safety/html-sanitizer.v2.js"),
   renderer: path.join(studioRoot, "renderer/chat-renderer.studio.js"),
   studio: path.join(studioRoot, "studio.js"),
   host: path.join(studioRoot, "S0D3e. 🎬 Transcript Studio Host - Studio.js"),
@@ -110,6 +113,10 @@ try {
   await page.addStyleTag({ path: files.css });
   await page.addScriptTag({ path: files.selectors });
   await page.addScriptTag({ path: files.sanitizer });
+  // M03 P1 S1A T1: rich replay consumes Renderer sanitizer v2.
+  await page.addScriptTag({ path: files.sanitizerPolicyV2 });
+  await page.addScriptTag({ path: files.sanitizerEngineV2 });
+  await page.addScriptTag({ path: files.sanitizerV2 });
   await page.addScriptTag({ path: files.renderer });
 
   await page.evaluate(() => {

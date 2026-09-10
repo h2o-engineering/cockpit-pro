@@ -161,7 +161,57 @@ banner, a single engine copy, and no package dependency. Pinning the SHA of this
 vendored third-party artifact is the opposite of the v1 obligation above, which
 is behavioral and deliberately not SHA-pinned.
 
-## Performance gate (not satisfied here)
+## Consumption state: V2_CONSUMED_BY_RICH_REPLAY
+
+Renderer rich replay now consumes v2. `chat-renderer.studio.js` no longer
+resolves `H2O.Studio.html.sanitize` at all; Storage keeps consuming v1 outside
+the Renderer, unchanged.
+
+The migrated path is:
+
+```
+owner rich-turn record
+  -> Stage 0 inert compatibility normalization (no security authority)
+  -> H2O.Studio.Renderer.htmlSanitizer.sanitizeToFragment()
+  -> H2O-owned article.cgTurn > div.cgMsg shells
+  -> sanitized provider content mounted inside
+```
+
+Provider markup is content, never authority. Canonical role, message/turn
+identity and transcript ordering come from the owner record; the compatibility
+attributes stamped on the shells (`data-message-author-role`, `data-message-id`,
+`data-turn-id`, `data-testid`, `data-turn`) are derived from that record and the
+Renderer projection, so captured markup cannot spoof them. Provider classes
+survive inside the sanitized content as presentation only.
+
+Sanitization is per rich turn through the fragment path — the string path would
+force a second parse to remount. Failure boundary: if v2 is absent,
+unsupported, throws, returns a non-fragment, exceeds the input guard, or the
+record carries an unrepresentable role, the **whole transcript** falls back to
+the canonical normalized-message renderer. There is no hybrid transcript and no
+downgrade to v1.
+
+## Performance gate (measured for this migration)
+
+Measured in Chromium against the pre-migration renderer from `c5d2de2d`
+rendering identical fixtures in the same process, both in rich mode:
+
+| turns | pre-migration | migrated v2 | ratio |
+|---|---|---|---|
+| 50 | 2.3 ms | 4.8 ms | 2.09x |
+| 100 | 4.3 ms | 8.7 ms | 2.02x |
+| 200 | 8.1 ms | 16.0 ms | 1.98x |
+
+A representative ~11.9 KB rich turn sanitizes at p50 0.1 ms / p95 0.3 ms.
+Synthetic large turns: ~128 KB in 1.0 ms, ~256 KB in 2.0 ms, both still rich.
+The 2 MiB policy input guard is unchanged, and no lazy-render threshold was
+introduced.
+
+These are acceptance gates for this environment and this checkpoint, not
+universal product constants. The earlier ~22-28 ms per ~265 KB spike figure
+remains what it was: evidence, not a budget.
+
+## Performance gate (original foundation note)
 
 Performance acceptance is **not** part of this unwired foundation, and nothing
 in it should be read as clearing v2 for production load.

@@ -577,15 +577,6 @@ function findRoleHostInTurn(turnEl, preferredRole = ""){
   return turnEl.querySelector?.(`[${ROLE_ATTR}]`) || null;
 }
 
-function inferTurnRole(turnEl, fallbackRole = ""){
-  const roleHost = findRoleHostInTurn(turnEl, fallbackRole);
-  const raw =
-    roleHost?.getAttribute?.(ROLE_ATTR) ||
-    turnEl?.getAttribute?.("data-turn") ||
-    fallbackRole;
-  return normalizeRole(raw);
-}
-
 const STALE_REPLAY_SUBTREE_SELECTORS = [
   ".h2o-cold-layer",
   '[data-h2o-cold-layer="1"]',
@@ -650,57 +641,6 @@ const REPLAY_UNWRAP_SELECTORS = [
   '[data-cgxui="scbn-band"][data-cgxui-owner="scbn"]'
 ];
 
-const STRIP_REPLAY_ATTRS = new Set([
-  "data-ho-ignore",
-  "data-cgxui-at-hidden",
-  "data-cgxui-chat-geometry",
-  "data-cgxui-chat-page-divider",
-  "data-cgxui-chat-page-hidden",
-  "data-cgxui-chat-page-no-answer",
-  "data-cgxui-chat-page-no-answer-question-hidden",
-  "data-cgxui-chat-page-question-hidden",
-  "data-cgxui-chat-page-title-item",
-  "data-cgxui-chat-page-title-list",
-  "data-cgxui-chat-page-title-state",
-  "data-cgxui-chat-page-title-wrapper",
-  "data-cgxui-page-dividers",
-  "data-cgxui-page-label-style",
-  "data-h2o-archive-cold",
-  "data-h2o-archive-msg-idx",
-  "data-h2o-archive-pending",
-  "data-h2o-cold",
-  "data-h2o-cold-idx",
-  "data-h2o-cold-turn-idx",
-  "data-h2o-cold-layer"
-]);
-
-const STRIP_REPLAY_ATTR_PATTERNS = [
-  /^data-h2o-x1n-sig$/i,
-  /^data-h2o-x1n-csig$/i,
-  /^data-h2o-qbg-sig$/i,
-  /^data-h2o-x1bg-sig$/i,
-  /^data-h2o-qbig-sig-num$/i,
-  /^data-h2o-qbig-sig-pos$/i,
-  /^data-h2o-qbig-hostfb$/i,
-  /^data-cgxui-[^-]+-pre$/i,
-  /^data-cgxui-[^-]+-bound$/i,
-  /^data-cgxui-[^-]+-done$/i,
-  /^data-cgxui-[^-]+-sig(?:-.+)?$/i
-];
-
-function shouldStripReplayAttr(el, attrName){
-  const name = String(attrName || "").toLowerCase();
-  if (!name) return false;
-  if (STRIP_REPLAY_ATTRS.has(name)) return true;
-  if (STRIP_REPLAY_ATTR_PATTERNS.some((re) => re.test(name))) return true;
-  if (name === "data-ho-qwrap-done"){
-    const hasPreservedQwrap =
-      !!el?.querySelector?.(".cgxui-qswr, [data-h2o-qwrap-id], [data-ho-qwrap-id]");
-    return !hasPreservedQwrap;
-  }
-  return false;
-}
-
 function unwrapReplayNode(node){
   if (!(node instanceof Element)) return;
   const parent = node.parentNode;
@@ -739,16 +679,27 @@ function normalizeReplayLinkAccessibility(el){
   } catch {}
 }
 
-function scrubReplayNode(root){
-  if (!(root instanceof Element)) return;
+/*
+ * Stage 0 — inert compatibility normalization (M03 P1 S1A T1).
+ *
+ * ZERO security authority. It runs before the Renderer sanitizer purely to
+ * remove historical H2O/provider replay residue whose selectors still need to
+ * read raw provider attributes that sanitizer v2 legitimately removes. Parsing
+ * happens in a <template>, whose content lives in an inert document: no script
+ * runs and no resource loads. Every dangerous-content decision — script, style,
+ * frames, event handlers, URI schemes, SVG/MathML, identity spoofing — belongs
+ * to sanitizer v2 and is deliberately NOT duplicated here.
+ */
+function stage0CompatCleanup(turnEl){
+  if (!(turnEl instanceof Element)) return;
   const userRoleSelector = SEL.userTurn || (
     typeof BY.role === "function" ? BY.role(ROLES.USER || "user") : `[${ROLE_ATTR}="user"]`
   );
 
-  root.querySelectorAll(STALE_REPLAY_SUBTREE_SELECTORS.join(",")).forEach((node) => {
+  turnEl.querySelectorAll(STALE_REPLAY_SUBTREE_SELECTORS.join(",")).forEach((node) => {
     try { node.remove(); } catch {}
   });
-  root.querySelectorAll([
+  turnEl.querySelectorAll([
     `${userRoleSelector} input`,
     `${userRoleSelector} textarea`,
     `${userRoleSelector} select`,
@@ -757,7 +708,7 @@ function scrubReplayNode(root){
   ].join(",")).forEach((node) => {
     try { node.remove(); } catch {}
   });
-  root.querySelectorAll([
+  turnEl.querySelectorAll([
     `${userRoleSelector} button`,
     `${userRoleSelector} [role="button"]`
   ].join(",")).forEach((node) => {
@@ -766,91 +717,85 @@ function scrubReplayNode(root){
       else node.remove();
     } catch {}
   });
-  root.querySelectorAll(REPLAY_UNWRAP_SELECTORS.join(",")).forEach((node) => {
+  turnEl.querySelectorAll(REPLAY_UNWRAP_SELECTORS.join(",")).forEach((node) => {
     try { unwrapReplayNode(node); } catch {}
   });
-
-  const all = [root, ...root.querySelectorAll("*")];
-  all.forEach((el) => {
-    for (const attr of [...el.attributes]){
-      const name = String(attr.name || "").toLowerCase();
-      if (name.startsWith("on")){
-        try { el.removeAttribute(attr.name); } catch {}
-        continue;
-      }
-      if ((name === "href" || name === "src") && /^\s*javascript:/i.test(String(attr.value || ""))){
-        try { el.removeAttribute(attr.name); } catch {}
-        continue;
-      }
-      if (shouldStripReplayAttr(el, attr.name)){
-        try { el.removeAttribute(attr.name); } catch {}
-      }
-    }
-
-    if (!normalizeReplayImageAccessibility(el)) return;
-
-    normalizeReplayLinkAccessibility(el);
-  });
 }
 
-// Captured chatgpt.com turn HTML contains <svg><use href="/cdn/assets/sprites-core-*.svg#id"/></svg>
-// references to ChatGPT's hashed sprite bundle. In the Studio document the absolute path
-// resolves against the chrome-extension://<id>/ origin, which doesn't host /cdn/, producing
-// repeated ERR_FILE_NOT_FOUND every time a reader mounts. We never need ChatGPT's UI sprites
-// inside the Studio reader (they're chrome icons, not message content), so the safest fix is
-// to neutralize the <use> reference at sanitization time. The empty <svg> wrapper stays so
-// layout doesn't shift.
-function neutralizeExternalUseHrefs(root) {
-  if (!root || typeof root.querySelectorAll !== "function") return;
-  try {
-    // Plain `href` (modern) and namespaced `xlink:href` (legacy).
-    root.querySelectorAll("use[href], use[*|href]").forEach((useEl) => {
-      try {
-        const href = useEl.getAttribute("href") || useEl.getAttributeNS("http://www.w3.org/1999/xlink", "href") || "";
-        // Treat anything that points outside the current document fragment as unsafe in
-        // the Studio context: absolute URLs, root-relative paths, and CDN-style hashed
-        // sprite references all fail because the extension origin doesn't serve them.
-        if (/^(https?:)?\/\//i.test(href) || href.startsWith("/") || /sprites-core-/i.test(href)) {
-          useEl.remove();
-        }
-      } catch {}
-    });
-  } catch {}
-}
-
-function sanitizeRichTurnElement(htmlRaw){
+/*
+ * Extract the owner-relevant CONTENT of a captured provider turn.
+ *
+ * The provider turn wrapper and its role host are read here only as
+ * compatibility landmarks for locating content; neither survives into the
+ * mounted transcript. Structure, role and identity come from the owner record.
+ */
+function extractRichTurnContentHtml(htmlRaw, ownerRole){
   const html = String(htmlRaw || "").trim();
+  if (!html) return "";
+
+  let turnEl = null;
+  try {
+    const tpl = document.createElement("template");
+    tpl.innerHTML = html;
+    turnEl = findConversationTurnElement(tpl.content);
+  } catch {
+    return "";
+  }
+  if (!(turnEl instanceof Element)) return "";
+
+  try {
+    stage0CompatCleanup(turnEl);
+    if (normalizeRole(ownerRole) === (ROLES.USER || "user")) removeNativeUserAttachmentImages(turnEl);
+    const roleHost = findRoleHostInTurn(turnEl, ownerRole);
+    return String((roleHost instanceof Element ? roleHost : turnEl).innerHTML || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+/*
+ * Renderer sanitizer v2 — the security boundary for rich replay.
+ *
+ * The fragment path is used deliberately: the string path would force a second
+ * parse to remount, which measured materially more expensive. The returned
+ * fragment is built in the engine's inert document, so ownerDocument !== the
+ * live document; that is valid and DOM insertion adopts it, so it is never
+ * treated as failure. Any failure returns null and the caller falls the whole
+ * transcript back to the canonical renderer — never to the v1 sanitizer.
+ */
+function sanitizeRichContentFragment(contentHtml){
+  const html = String(contentHtml || "").trim();
   if (!html) return null;
 
-  const sharedSanitizer = W.H2O?.Studio?.html?.sanitize;
-  if (!sharedSanitizer || typeof sharedSanitizer.sanitizeHtml !== "function") return null;
-
-  let sanitizedHtml = "";
+  const v2 = W.H2O?.Studio?.Renderer?.htmlSanitizer;
+  if (!v2 || typeof v2.sanitizeToFragment !== "function") return null;
   try {
-    sanitizedHtml = String(sharedSanitizer.sanitizeHtml(html) || "").trim();
+    if (v2.isSupported() !== true) return null;
   } catch {
     return null;
   }
-  if (!sanitizedHtml) return null;
 
-  const tpl = document.createElement("template");
-  tpl.innerHTML = sanitizedHtml;
+  let fragment = null;
+  try {
+    fragment = v2.sanitizeToFragment(html);
+  } catch {
+    return null;
+  }
+  if (!fragment || fragment.nodeType !== 11) return null;
+  return fragment;
+}
 
-  tpl.content.querySelectorAll("script,link,iframe,object,embed,style").forEach((bad) => {
-    try { bad.remove(); } catch {}
-  });
-  neutralizeExternalUseHrefs(tpl.content);
-
-  const turnEl = findConversationTurnElement(tpl.content);
-  if (!turnEl) return null;
-
-  const cleanTurn = turnEl.cloneNode(true);
-  scrubReplayNode(cleanTurn);
-  cleanReaderUserTextNodeLeaks(cleanTurn);
-  // Defensive pass: scrubReplayNode might leave or rebuild <use> elements, so strip
-  // any remaining cross-origin references once more on the cloned tree.
-  neutralizeExternalUseHrefs(cleanTurn);
-  return cleanTurn;
+/*
+ * Post-sanitizer Renderer projection. Security is settled by v2; what remains
+ * is presentation/accessibility that the Renderer owns: drop placeholder images,
+ * guarantee alt text, and give external links safe target/rel behaviour.
+ */
+function projectRichContent(root){
+  if (!root || typeof root.querySelectorAll !== "function") return;
+  try {
+    root.querySelectorAll("img").forEach((el) => { normalizeReplayImageAccessibility(el); });
+    root.querySelectorAll("a").forEach((el) => { normalizeReplayLinkAccessibility(el); });
+  } catch {}
 }
 
 function normalizeAttachmentRecord(raw, idx = 0, roleRaw = "user"){
@@ -1024,23 +969,44 @@ function buildCanonicalTurn(role, text, meta = {}){
   return { turn, messageEl };
 }
 
-function decorateReplayTurn(turnEl, messageEl, role, meta = {}){
-  if (!(turnEl instanceof Element) || !(messageEl instanceof Element)) return;
+/*
+ * H2O-owned rich turn/message shells (M03 P1 S1A T1).
+ *
+ * Structure, canonical role and identity are Renderer/owner property. Provider
+ * markup never decides whether a node is a turn or a message, what role it
+ * carries, or which identity it claims — it is mounted as content inside these
+ * hosts. The compatibility attributes stamped here are derived from the owner
+ * record and the Renderer projection, never copied from provider HTML, so
+ * captured markup cannot spoof them. They are retained because existing
+ * downstream consumers and the accepted user-bubble geometry still key on them.
+ */
+function buildRichTurnShell(role, meta = {}){
+  const turn = document.createElement("article");
+  turn.className = `cgTurn cgTurn--${role} wbTurn wbTurn--rich wbTurn--${role}`;
+  turn.setAttribute(TESTID_ATTR, meta.turnNo > 0 ? `${TURN_TESTID}-${meta.turnNo}` : TURN_TESTID);
+  turn.setAttribute("data-turn", role);
+  applyTurnAccessibility(turn, role);
 
-  turnEl.classList.add("cgTurn", `cgTurn--${role}`, "wbTurn", "wbTurn--rich", `wbTurn--${role}`);
-  if (!isConversationTurnNode(turnEl)){
-    turnEl.setAttribute(TESTID_ATTR, meta.turnNo > 0 ? `${TURN_TESTID}-${meta.turnNo}` : TURN_TESTID);
-  }
-  if (!turnEl.getAttribute("data-turn")) turnEl.setAttribute("data-turn", role);
-  applyTurnAccessibility(turnEl, role);
+  const messageEl = document.createElement("div");
+  /* Neutral H2O message host only. The role modifier is deliberately omitted
+   * here: cgMsg--user carries the canonical bubble skin (padding, background,
+   * radius), which would wrap a second bubble around provider content that
+   * already contains .user-message-bubble-color. The owner-derived role
+   * attribute below stays — rich-replay CSS keys on it, and it is structural
+   * metadata, not presentation. */
+  messageEl.className = "cgMsg";
+  messageEl.setAttribute(ROLE_ATTR, role);
+
   if (role === "assistant" && meta.answerIdx > 0){
-    turnEl.dataset.turnIdx = String(meta.answerIdx);
+    turn.dataset.turnIdx = String(meta.answerIdx);
     try { messageEl.dataset.turnIdx = String(meta.answerIdx); } catch {}
   }
   claimReplayIdentity(messageEl, MESSAGE_ID_ATTR, meta.messageId, meta.seenMessageIds);
   claimReplayIdentity(messageEl, TURN_ID_ATTR, meta.turnId, meta.seenTurnIds);
-  claimReplayIdentity(turnEl, TURN_ID_ATTR, "", meta.seenTurnIds);
-  stampReplayTurnMeta(turnEl, messageEl, meta.createTime, meta.turnNo);
+  stampReplayTurnMeta(turn, messageEl, meta.createTime, meta.turnNo);
+
+  turn.appendChild(messageEl);
+  return { turn, messageEl };
 }
 function claimReplayIdentity(el, attrName, preferredRaw, seen){
   if (!(el instanceof Element)) return "";
@@ -1135,16 +1101,19 @@ function mountRichTurns(container, richTurns, snapshotId, snap, options){
       const userAttachments = Array.isArray(turn.attachments) && turn.attachments.length
         ? turn.attachments
         : (Array.isArray(snapMessage?.attachments) ? snapMessage.attachments : []);
-      const host = sanitizeRichTurnElement(turn.outerHTML);
-      let role = normalizeRole(turn.role);
-      const messageEl = host ? findRoleHostInTurn(host, role) : null;
 
-      if (!(host instanceof Element) || !(messageEl instanceof Element)) return fallbackResult;
-      role = inferTurnRole(host, role);
+      /* Canonical role is owner property. An unrepresentable role fails the
+       * whole transcript closed rather than guessing from provider markup. */
+      const role = normalizeRole(turn.role);
       if (!role) return fallbackResult;
 
+      const contentHtml = extractRichTurnContentHtml(turn.outerHTML, role);
+      if (!contentHtml) return fallbackResult;
+      const fragment = sanitizeRichContentFragment(contentHtml);
+      if (!fragment) return fallbackResult;
+
       const answerIdx = role === "assistant" ? (assistantIdx + 1) : 0;
-      decorateReplayTurn(host, messageEl, role, {
+      const { turn: host, messageEl } = buildRichTurnShell(role, {
         turnNo,
         answerIdx,
         createTime,
@@ -1153,6 +1122,11 @@ function mountRichTurns(container, richTurns, snapshotId, snap, options){
         seenMessageIds,
         seenTurnIds,
       });
+
+      /* The fragment carries a foreign inert ownerDocument; appendChild adopts
+       * it, so no explicit import/adopt is needed. */
+      messageEl.appendChild(fragment);
+      projectRichContent(messageEl);
       if (role === "user") cleanReaderUserTextNodeLeaks(host);
 
       const override = sid && typeof options.getEditOverride === "function"
