@@ -1308,6 +1308,21 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   "renderer/safety/vendor/dompurify/purify.js",
   "renderer/safety/html-sanitizer.v2.js",
   "renderer/safety/vendor/dompurify/LICENSE",
+
+  // Renderer Markdown semantic engine (M03 P2 S2A T4 S1) — DELIVERY-ONLY
+  // admission. These five files ship inside the produced artifact but are
+  // deliberately UNUSED: no studio.html <script> tag references them and no
+  // runtime consumer exists. Both bespoke Markdown parsers stay live during the
+  // bounded dual-path window. The vendored engine is byte-verbatim markdown-it
+  // 15.0.1; THIRD_PARTY_NOTICES ships beside it because the artifact physically
+  // incorporates six projects across MIT and BSD-2-Clause. PIN.json is
+  // source/build provenance and is NOT delivered. Keep parallel to
+  // ARCHIVE_WORKBENCH_OUT_FILES below.
+  "renderer/markdown/vendor/markdown-it/markdown-it.umd.min.js",
+  "renderer/markdown/vendor/markdown-it/THIRD_PARTY_NOTICES",
+  "renderer/markdown/h2o-gfm.v1.js",
+  "renderer/markdown/markdown-engine.v1.js",
+  "renderer/markdown/markdown-ir-adapter.v1.js",
 ]);
 export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   "studio.html",
@@ -1689,6 +1704,13 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   "renderer/safety/vendor/dompurify/purify.js",
   "renderer/safety/html-sanitizer.v2.js",
   "renderer/safety/vendor/dompurify/LICENSE",
+
+  // Renderer Markdown semantic engine (M03 P2 S2A T4 S1) — delivered but UNUSED — see SOURCE_FILES.
+  "renderer/markdown/vendor/markdown-it/markdown-it.umd.min.js",
+  "renderer/markdown/vendor/markdown-it/THIRD_PARTY_NOTICES",
+  "renderer/markdown/h2o-gfm.v1.js",
+  "renderer/markdown/markdown-engine.v1.js",
+  "renderer/markdown/markdown-ir-adapter.v1.js",
 ]);
 
 function ensureDir(dirPath) {
