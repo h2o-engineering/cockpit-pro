@@ -25,16 +25,6 @@
   const TURNS_TESTID = TESTIDS.CONVERSATION_TURNS || "conversation-turns";
   const NORMALIZED_INPUT = Symbol("h2o.studio.chatRenderer.input");
 
-  function esc(s){
-    return String(s ?? "").replace(/[&<>"']/g, (c) => ({
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#039;"
-    }[c]));
-  }
-
   function normalizeText(s){
     return String(s || "").replace(/\s+/g, " ").trim();
   }
@@ -153,19 +143,6 @@ function normalizeRole(raw, fallbackRaw){
   const fallback = String(fallbackRaw || "").trim().toLowerCase();
   return canonicalRoles.includes(fallback) ? fallback : "";
 }
-function normalizeSafeMarkdownHref(rawHref){
-  const href = String(rawHref || "").trim();
-  if (!href || /[\u0000-\u001F\u007F\s]/.test(href)) return "";
-
-  try {
-    const parsed = new URL(href);
-    const protocol = parsed.protocol.toLowerCase();
-    if (protocol === "http:" || protocol === "https:" || protocol === "mailto:") return href;
-  } catch {}
-
-  return "";
-}
-
 function normalizeSafeImageSrc(rawSrc, allowCapturedData){
   const src = String(rawSrc || "").trim();
   if (!src || /[\u0000-\u001F\u007F\s]/.test(src)) return "";
@@ -212,341 +189,6 @@ function applyTurnAccessibility(turnEl, roleRaw){
   // Captured labels may reference host-page nodes that replay cleanup removed.
   try { turnEl.removeAttribute("aria-labelledby"); } catch {}
   try { turnEl.setAttribute("aria-label", label); } catch {}
-}
-
-// Inline markdown → HTML. Handles links, bold, italic, inline code, plain text.
-// All plain-text segments are HTML-escaped via esc(). Handles orphaned markers
-// gracefully — an unmatched ` or * is consumed as literal text.
-function renderInlineMarkdown(text){
-  let s = String(text || "");
-  let out = "";
-  while (s.length > 0){
-    // Inline code: `code`
-    if (s[0] === "`"){
-      const end = s.indexOf("`", 1);
-      if (end > 0){
-        out += `<code>${esc(s.slice(1, end))}</code>`;
-        s = s.slice(end + 1);
-        continue;
-      }
-    }
-    // Image: ![alt](https://example.com/x.png). Must be dispatched BEFORE the
-    // link branch so the leading "!" doesn't get consumed as plain text.
-    // Unsafe / malformed URLs fall back to consuming a literal "!" and
-    // re-entering the loop; the link branch then handles the remaining
-    // "[alt](url)" (escaping or linking as appropriate). Phase 2A: pre-2026-05
-    // the renderer silently skipped past `![` so markdown images were dropped.
-    if (s[0] === "!" && s[1] === "["){
-      const labelEnd = s.indexOf("]", 2);
-      if (labelEnd > 1 && s[labelEnd + 1] === "("){
-        const hrefEnd = s.indexOf(")", labelEnd + 2);
-        if (hrefEnd > labelEnd + 2){
-          const alt = normalizeImageAlt(s.slice(2, labelEnd));
-          const rawHref = s.slice(labelEnd + 2, hrefEnd);
-          const href = normalizeSafeImageSrc(rawHref, false);
-          if (href){
-            out += `<img src="${esc(href)}" alt="${esc(alt)}" loading="lazy" decoding="async">`;
-            s = s.slice(hrefEnd + 1);
-            continue;
-          }
-        }
-      }
-      // Malformed or unsafe URL: emit literal "!" and let the link branch
-      // (next iteration) handle the remaining "[alt](url)" as a normal link
-      // if the URL parses, or escape it as literal text if not.
-      out += esc("!");
-      s = s.slice(1);
-      continue;
-    }
-    // Link: [label](https://example.com). Unsafe hrefs stay literal text.
-    if (s[0] === "["){
-      const labelEnd = s.indexOf("]");
-      if (labelEnd > 0 && s[labelEnd + 1] === "("){
-        const hrefEnd = s.indexOf(")", labelEnd + 2);
-        if (hrefEnd > labelEnd + 2){
-          const label = s.slice(1, labelEnd);
-          const rawHref = s.slice(labelEnd + 2, hrefEnd);
-          const href = normalizeSafeMarkdownHref(rawHref);
-          if (href && label.trim()){
-            out += `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${renderInlineMarkdown(label)}</a>`;
-            s = s.slice(hrefEnd + 1);
-            continue;
-          }
-        }
-      }
-      out += esc("[");
-      s = s.slice(1);
-      continue;
-    }
-    // Bold: **text** — check before single * to avoid false matches
-    if (s.startsWith("**")){
-      const end = s.indexOf("**", 2);
-      if (end > 2){
-        out += `<strong>${renderInlineMarkdown(s.slice(2, end))}</strong>`;
-        s = s.slice(end + 2);
-        continue;
-      }
-    }
-    // Italic: *text* (single asterisk, not a double)
-    if (s[0] === "*" && s[1] !== "*"){
-      const end = s.indexOf("*", 1);
-      if (end > 1){
-        out += `<em>${renderInlineMarkdown(s.slice(1, end))}</em>`;
-        s = s.slice(end + 1);
-        continue;
-      }
-    }
-    // Italic: _text_ (underscore style)
-    if (s[0] === "_" && s[1] !== "_"){
-      const end = s.indexOf("_", 1);
-      if (end > 1){
-        out += `<em>${renderInlineMarkdown(s.slice(1, end))}</em>`;
-        s = s.slice(end + 1);
-        continue;
-      }
-    }
-    // Plain text — consume up to the next potential marker character. If the
-    // next marker is `[` preceded by `!`, stop one character BEFORE the `!`
-    // so the image branch (which dispatches on `s[0] === "!" && s[1] === "["`)
-    // gets a chance next iteration. Phase 2A: pre-2026-05 the scanner did the
-    // opposite — it advanced PAST `![` to suppress image parsing entirely,
-    // which silently dropped every markdown image in canonical saved chats.
-    const nextMarker = s.search(/[`*_\[]/);
-    if (nextMarker > 0){
-      const isImageStart = s[nextMarker] === "[" && s[nextMarker - 1] === "!";
-      const end = isImageStart ? nextMarker - 1 : nextMarker;
-      out += esc(s.slice(0, end));
-      s = s.slice(end);
-    } else {
-      out += esc(s); // no more markers, consume the rest
-      break;
-    }
-  }
-  return out;
-}
-
-function countMarkdownIndent(line){
-  let count = 0;
-  for (const ch of String(line || "")){
-    if (ch === " ") count += 1;
-    else if (ch === "\t") count += 4;
-    else break;
-  }
-  return count;
-}
-
-function parseMarkdownListLine(line){
-  const match = String(line || "").match(/^([ \t]*)([-*+]|\d+\.)[ \t]+(.+)$/);
-  if (!match) return null;
-  return {
-    indent: countMarkdownIndent(match[1]),
-    type: /^\d+\.$/.test(match[2]) ? "ol" : "ul",
-    text: match[3],
-  };
-}
-
-function renderMarkdownList(lines, start, baseIndent, listType){
-  const tag = listType === "ol" ? "ol" : "ul";
-  const items = [];
-  let i = start;
-
-  while (i < lines.length){
-    const row = parseMarkdownListLine(lines[i]);
-    if (!row || row.indent !== baseIndent || row.type !== listType) break;
-
-    const parts = [renderInlineMarkdown(row.text)];
-    i++;
-
-    while (i < lines.length){
-      if (String(lines[i] || "").trim() === "") break;
-
-      const child = parseMarkdownListLine(lines[i]);
-      if (!child || child.indent <= baseIndent) break;
-
-      const nested = renderMarkdownList(lines, i, child.indent, child.type);
-      parts.push(nested.html);
-      i = nested.next;
-    }
-
-    items.push(`<li>${parts.join("")}</li>`);
-  }
-
-  return { html: `<${tag}>${items.join("")}</${tag}>`, next: i };
-}
-
-function splitMarkdownTableRow(line){
-  let src = String(line || "").trim();
-  if (!src.includes("|")) return [];
-  if (src.startsWith("|")) src = src.slice(1);
-  if (src.endsWith("|")) src = src.slice(0, -1);
-
-  const cells = [];
-  let cell = "";
-  for (let i = 0; i < src.length; i += 1){
-    const ch = src[i];
-    if (ch === "\\" && src[i + 1] === "|"){
-      cell += "|";
-      i++;
-      continue;
-    }
-    if (ch === "|"){
-      cells.push(cell.trim());
-      cell = "";
-      continue;
-    }
-    cell += ch;
-  }
-  cells.push(cell.trim());
-  return cells;
-}
-
-function parseMarkdownTableAlign(cell){
-  const marker = String(cell || "").replace(/\s+/g, "");
-  if (!/^:?-{3,}:?$/.test(marker)) return null;
-  if (marker.startsWith(":") && marker.endsWith(":")) return "center";
-  if (marker.endsWith(":")) return "right";
-  if (marker.startsWith(":")) return "left";
-  return "";
-}
-
-function parseMarkdownTableStart(lines, start){
-  if (start + 1 >= lines.length) return null;
-  const header = splitMarkdownTableRow(lines[start]);
-  const delimiter = splitMarkdownTableRow(lines[start + 1]);
-  if (header.length < 2 || delimiter.length !== header.length) return null;
-
-  const aligns = delimiter.map(parseMarkdownTableAlign);
-  if (aligns.some((align) => align === null)) return null;
-  return { header, aligns };
-}
-
-function renderMarkdownTable(lines, start){
-  const parsed = parseMarkdownTableStart(lines, start);
-  if (!parsed) return null;
-
-  const { header, aligns } = parsed;
-  const columnCount = header.length;
-  let i = start + 2;
-  const bodyRows = [];
-
-  while (i < lines.length){
-    if (String(lines[i] || "").trim() === "") break;
-    const cells = splitMarkdownTableRow(lines[i]);
-    if (cells.length < 2) break;
-    bodyRows.push(cells.slice(0, columnCount));
-    i++;
-  }
-
-  const alignAttr = (idx) => aligns[idx] ? ` style="text-align:${aligns[idx]}"` : "";
-  const renderCell = (tag, value, idx) => (
-    `<${tag}${tag === "th" ? ' scope="col"' : ""}${alignAttr(idx)}>${renderInlineMarkdown(value || "")}</${tag}>`
-  );
-  const head = `<thead><tr>${header.map((cell, idx) => renderCell("th", cell, idx)).join("")}</tr></thead>`;
-  const body = `<tbody>${bodyRows.map((row) => {
-    const cells = Array.from({ length: columnCount }, (_, idx) => row[idx] || "");
-    return `<tr>${cells.map((cell, idx) => renderCell("td", cell, idx)).join("")}</tr>`;
-  }).join("")}</tbody>`;
-
-  return { html: `<table>${head}${body}</table>`, next: i };
-}
-
-// Full markdown → HTML for archive message text.
-// Handles: fenced code blocks, headings (h1–h3), horizontal rules, blockquotes,
-// tables, nested unordered/ordered lists, paragraphs, and inline formatting.
-// Stays close to the Mobile Studio renderer while adding Browser quote support.
-function renderTextAsChatGPTBlocks(text){
-  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
-  const out = [];
-  let i = 0;
-
-  while (i < lines.length){
-    const line = lines[i];
-
-    // Fenced code block (``` or ~~~)
-    const fenceMatch = line.match(/^(`{3,}|~{3,})(.*)/);
-    if (fenceMatch){
-      const fence = fenceMatch[1];
-      const lang = fenceMatch[2].trim();
-      const codeLines = [];
-      i++;
-      while (i < lines.length && !lines[i].startsWith(fence)){
-        codeLines.push(lines[i]);
-        i++;
-      }
-      i++; // consume closing fence
-      const langBadge = lang ? `<div class="wbCodeLang">${esc(lang)}</div>` : "";
-      out.push(`<div class="wbCodeBlock">${langBadge}<pre><code>${esc(codeLines.join("\n"))}</code></pre></div>`);
-      continue;
-    }
-
-    // ATX heading (# ## ###)
-    const headingMatch = line.match(/^(#{1,3})[ \t]+(.+?)[ \t]*$/);
-    if (headingMatch){
-      const level = Math.min(headingMatch[1].length, 3);
-      out.push(`<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`);
-      i++;
-      continue;
-    }
-
-    // Horizontal rule (--- *** ___ as standalone line)
-    if (/^[-*_]{3,}\s*$/.test(line.trim())){
-      out.push(`<hr>`);
-      i++;
-      continue;
-    }
-
-    const table = renderMarkdownTable(lines, i);
-    if (table){
-      out.push(table.html);
-      i = table.next;
-      continue;
-    }
-
-    // Blockquote (> quote). Reuse this renderer for quoted markdown content.
-    if (/^[ \t]{0,3}>[ \t]?/.test(line)){
-      const quoteLines = [];
-      while (i < lines.length && /^[ \t]{0,3}>[ \t]?/.test(lines[i])){
-        quoteLines.push(lines[i].replace(/^[ \t]{0,3}>[ \t]?/, ""));
-        i++;
-      }
-      out.push(`<blockquote>${renderTextAsChatGPTBlocks(quoteLines.join("\n"))}</blockquote>`);
-      continue;
-    }
-
-    const listRow = parseMarkdownListLine(line);
-    if (listRow){
-      const list = renderMarkdownList(lines, i, listRow.indent, listRow.type);
-      out.push(list.html);
-      i = list.next;
-      continue;
-    }
-
-    // Blank line
-    if (line.trim() === ""){
-      i++;
-      continue;
-    }
-
-    // Paragraph — collect lines until a blank line or a block-level element starts
-    const paraLines = [];
-    while (i < lines.length){
-      const l = lines[i];
-      if (l.trim() === "") break;
-      if (/^(`{3,}|~{3,})/.test(l)) break;
-      if (/^#{1,3}[ \t]/.test(l)) break;
-      if (/^[-*_]{3,}\s*$/.test(l.trim())) break;
-      if (parseMarkdownTableStart(lines, i)) break;
-      if (/^[ \t]{0,3}>[ \t]?/.test(l)) break;
-      if (parseMarkdownListLine(l)) break;
-      paraLines.push(l);
-      i++;
-    }
-    if (paraLines.length > 0){
-      out.push(`<p>${renderInlineMarkdown(paraLines.join(" "))}</p>`);
-    }
-  }
-
-  return out.join("") || `<p></p>`;
 }
 
 function isConversationTurnNode(node){
@@ -872,6 +514,72 @@ function normalizeRichTurns(raw){
   out.sort((a, b) => Number(a.turnIdx) - Number(b.turnIdx));
   return out;
 }
+/*
+ * Canonical Markdown body: source -> markdown engine -> Render IR -> typed
+ * ContentRenderer -> H2O-owned DOM. No Markdown-generated HTML string, and no
+ * innerHTML on this path.
+ *
+ * The engine is constructed once. markdown-it instances are reusable, and
+ * rebuilding one per message would be a needless regression on long
+ * transcripts.
+ */
+let semanticEngineInstance = null;
+function semanticMarkdownEngine(){
+  if (semanticEngineInstance) return semanticEngineInstance;
+  const engineApi = Studio.Renderer && Studio.Renderer.markdownEngine;
+  if (!engineApi || typeof engineApi.formalBaseEngine !== "function") return null;
+  // Formal-base semantics stay the default; no dated provider profile is
+  // forced globally.
+  semanticEngineInstance = engineApi.formalBaseEngine();
+  return semanticEngineInstance;
+}
+
+// Deterministic whole-message verbatim fallback. The author's characters must
+// stay visible, and never as a partial semantic tree plus a legacy remainder.
+// The bespoke parser is NOT consulted: it no longer exists.
+function appendVerbatimBody(bodyEl, text){
+  while (bodyEl.firstChild) bodyEl.removeChild(bodyEl.firstChild);
+  const p = document.createElement("p");
+  p.appendChild(document.createTextNode(String(text ?? "")));
+  bodyEl.appendChild(p);
+  return false;
+}
+
+function renderSemanticBody(bodyEl, source){
+  const text = String(source ?? "");
+  const R = Studio.Renderer || {};
+  try {
+    const md = semanticMarkdownEngine();
+    const adapter = R.markdownIrAdapter;
+    const content = R.contentRenderer;
+    const ir = R.renderIR;
+    if (!md || !adapter || !content || !ir) throw new Error("markdown semantic runtime unavailable");
+
+    const parsed = adapter.markdownToBlocks(md, text);
+    if (!parsed || parsed.fallback === true || !Array.isArray(parsed.blocks)){
+      throw new Error("markdown adapter requested fallback");
+    }
+
+    // The accepted Render IR contract is the validation authority; T5 adds no
+    // second model or validation layer.
+    const doc = ir.createConversation({
+      id: "h2o.render",
+      messages: [{ id: "h2o.message", role: "assistant", blocks: parsed.blocks }],
+    });
+    const verdict = ir.validate(doc);
+    if (!verdict || verdict.ok !== true) throw new Error("render ir rejected the produced blocks");
+
+    // Built detached first, so a throw mid-render cannot leave a partial tree
+    // in the message body.
+    const fragment = content.renderBlocks(parsed.blocks, { document });
+    while (bodyEl.firstChild) bodyEl.removeChild(bodyEl.firstChild);
+    bodyEl.appendChild(fragment);
+    return true;
+  } catch {
+    return appendVerbatimBody(bodyEl, text);
+  }
+}
+
 function buildCanonicalMessage(role, text, meta = {}){
   const wrap = document.createElement("div");
   wrap.className = `cgMsg cgMsg--${role}`;
@@ -882,7 +590,7 @@ function buildCanonicalMessage(role, text, meta = {}){
 
   const bodyEl = document.createElement("div");
   bodyEl.className = "cgMsgBody";
-  bodyEl.innerHTML = renderTextAsChatGPTBlocks(role === "user" ? cleanReaderUserText(text) : text);
+  renderSemanticBody(bodyEl, role === "user" ? cleanReaderUserText(text) : text);
 
   wrap.appendChild(bodyEl);
 
@@ -1033,13 +741,13 @@ function applyEditedMessageBody(messageEl, role, text){
   if (!(messageEl instanceof Element)) return;
   const normalizedRole = normalizeRole(role);
   if (!normalizedRole) return;
-  messageEl.innerHTML = "";
+  while (messageEl.firstChild) messageEl.removeChild(messageEl.firstChild);
   messageEl.setAttribute(ROLE_ATTR, normalizedRole);
   messageEl.classList.add("cgMsg", `cgMsg--${normalizedRole}`, "cgMsg--edited");
 
   const bodyEl = document.createElement("div");
   bodyEl.className = "cgMsgBody";
-  bodyEl.innerHTML = renderTextAsChatGPTBlocks(text);
+  renderSemanticBody(bodyEl, text);
   messageEl.appendChild(bodyEl);
 }
 function buildCanonicalConversation(container, snap){

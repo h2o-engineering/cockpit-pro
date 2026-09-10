@@ -242,25 +242,39 @@ check('root lockfile resolves markdown-it 15.0.1 at the pinned npm integrity', (
 
 // ------------------------------------------------- no production admission
 
-check('no Stage-A carrier or Stage-B loader references the vendored engine', () => {
-  const guarded = [
-    'tools/product/studio/pack-studio.mjs',
-    'src-surfaces-base/studio/studio.html',
-    'tools/publish/lean-publisher.mjs',
-    'tools/publish/lean-activator.mjs',
+check('the carrier delivers, and the loader loads, exactly the admitted files', () => {
+  /* S1 asserted the inverse - that no carrier or loader named the engine -
+   * because Stage A and Stage B were forbidden then. Both have since been
+   * accepted and published, so the useful invariant is now the admitted state:
+   * the five delivered files, the four executed ones, and licence material
+   * that is delivered but never executed. */
+  const packer = fs.readFileSync(path.join(REPO_ROOT, 'tools/product/studio/pack-studio.mjs'), 'utf8');
+  const html = fs.readFileSync(path.join(REPO_ROOT, 'src-surfaces-base/studio/studio.html'), 'utf8');
+
+  const DELIVERED = [
+    'renderer/markdown/vendor/markdown-it/markdown-it.umd.min.js',
+    'renderer/markdown/vendor/markdown-it/THIRD_PARTY_NOTICES',
+    'renderer/markdown/h2o-gfm.v1.js',
+    'renderer/markdown/markdown-engine.v1.js',
+    'renderer/markdown/markdown-ir-adapter.v1.js',
   ];
-  let scanned = 0;
-  for (const rel of guarded) {
-    const abs = path.join(REPO_ROOT, rel);
-    if (!fs.existsSync(abs)) continue;
-    scanned += 1;
-    const text = fs.readFileSync(abs, 'utf8');
-    assert.ok(!/markdown-it|markdown-engine\.v1|markdown-ir-adapter\.v1|h2o-gfm\.v1/.test(text),
-      `${rel} must not reference the unwired markdown engine (Stage A/B are forbidden in S1)`);
+  for (const rel of DELIVERED) {
+    /* Once in the source packlist and once in the out packlist. */
+    assert.equal((packer.match(new RegExp(`"${rel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`, 'g')) || []).length, 2,
+      `${rel} must appear in both packlists exactly once each`);
   }
-  assert.equal(scanned, guarded.length,
-    `non-vacuity: expected to scan all ${guarded.length} carrier/loader files, scanned ${scanned}`);
-  console.log(`    (scanned ${scanned} production carrier/loader files)`);
+  /* PIN.json stays source-only: never delivered, never executed. */
+  assert.ok(!packer.includes('vendor/markdown-it/PIN.json'), 'PIN.json must not be delivered');
+  assert.doesNotMatch(html, /<script[^>]*PIN\.json/, 'PIN.json must not be a script');
+  /* Licence material ships but is not executable. */
+  assert.doesNotMatch(html, /<script[^>]*THIRD_PARTY_NOTICES/, 'THIRD_PARTY_NOTICES must not be a script');
+
+  const EXECUTED = DELIVERED.filter((rel) => rel.endsWith('.js'));
+  for (const rel of EXECUTED) {
+    assert.equal((html.match(new RegExp(`<script src="\\./${rel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`, 'g')) || []).length, 1,
+      `${rel} must be loaded exactly once by studio.html`);
+  }
+  assert.equal(EXECUTED.length, 4, 'exactly four markdown executables are admitted');
 });
 
 console.log(failures.length ? `FAIL ${failures.length} (passed ${checks.length})` : `PASS ${checks.length}`);

@@ -1323,6 +1323,13 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   "renderer/markdown/h2o-gfm.v1.js",
   "renderer/markdown/markdown-engine.v1.js",
   "renderer/markdown/markdown-ir-adapter.v1.js",
+
+  // Renderer typed semantic rendering (M03 P2 S2B T5) — LIVE. The Render IR
+  // contract is now consumed at runtime as the validation authority, and the
+  // ContentRenderer registry turns accepted blocks into H2O-owned DOM. Keep
+  // parallel to ARCHIVE_WORKBENCH_OUT_FILES below.
+  "renderer/semantic/render-ir.v1.js",
+  "renderer/content/content-renderer.v1.js",
 ]);
 export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   "studio.html",
@@ -1711,6 +1718,10 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   "renderer/markdown/h2o-gfm.v1.js",
   "renderer/markdown/markdown-engine.v1.js",
   "renderer/markdown/markdown-ir-adapter.v1.js",
+
+  // Renderer typed semantic rendering (M03 P2 S2B T5) — see SOURCE_FILES.
+  "renderer/semantic/render-ir.v1.js",
+  "renderer/content/content-renderer.v1.js",
 ]);
 
 function ensureDir(dirPath) {

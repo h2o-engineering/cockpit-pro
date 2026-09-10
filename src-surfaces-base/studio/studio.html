@@ -667,6 +667,13 @@
   <script src="./renderer/markdown/h2o-gfm.v1.js"></script>
   <script src="./renderer/markdown/markdown-engine.v1.js"></script>
   <script src="./renderer/markdown/markdown-ir-adapter.v1.js"></script>
+  <!-- Renderer typed semantic rendering (M03 P2 S2B T5) — LIVE. The canonical
+       Markdown message body now renders through these: the Render IR contract
+       validates parser output, and the ContentRenderer registry builds
+       H2O-owned DOM. No Markdown HTML string and no innerHTML on that path.
+       Must load before the Renderer that consumes them. -->
+  <script src="./renderer/semantic/render-ir.v1.js"></script>
+  <script src="./renderer/content/content-renderer.v1.js"></script>
   <!-- Canonical base transcript Renderer. Loads after the shared sanitizer
        and selector contract, and before studio.js Reader orchestration. -->
   <script src="./renderer/chat-renderer.studio.js"></script>

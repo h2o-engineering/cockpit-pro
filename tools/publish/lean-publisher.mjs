@@ -105,6 +105,8 @@ const STUDIO_REQUIRED_ORDER = Object.freeze([
   "renderer/markdown/h2o-gfm.v1.js",
   "renderer/markdown/markdown-engine.v1.js",
   "renderer/markdown/markdown-ir-adapter.v1.js",
+  "renderer/semantic/render-ir.v1.js",
+  "renderer/content/content-renderer.v1.js",
   "renderer/chat-renderer.studio.js",
   "studio.js",
 ]);

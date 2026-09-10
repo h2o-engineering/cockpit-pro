@@ -28,20 +28,22 @@ const MOBILE_REL = 'apps/studio/mobile/src/renderer/parse.ts';
 const CORPUS_REL = 'tools/validation/fixtures/studio-renderer-markdown/markdown-conformance.v1.json';
 const CONTRACT_REL = 'src-surfaces-base/studio/renderer/markdown/README.md';
 
-/* Frozen at the accepted P1 baseline. A changed digest is not automatically a
- * defect - it means a bespoke parser moved during the freeze window and needs a
- * governed decision, not a silent re-pin. */
-const WEB_FROZEN = Object.freeze({
-  renderInlineMarkdown: 'bfe386e08278824128994432e2292c02b8e934badc14b5c6ccc53e38b4fd8017',
-  countMarkdownIndent: 'a6d45d930e1a466eb4ceba8be797bd4c9470df2573ae8d776271c8784e98c40c',
-  parseMarkdownListLine: '8d3f21fbb384947a8f8be1c6f82b6c1bb3c4c92083cb56e3605e8e00acdc7383',
-  renderMarkdownList: 'd340f95768fd73df3f86f4284ad576d78b6a9f080f85f39880edc8c134ee713e',
-  splitMarkdownTableRow: '84a6fc1dff2175f910213ad4fd5d2289f7383310e113040b138c7670f7494a7c',
-  parseMarkdownTableAlign: '9653b37c6d5e2d49aeda08799d7ef68442b2328d18e70f7b2e91ba4f8041c894',
-  parseMarkdownTableStart: '1421ad29b539448130d368511e6632f847f530071bb24c9729675f015ecb58f0',
-  renderMarkdownTable: '939de74045298bda745741d43651424441f7125f0302ef77a770cc5f02d8acb2',
-  renderTextAsChatGPTBlocks: '15ed1b6ce0c7f502f452cf25f5777bd780919134b6095549d0b772b674e8de25',
-});
+/* T5 retired the Web bespoke parser: the canonical Markdown body now renders
+ * through the markdown engine, the Render IR contract and the typed
+ * ContentRenderer. These names must therefore be ABSENT, not merely frozen.
+ * The Mobile parser below stays frozen - its cutover is separate work. */
+const WEB_RETIRED = Object.freeze([
+  'renderInlineMarkdown',
+  'countMarkdownIndent',
+  'parseMarkdownListLine',
+  'renderMarkdownList',
+  'splitMarkdownTableRow',
+  'parseMarkdownTableAlign',
+  'parseMarkdownTableStart',
+  'renderMarkdownTable',
+  'renderTextAsChatGPTBlocks',
+]);
+
 const MOBILE_FROZEN = Object.freeze({
   parseMarkdown: 'fa891b8cd15c1766cbbd736967c32311c8ed461d4c9152e14ce6865874b2b6e5',
 });
@@ -79,13 +81,30 @@ function check(label, fn) {
   console.log(`✓ ${label}`);
 }
 
-check('Web bespoke Markdown parser functions are unchanged during the T4 freeze', () => {
-  for (const [name, expected] of Object.entries(WEB_FROZEN)) {
-    const actual = sha256(extractFunction(webSource, name));
-    assert.equal(actual, expected,
-      `${name} changed during the T4 freeze window; a semantic edit to the legacy parser needs a governed decision`);
+check('the Web bespoke Markdown parser is retired, not merely frozen', () => {
+  assert.equal(WEB_RETIRED.length, 9);
+  const survivors = WEB_RETIRED.filter((name) => new RegExp(`\\bfunction\\s+${name}\\s*\\(`).test(webSource));
+  assert.deepEqual(survivors, [],
+    `retired Web parser functions are still defined: ${survivors.join(', ')}`);
+  /* No call sites either - a retired parser must not be reachable. */
+  const called = WEB_RETIRED.filter((name) => new RegExp(`\\b${name}\\s*\\(`).test(webSource));
+  assert.deepEqual(called, [], `retired Web parser functions are still referenced: ${called.join(', ')}`);
+  /* The canonical Markdown body path must not build HTML strings. */
+  assert.doesNotMatch(webSource, /innerHTML\s*=\s*renderTextAsChatGPTBlocks/,
+    'the canonical Markdown body must not be assigned through innerHTML');
+});
+
+check('the retirement check is non-vacuous', () => {
+  /* RED: a re-introduced definition or call site must be detected. */
+  for (const name of WEB_RETIRED) {
+    assert.match(`function ${name}(x){}`, new RegExp(`\\bfunction\\s+${name}\\s*\\(`),
+      `the detector would miss a re-introduced ${name} definition`);
+    assert.match(`const out = ${name}(text);`, new RegExp(`\\b${name}\\s*\\(`),
+      `the detector would miss a re-introduced ${name} call site`);
   }
-  assert.equal(Object.keys(WEB_FROZEN).length, 9);
+  /* GREEN: the retired names must not appear merely because prose mentions
+   * Markdown - the file still legitimately discusses markdown rendering. */
+  assert.doesNotMatch('// markdown rendering notes', /\bfunction\s+renderInlineMarkdown\s*\(/);
 });
 
 check('Mobile bespoke Markdown parser is unchanged during the T4 freeze', () => {
@@ -95,11 +114,11 @@ check('Mobile bespoke Markdown parser is unchanged during the T4 freeze', () => 
   }
 });
 
-check('the freeze detects a semantic edit rather than passing vacuously', () => {
-  const original = extractFunction(webSource, 'renderTextAsChatGPTBlocks');
-  const mutated = original.replace('const out = [];', 'const out = []; /* edited */');
+check('the Mobile freeze detects a semantic edit rather than passing vacuously', () => {
+  const original = extractFunction(mobileSource, 'parseMarkdown', 'export function');
+  const mutated = `${original} /* edited */`;
   assert.notEqual(mutated, original, 'control mutation did not apply');
-  assert.notEqual(sha256(mutated), WEB_FROZEN.renderTextAsChatGPTBlocks,
+  assert.notEqual(sha256(mutated), MOBILE_FROZEN.parseMarkdown,
     'a changed parser body must produce a different digest');
 });
 
@@ -194,26 +213,63 @@ check('the admitted engine is contained in exactly its authorized locations', ()
   }
 });
 
-check('the legacy parsers and the delivery carriers stay free of the engine', () => {
-  /* The bounded dual-path window: the bespoke parsers keep working and must not
-   * start consuming the new engine, and no Stage-A carrier or Stage-B loader
-   * may reference it while both stages remain forbidden. */
-  const isolated = [WEB_REL, MOBILE_REL,
-    'src-surfaces-base/studio/studio.html',
-    'tools/product/studio/pack-studio.mjs',
-    'tools/publish/lean-publisher.mjs',
-    'tools/publish/lean-activator.mjs'];
-  let scanned = 0;
-  for (const rel of isolated) {
-    const abs = path.join(REPO_ROOT, rel);
-    assert.ok(fs.existsSync(abs), `expected isolated file is missing: ${rel}`);
-    scanned += 1;
-    const text = repo(rel);
-    assert.doesNotMatch(text, /markdown-it|markdown-engine\.v1|markdown-ir-adapter\.v1|h2o-gfm\.v1/,
-      `${rel} must not reference the unwired markdown engine`);
+check('the Mobile bespoke parser stays free of the Web engine', () => {
+  /* Mobile cutover is separate work: the Web engine must not leak into the
+   * Mobile parser while its freeze still stands. The Stage-A packlists,
+   * studio.html, the publisher and the activator all legitimately NAME these
+   * files - delivery and load admission are exactly what those files do - so
+   * they are deliberately not asserted here. Their real invariant is order
+   * agreement, checked below. */
+  assert.doesNotMatch(mobileSource,
+    /markdown-it|markdown-engine\.v1|markdown-ir-adapter\.v1|h2o-gfm\.v1|content-renderer\.v1/,
+    `${MOBILE_REL} must not reference the Web markdown engine`);
+});
+
+check('studio.html, publisher and activator agree on the semantic load order', () => {
+  const html = repo('src-surfaces-base/studio/studio.html');
+  /* Cache-bust queries are presentation, not identity - strip them, exactly as
+   * the packer's own ref parser does. */
+  const refs = [...html.matchAll(/<script\s+src="\.\/([^"]+)"/g)]
+    .map((m) => m[1].split('?')[0]);
+  const order = (source, rel) => {
+    const at = source.indexOf('const STUDIO_REQUIRED_ORDER = Object.freeze([');
+    assert.notEqual(at, -1, `${rel} has no STUDIO_REQUIRED_ORDER`);
+    const body = source.slice(at, source.indexOf(']);', at));
+    return [...body.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  };
+  const publisher = order(repo('tools/publish/lean-publisher.mjs'), 'lean-publisher.mjs');
+  const activator = order(repo('tools/publish/lean-activator.mjs'), 'lean-activator.mjs');
+  assert.deepEqual(publisher, activator, 'publisher and activator required order disagree');
+
+  const positions = publisher.map((name) => refs.indexOf(name));
+  const missing = publisher.filter((name, i) => positions[i] === -1);
+  assert.deepEqual(missing, [], `required-order entries absent from studio.html: ${missing.join(', ')}`);
+  for (let i = 1; i < positions.length; i += 1) {
+    assert.ok(positions[i] > positions[i - 1],
+      `studio.html loads ${publisher[i]} before ${publisher[i - 1]}, contradicting the required order`);
   }
-  assert.equal(scanned, isolated.length,
-    `non-vacuity: expected to scan ${isolated.length} isolated files, scanned ${scanned}`);
+
+  /* The semantic chain must actually be present and correctly sequenced. */
+  for (const name of [
+    'renderer/markdown/vendor/markdown-it/markdown-it.umd.min.js',
+    'renderer/markdown/h2o-gfm.v1.js',
+    'renderer/markdown/markdown-engine.v1.js',
+    'renderer/markdown/markdown-ir-adapter.v1.js',
+    'renderer/semantic/render-ir.v1.js',
+    'renderer/content/content-renderer.v1.js',
+    'renderer/chat-renderer.studio.js',
+  ]) {
+    assert.ok(publisher.includes(name), `required order is missing ${name}`);
+    assert.equal(refs.filter((r) => r === name).length, 1, `${name} must be loaded exactly once`);
+  }
+  /* The consumer loads last. */
+  assert.ok(refs.indexOf('renderer/chat-renderer.studio.js')
+    > refs.indexOf('renderer/content/content-renderer.v1.js'),
+    'the Renderer must load after the ContentRenderer it consumes');
+
+  /* Licence material is delivered, never executed. */
+  assert.doesNotMatch(html, /<script[^>]*THIRD_PARTY_NOTICES/, 'notices must not be a script');
+  assert.doesNotMatch(html, /<script[^>]*PIN\.json/, 'PIN.json must not be a script');
 });
 
 console.log(`PASS ${checks.length}`);
