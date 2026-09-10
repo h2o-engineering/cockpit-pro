@@ -13,6 +13,7 @@ use tauri_plugin_sql::{DbInstances, DbPool, Migration, MigrationKind};
 // Canonical predicate + constants + eligibility helpers used by future
 // preview (read-only) and cleanup (F5H.3b.0d / F5H.3b.1) code paths.
 // No DELETE statements live in this module; it is contract + read-only.
+pub mod build_identity;
 pub mod synthetic_marker;
 
 // F5H.3b.0d — true transactional synthetic cleanup dry-run. Runs the
@@ -2580,6 +2581,7 @@ macro_rules! h2o_studio_invoke_handler {
     () => {
         tauri::generate_handler![
             open_studio_devtools,
+            build_identity::h2o_studio_desktop_build_identity,
             f5g4_prove_tombstone_review_apply_transaction,
             f5g4_apply_reviewed_folder_binding_tombstone,
             preview_cleanup_synthetic_transactional,
@@ -2627,6 +2629,7 @@ macro_rules! h2o_studio_invoke_handler {
     () => {
         tauri::generate_handler![
             open_studio_devtools,
+            build_identity::h2o_studio_desktop_build_identity,
             f5g4_prove_tombstone_review_apply_transaction,
             f5g4_apply_reviewed_folder_binding_tombstone,
             preview_cleanup_synthetic_transactional,
