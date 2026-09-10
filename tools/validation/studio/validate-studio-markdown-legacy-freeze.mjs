@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// M03 P2 S2A T4 S0 — legacy Markdown parser freeze + engine-agnostic corpus shape.
+// M03 P2 S2A T4 S0/S1 — legacy Markdown parser freeze + engine containment.
 //
 // T4 has started, so neither bespoke Markdown implementation may gain new
 // behaviour during the bounded dual-path window. This pins a digest PER PARSER
@@ -7,8 +7,13 @@
 // files stay possible while a semantic edit to the parsers is detected.
 //
 // It also checks the shape of the engine-agnostic conformance corpus, so the
-// corpus cannot silently rot or acquire engine-specific token forms before an
-// engine is admitted.
+// corpus cannot silently rot or acquire engine-specific token forms.
+//
+// S1 transition: the engine-NEGATIVE controls ("no engine exists anywhere")
+// are replaced by exact CONTAINMENT assertions. markdown-it 15.0.1 is now
+// admitted and vendored, so the useful control is no longer "absent" but
+// "present in exactly the admitted places and nowhere else" - which is what
+// keeps the engine unwired while Stage A and Stage B remain forbidden.
 
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -141,7 +146,7 @@ check('corpus covers the representative constructs T4 must decide', () => {
   assert.match(serialized, /"hardBreak"/);
 });
 
-check('the T4 contract records the frozen decisions and names no accepted engine', () => {
+check('the T4 contract records the frozen decisions and the admitted engine', () => {
   assert.match(contract, /CommonMark 0\.31\.2/);
   assert.match(contract, /[Ff]ootnotes are outside T4/);
   assert.match(contract, /classifyUrl/);
@@ -150,24 +155,65 @@ check('the T4 contract records the frozen decisions and names no accepted engine
   assert.match(contract, /EXPLICITLY_OUT_OF_SCOPE_FEATURE/);
   assert.doesNotMatch(contract, /vocabularyVersion/,
     'the removed vocabulary-version axis must not reappear in the contract');
-  assert.match(contract, /pending governed admission/);
-  for (const engine of ['micromark', 'markdown-it', 'remark', 'marked']) {
+  /* S1: the admitted engine is recorded, and recorded as still unwired. */
+  assert.match(contract, /markdown-it 15\.0\.1/, 'contract must record the admitted engine');
+  assert.match(contract, /unwired/i, 'contract must record that the engine is not yet wired');
+  assert.doesNotMatch(contract, /pending governed admission/,
+    'engine selection is no longer pending - the contract must not still say so');
+  /* The engines that were NOT chosen must still not be named as accepted. */
+  for (const engine of ['micromark', 'remark', 'marked', 'commonmark']) {
     assert.doesNotMatch(contract, new RegExp(`(accepted|selected|admitted)\\s+${engine}`, 'i'),
-      `contract must not name ${engine} as accepted while selection is pending`);
+      `contract must not name ${engine} as accepted`);
   }
 });
 
-check('S0 introduced no engine dependency anywhere in the repository surface', () => {
+check('the admitted engine is contained in exactly its authorized locations', () => {
+  /* The engine is a Mobile package dependency and a Studio vendored artifact.
+   * It is deliberately NOT a root dependency on any surface. */
   const pkg = JSON.parse(repo('package.json'));
   for (const field of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
     for (const engine of ['micromark', 'markdown-it', 'remark', 'marked', 'commonmark']) {
       assert.equal(Object.prototype.hasOwnProperty.call(pkg[field] || {}, engine), false,
-        `${engine} must not be a package dependency during S0`);
+        `${engine} must not be a ROOT package dependency`);
     }
   }
+  /* Exact file set of the Renderer markdown directory. */
   const markdownDir = path.join(REPO_ROOT, 'src-surfaces-base/studio/renderer/markdown');
-  assert.deepEqual(fs.readdirSync(markdownDir).sort(), ['README.md'],
-    'S0 contributes contract documentation only - no parser, adapter or vendored engine');
+  assert.deepEqual(fs.readdirSync(markdownDir).sort(),
+    ['README.md', 'h2o-gfm.v1.js', 'markdown-engine.v1.js', 'markdown-ir-adapter.v1.js', 'vendor'],
+    'the markdown directory must hold exactly the contract, the three first-party sources and vendor/');
+  assert.deepEqual(fs.readdirSync(path.join(markdownDir, 'vendor')).sort(), ['markdown-it'],
+    'vendor/ must hold exactly the admitted engine');
+  assert.deepEqual(fs.readdirSync(path.join(markdownDir, 'vendor/markdown-it')).sort(),
+    ['PIN.json', 'THIRD_PARTY_NOTICES', 'markdown-it.umd.min.js'],
+    'the vendor directory file set is governed and exact');
+  /* No competing engine may be vendored beside it. */
+  for (const engine of ['micromark', 'remark', 'marked', 'commonmark']) {
+    assert.ok(!fs.existsSync(path.join(markdownDir, 'vendor', engine)),
+      `${engine} must not be vendored - one engine is admitted`);
+  }
+});
+
+check('the legacy parsers and the delivery carriers stay free of the engine', () => {
+  /* The bounded dual-path window: the bespoke parsers keep working and must not
+   * start consuming the new engine, and no Stage-A carrier or Stage-B loader
+   * may reference it while both stages remain forbidden. */
+  const isolated = [WEB_REL, MOBILE_REL,
+    'src-surfaces-base/studio/studio.html',
+    'tools/product/studio/pack-studio.mjs',
+    'tools/publish/lean-publisher.mjs',
+    'tools/publish/lean-activator.mjs'];
+  let scanned = 0;
+  for (const rel of isolated) {
+    const abs = path.join(REPO_ROOT, rel);
+    assert.ok(fs.existsSync(abs), `expected isolated file is missing: ${rel}`);
+    scanned += 1;
+    const text = repo(rel);
+    assert.doesNotMatch(text, /markdown-it|markdown-engine\.v1|markdown-ir-adapter\.v1|h2o-gfm\.v1/,
+      `${rel} must not reference the unwired markdown engine`);
+  }
+  assert.equal(scanned, isolated.length,
+    `non-vacuity: expected to scan ${isolated.length} isolated files, scanned ${scanned}`);
 });
 
 console.log(`PASS ${checks.length}`);

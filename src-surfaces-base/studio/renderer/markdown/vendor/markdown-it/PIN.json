@@ -1,0 +1,18 @@
+{
+  "name": "markdown-it",
+  "version": "15.0.1",
+  "artifact": "dist/browser/markdown-it.umd.min.js",
+  "sha256": "f9f377ca892291fbe32904e77a00c6e27e8f95c14f435a54c8cb6859b3d97692",
+  "npmIntegrity": "sha512-9/7gE95FNPkfUWrjJIoHZza2iLmuJlPD0UNMxPi7bxUrbCR525YZY0r+zyfes0dZI5ZZ/uNIXUJca0pJvtw41g==",
+  "source": "https://registry.npmjs.org/markdown-it/-/markdown-it-15.0.1.tgz",
+  "license": "MIT",
+  "incorporatedProjects": [
+    { "name": "entities", "version": "8.1.0", "license": "BSD-2-Clause" },
+    { "name": "linkify-it", "version": "6.1.0", "license": "MIT" },
+    { "name": "markdown-it", "version": "15.0.1", "license": "MIT" },
+    { "name": "mdurl", "version": "2.1.0", "license": "MIT" },
+    { "name": "punycode.js", "version": "2.3.1", "license": "MIT" },
+    { "name": "uc.micro", "version": "3.0.0", "license": "MIT" }
+  ],
+  "reviewedAt": "2026-09-10"
+}

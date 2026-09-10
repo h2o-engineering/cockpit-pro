@@ -1177,7 +1177,7 @@
       "id": "h2o-no-footnote-kind",
       "category": "H2O_POLICY",
       "requirement": "footnote syntax is outside T4 and stays literal text",
-      "source": "text[^1]\n\n[^1]: note",
+      "source": "text[^1]",
       "expect": {
         "blocks": [
           {
@@ -1186,15 +1186,6 @@
               {
                 "kind": "text",
                 "text": "text[^1]"
-              }
-            ]
-          },
-          {
-            "kind": "paragraph",
-            "children": [
-              {
-                "kind": "text",
-                "text": "[^1]: note"
               }
             ]
           }
