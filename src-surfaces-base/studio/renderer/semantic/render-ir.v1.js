@@ -20,7 +20,7 @@
 
   const SCHEMA = "h2o.renderer.render-ir";
   const SCHEMA_VERSION = 1;
-  const API_VERSION = "0.1.0-m03-foundation";
+  const API_VERSION = "0.2.0-m03-p2";
 
   const ROLES = Object.freeze(["user", "assistant", "system", "tool"]);
   const ROLE_SET = new Set(ROLES);
@@ -44,7 +44,16 @@
     "toolResult",
     "artifact",
     "opaqueProviderBlock",
+    "thematicBreak",
+    "hardBreak",
   ]);
+
+  /* hardBreak is a semantic inline break, so it is only meaningful inside an
+   * inline container. `children` is the inline collection in this model. */
+  const INLINE_ONLY_BLOCK_KINDS = new Set(["hardBreak"]);
+  const INLINE_COLLECTION = "children";
+  /* Both new kinds are pure separators: they carry no payload of their own. */
+  const EMPTY_PAYLOAD_BLOCK_KINDS = new Set(["thematicBreak", "hardBreak"]);
   const BLOCK_KIND_SET = new Set(CORE_BLOCK_KINDS);
 
   const CORE_MARK_KINDS = Object.freeze([
@@ -263,12 +272,18 @@
       else seen.add(value);
     }
 
-    function visitBlock(block, path) {
+    function visitBlock(block, path, inline) {
       if (!isPlainObject(block)) {
         errors.push(`${path} must be an object`);
         return;
       }
       if (!BLOCK_KIND_SET.has(block.kind)) errors.push(`${path}.kind is unsupported: ${asString(block.kind)}`);
+      if (INLINE_ONLY_BLOCK_KINDS.has(block.kind) && inline !== true) {
+        errors.push(`${path}.kind ${asString(block.kind)} is only valid inside an inline ${INLINE_COLLECTION} collection`);
+      }
+      if (EMPTY_PAYLOAD_BLOCK_KINDS.has(block.kind) && typeof block.text === "string") {
+        errors.push(`${path}.kind ${asString(block.kind)} must not carry a text payload`);
+      }
       noteKey(block.renderKey, path);
       if (Object.prototype.hasOwnProperty.call(block, "contentBlockId")) {
         errors.push(`${path} must not expose Renderer-owned contentBlockId`);
@@ -285,7 +300,7 @@
       for (const collection of ["children", "blocks", "items", "rows", "cells"]) {
         if (!Array.isArray(block[collection])) continue;
         for (let i = 0; i < block[collection].length; i += 1) {
-          visitBlock(block[collection][i], `${path}.${collection}[${i}]`);
+          visitBlock(block[collection][i], `${path}.${collection}[${i}]`, collection === INLINE_COLLECTION);
         }
       }
     }
@@ -301,7 +316,7 @@
         noteKey(message.renderKey, path);
         if (!ROLE_SET.has(message.role)) errors.push(`${path}.role is unsupported: ${asString(message.role)}`);
         if (!Array.isArray(message.blocks)) errors.push(`${path}.blocks must be an array`);
-        else for (let j = 0; j < message.blocks.length; j += 1) visitBlock(message.blocks[j], `${path}.blocks[${j}]`);
+        else for (let j = 0; j < message.blocks.length; j += 1) visitBlock(message.blocks[j], `${path}.blocks[${j}]`, false);
       }
     }
 

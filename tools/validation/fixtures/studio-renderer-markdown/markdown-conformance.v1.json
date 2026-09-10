@@ -1,0 +1,1319 @@
+{
+  "schema": "h2o.renderer.markdown-conformance",
+  "schemaVersion": 1,
+  "commonmark": "0.31.2",
+  "gfmScope": [
+    "tables",
+    "task-list items",
+    "strikethrough",
+    "extended autolink literals",
+    "disallowed raw HTML (tagfilter) observable semantics"
+  ],
+  "outOfScope": [
+    "footnotes",
+    "GitHub alerts",
+    "mermaid",
+    "math extensions",
+    "other remark/GitHub.com extensions"
+  ],
+  "note": "Engine-agnostic T4 conformance corpus. `expect.blocks` is a Render IR projection: kinds and salient payload only, with no render keys and no engine token forms, so any admitted engine's adapter can be measured against the same semantics. Categories: FORMAL_COMMONMARK, FORMAL_GFM, H2O_POLICY, CURRENT_BEHAVIOR_MIGRATION. This freezes structure and representative semantics; the full formal example set is expanded by the engine adapter slice.",
+  "cases": [
+    {
+      "id": "cm-heading-1-3",
+      "category": "FORMAL_COMMONMARK",
+      "requirement": "ATX headings levels 1-3",
+      "source": "# One\n## Two\n### Three",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "heading",
+            "level": 1,
+            "children": [
+              {
+                "kind": "text",
+                "text": "One"
+              }
+            ]
+          },
+          {
+            "kind": "heading",
+            "level": 2,
+            "children": [
+              {
+                "kind": "text",
+                "text": "Two"
+              }
+            ]
+          },
+          {
+            "kind": "heading",
+            "level": 3,
+            "children": [
+              {
+                "kind": "text",
+                "text": "Three"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "cm-heading-4-6",
+      "category": "FORMAL_COMMONMARK",
+      "requirement": "ATX headings levels 4-6 are real headings, not paragraphs",
+      "source": "#### Four\n##### Five\n###### Six",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "heading",
+            "level": 4,
+            "children": [
+              {
+                "kind": "text",
+                "text": "Four"
+              }
+            ]
+          },
+          {
+            "kind": "heading",
+            "level": 5,
+            "children": [
+              {
+                "kind": "text",
+                "text": "Five"
+              }
+            ]
+          },
+          {
+            "kind": "heading",
+            "level": 6,
+            "children": [
+              {
+                "kind": "text",
+                "text": "Six"
+              }
+            ]
+          }
+        ]
+      },
+      "note": "The Web bespoke parser only emits h1-h3; levels 4-6 are a known migration divergence."
+    },
+    {
+      "id": "cm-heading-7-not-heading",
+      "category": "FORMAL_COMMONMARK",
+      "requirement": "seven hashes is not a heading",
+      "source": "####### Seven",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "####### Seven"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "cm-thematic-break",
+      "category": "FORMAL_COMMONMARK",
+      "requirement": "thematic break forms",
+      "source": "a\n\n---\n\nb\n\n***\n\nc\n\n___\n\nd",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "a"
+              }
+            ]
+          },
+          {
+            "kind": "thematicBreak"
+          },
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "b"
+              }
+            ]
+          },
+          {
+            "kind": "thematicBreak"
+          },
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "c"
+              }
+            ]
+          },
+          {
+            "kind": "thematicBreak"
+          },
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "d"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "cm-hard-break-spaces",
+      "category": "FORMAL_COMMONMARK",
+      "requirement": "two trailing spaces produce a hard break",
+      "source": "one  \ntwo",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "one"
+              },
+              {
+                "kind": "hardBreak"
+              },
+              {
+                "kind": "text",
+                "text": "two"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "cm-hard-break-backslash",
+      "category": "FORMAL_COMMONMARK",
+      "requirement": "trailing backslash produces a hard break",
+      "source": "one\\\ntwo",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "one"
+              },
+              {
+                "kind": "hardBreak"
+              },
+              {
+                "kind": "text",
+                "text": "two"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "cm-soft-break",
+      "category": "FORMAL_COMMONMARK",
+      "requirement": "a plain newline is a soft break, not a hard break",
+      "source": "one\ntwo",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "one\ntwo"
+              }
+            ]
+          }
+        ]
+      },
+      "note": "Soft break joins inline content; it must not become a hardBreak."
+    },
+    {
+      "id": "cm-fenced-code-info",
+      "category": "FORMAL_COMMONMARK",
+      "requirement": "fenced code takes language from the first info word",
+      "source": "```js meta here\nconst a = 1;\n```",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "codeBlock",
+            "language": "js",
+            "info": "js meta here",
+            "code": "const a = 1;\n"
+          }
+        ]
+      }
+    },
+    {
+      "id": "cm-fenced-code-no-info",
+      "category": "FORMAL_COMMONMARK",
+      "requirement": "fenced code without info has no language",
+      "source": "```\nplain\n```",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "codeBlock",
+            "code": "plain\n"
+          }
+        ]
+      }
+    },
+    {
+      "id": "cm-fenced-code-literal",
+      "category": "FORMAL_COMMONMARK",
+      "requirement": "code content is literal, never re-parsed",
+      "source": "```\n# not a heading\n**not bold**\n```",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "codeBlock",
+            "code": "# not a heading\n**not bold**\n"
+          }
+        ]
+      }
+    },
+    {
+      "id": "cm-nested-list",
+      "category": "FORMAL_COMMONMARK",
+      "requirement": "nested unordered list structure",
+      "source": "- a\n  - b\n- c",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "tight": true,
+            "items": [
+              {
+                "kind": "listItem",
+                "blocks": [
+                  {
+                    "kind": "paragraph",
+                    "children": [
+                      {
+                        "kind": "text",
+                        "text": "a"
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "list",
+                    "ordered": false,
+                    "tight": true,
+                    "items": [
+                      {
+                        "kind": "listItem",
+                        "blocks": [
+                          {
+                            "kind": "paragraph",
+                            "children": [
+                              {
+                                "kind": "text",
+                                "text": "b"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "listItem",
+                "blocks": [
+                  {
+                    "kind": "paragraph",
+                    "children": [
+                      {
+                        "kind": "text",
+                        "text": "c"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "cm-ordered-start",
+      "category": "FORMAL_COMMONMARK",
+      "requirement": "ordered list preserves a non-1 start",
+      "source": "3. three\n4. four",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": true,
+            "start": 3,
+            "tight": true,
+            "items": [
+              {
+                "kind": "listItem",
+                "blocks": [
+                  {
+                    "kind": "paragraph",
+                    "children": [
+                      {
+                        "kind": "text",
+                        "text": "three"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "listItem",
+                "blocks": [
+                  {
+                    "kind": "paragraph",
+                    "children": [
+                      {
+                        "kind": "text",
+                        "text": "four"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "cm-blockquote",
+      "category": "FORMAL_COMMONMARK",
+      "requirement": "blockquote wraps block content",
+      "source": "> quoted\n> text",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "blockquote",
+            "blocks": [
+              {
+                "kind": "paragraph",
+                "children": [
+                  {
+                    "kind": "text",
+                    "text": "quoted\ntext"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "cm-escapes",
+      "category": "FORMAL_COMMONMARK",
+      "requirement": "backslash escapes are literal characters",
+      "source": "\\*not emphasis\\* and \\# not heading",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "*not emphasis* and # not heading"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "cm-entities",
+      "category": "FORMAL_COMMONMARK",
+      "requirement": "character references decode to their characters",
+      "source": "&amp; &lt; &copy; &#35;",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "& < © #"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "cm-link-title",
+      "category": "FORMAL_COMMONMARK",
+      "requirement": "inline link carries destination and optional title",
+      "source": "[text](https://example.test/a \"Title\")",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "text",
+                "marks": [
+                  {
+                    "kind": "link",
+                    "href": "https://example.test/a",
+                    "title": "Title"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "cm-image",
+      "category": "FORMAL_COMMONMARK",
+      "requirement": "image carries src, alt and optional title",
+      "source": "![alt text](https://example.test/i.png \"Pic\")",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "image",
+                "src": "https://example.test/i.png",
+                "alt": "alt text",
+                "title": "Pic"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "cm-emphasis",
+      "category": "FORMAL_COMMONMARK",
+      "requirement": "strong and emphasis marks",
+      "source": "**bold** and *italic* and `code`",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "bold",
+                "marks": [
+                  {
+                    "kind": "strong"
+                  }
+                ]
+              },
+              {
+                "kind": "text",
+                "text": " and "
+              },
+              {
+                "kind": "text",
+                "text": "italic",
+                "marks": [
+                  {
+                    "kind": "emphasis"
+                  }
+                ]
+              },
+              {
+                "kind": "text",
+                "text": " and "
+              },
+              {
+                "kind": "text",
+                "text": "code",
+                "marks": [
+                  {
+                    "kind": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "gfm-table-alignment",
+      "category": "FORMAL_GFM",
+      "requirement": "table carries per-column alignment",
+      "source": "| L | C | R |\n| :- | :-: | -: |\n| 1 | 2 | 3 |",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "table",
+            "align": [
+              "left",
+              "center",
+              "right"
+            ],
+            "rows": [
+              {
+                "kind": "tableRow",
+                "header": true,
+                "cells": [
+                  {
+                    "kind": "tableCell",
+                    "blocks": [
+                      {
+                        "kind": "paragraph",
+                        "children": [
+                          {
+                            "kind": "text",
+                            "text": "L"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "tableCell",
+                    "blocks": [
+                      {
+                        "kind": "paragraph",
+                        "children": [
+                          {
+                            "kind": "text",
+                            "text": "C"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "tableCell",
+                    "blocks": [
+                      {
+                        "kind": "paragraph",
+                        "children": [
+                          {
+                            "kind": "text",
+                            "text": "R"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "tableRow",
+                "header": false,
+                "cells": [
+                  {
+                    "kind": "tableCell",
+                    "blocks": [
+                      {
+                        "kind": "paragraph",
+                        "children": [
+                          {
+                            "kind": "text",
+                            "text": "1"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "tableCell",
+                    "blocks": [
+                      {
+                        "kind": "paragraph",
+                        "children": [
+                          {
+                            "kind": "text",
+                            "text": "2"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "tableCell",
+                    "blocks": [
+                      {
+                        "kind": "paragraph",
+                        "children": [
+                          {
+                            "kind": "text",
+                            "text": "3"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "gfm-table-ragged",
+      "category": "FORMAL_GFM",
+      "requirement": "short rows pad, long rows truncate to the header width",
+      "source": "| A | B |\n| - | - |\n| 1 |\n| 1 | 2 | 3 |",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "table",
+            "align": [
+              null,
+              null
+            ],
+            "rows": [
+              {
+                "kind": "tableRow",
+                "header": true,
+                "cells": [
+                  {
+                    "kind": "tableCell",
+                    "blocks": [
+                      {
+                        "kind": "paragraph",
+                        "children": [
+                          {
+                            "kind": "text",
+                            "text": "A"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "tableCell",
+                    "blocks": [
+                      {
+                        "kind": "paragraph",
+                        "children": [
+                          {
+                            "kind": "text",
+                            "text": "B"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "tableRow",
+                "header": false,
+                "cells": [
+                  {
+                    "kind": "tableCell",
+                    "blocks": [
+                      {
+                        "kind": "paragraph",
+                        "children": [
+                          {
+                            "kind": "text",
+                            "text": "1"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "tableCell",
+                    "blocks": []
+                  }
+                ]
+              },
+              {
+                "kind": "tableRow",
+                "header": false,
+                "cells": [
+                  {
+                    "kind": "tableCell",
+                    "blocks": [
+                      {
+                        "kind": "paragraph",
+                        "children": [
+                          {
+                            "kind": "text",
+                            "text": "1"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "tableCell",
+                    "blocks": [
+                      {
+                        "kind": "paragraph",
+                        "children": [
+                          {
+                            "kind": "text",
+                            "text": "2"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "gfm-task-list",
+      "category": "FORMAL_GFM",
+      "requirement": "task-list items carry checked state",
+      "source": "- [ ] todo\n- [x] done",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "tight": true,
+            "items": [
+              {
+                "kind": "listItem",
+                "checked": false,
+                "blocks": [
+                  {
+                    "kind": "paragraph",
+                    "children": [
+                      {
+                        "kind": "text",
+                        "text": "todo"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "listItem",
+                "checked": true,
+                "blocks": [
+                  {
+                    "kind": "paragraph",
+                    "children": [
+                      {
+                        "kind": "text",
+                        "text": "done"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "gfm-list-not-task",
+      "category": "FORMAL_GFM",
+      "requirement": "a plain list item has no checked property",
+      "source": "- plain",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "list",
+            "ordered": false,
+            "tight": true,
+            "items": [
+              {
+                "kind": "listItem",
+                "blocks": [
+                  {
+                    "kind": "paragraph",
+                    "children": [
+                      {
+                        "kind": "text",
+                        "text": "plain"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "gfm-strikethrough-double",
+      "category": "FORMAL_GFM",
+      "requirement": "double tilde strikethrough",
+      "source": "~~gone~~",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "gone",
+                "marks": [
+                  {
+                    "kind": "strikethrough"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "gfm-strikethrough-single",
+      "category": "FORMAL_GFM",
+      "requirement": "single tilde is also strikethrough in GFM",
+      "source": "~gone~",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "gone",
+                "marks": [
+                  {
+                    "kind": "strikethrough"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "gfm-autolink-www",
+      "category": "FORMAL_GFM",
+      "requirement": "www autolink literal gains an http destination",
+      "source": "visit www.example.test now",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "visit "
+              },
+              {
+                "kind": "text",
+                "text": "www.example.test",
+                "marks": [
+                  {
+                    "kind": "link",
+                    "href": "http://www.example.test"
+                  }
+                ]
+              },
+              {
+                "kind": "text",
+                "text": " now"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "gfm-autolink-http",
+      "category": "FORMAL_GFM",
+      "requirement": "bare http(s) autolink literal",
+      "source": "see https://example.test/x end",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "see "
+              },
+              {
+                "kind": "text",
+                "text": "https://example.test/x",
+                "marks": [
+                  {
+                    "kind": "link",
+                    "href": "https://example.test/x"
+                  }
+                ]
+              },
+              {
+                "kind": "text",
+                "text": " end"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "gfm-autolink-email",
+      "category": "FORMAL_GFM",
+      "requirement": "bare email autolink literal gains mailto",
+      "source": "mail a@b.test today",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "mail "
+              },
+              {
+                "kind": "text",
+                "text": "a@b.test",
+                "marks": [
+                  {
+                    "kind": "link",
+                    "href": "mailto:a@b.test"
+                  }
+                ]
+              },
+              {
+                "kind": "text",
+                "text": " today"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "gfm-autolink-protocol",
+      "category": "FORMAL_GFM",
+      "requirement": "angle-bracket protocol autolink",
+      "source": "<https://example.test/y>",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "https://example.test/y",
+                "marks": [
+                  {
+                    "kind": "link",
+                    "href": "https://example.test/y"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "gfm-autolink-trailing-punct",
+      "category": "FORMAL_GFM",
+      "requirement": "trailing punctuation stays outside the autolink",
+      "source": "see https://example.test/z.",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "see "
+              },
+              {
+                "kind": "text",
+                "text": "https://example.test/z",
+                "marks": [
+                  {
+                    "kind": "link",
+                    "href": "https://example.test/z"
+                  }
+                ]
+              },
+              {
+                "kind": "text",
+                "text": "."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "gfm-tagfilter",
+      "category": "FORMAL_GFM",
+      "requirement": "tagfiltered raw HTML is observable literal text, never markup",
+      "source": "<script>alert(1)</script>",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "<script>alert(1)</script>"
+              }
+            ]
+          }
+        ]
+      },
+      "note": "Observable semantics only: T4 represents raw HTML as literal text, so tagfilter needs no separate escape form."
+    },
+    {
+      "id": "h2o-raw-html-literal",
+      "category": "H2O_POLICY",
+      "requirement": "raw inline HTML is literal semantic text, never trusted markup",
+      "source": "a <b>bold?</b> c",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "a <b>bold?</b> c"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "h2o-raw-html-block-literal",
+      "category": "H2O_POLICY",
+      "requirement": "raw HTML blocks are literal semantic text",
+      "source": "<div onclick=\"evil()\">x</div>",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "<div onclick=\"evil()\">x</div>"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "h2o-url-not-classified",
+      "category": "H2O_POLICY",
+      "requirement": "IR carries the parser destination verbatim; admission is the S2B sink's job",
+      "source": "[x](javascript:alert(1))",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "kind": "link",
+                    "href": "javascript:alert(1)"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "note": "The IR must NOT drop or rewrite this. sanitizerPolicy.classifyUrl rejects it at the sink."
+    },
+    {
+      "id": "h2o-verbatim-fallback",
+      "category": "H2O_POLICY",
+      "requirement": "characters are never lost when semantics are unavailable",
+      "source": "|| not a table ||",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "|| not a table ||"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "h2o-no-footnote-kind",
+      "category": "H2O_POLICY",
+      "requirement": "footnote syntax is outside T4 and stays literal text",
+      "source": "text[^1]\n\n[^1]: note",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "text[^1]"
+              }
+            ]
+          },
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "[^1]: note"
+              }
+            ]
+          }
+        ]
+      },
+      "note": "Footnotes are explicitly outside T4; no footnote kind exists in the vocabulary."
+    },
+    {
+      "id": "mig-heading-4-6-divergence",
+      "category": "CURRENT_BEHAVIOR_MIGRATION",
+      "requirement": "current Web parser caps headings at h3",
+      "source": "#### Four",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "heading",
+            "level": 4,
+            "children": [
+              {
+                "kind": "text",
+                "text": "Four"
+              }
+            ]
+          }
+        ]
+      },
+      "note": "Divergence: renderTextAsChatGPTBlocks emits h1-h3 only. T4 requires level 4."
+    },
+    {
+      "id": "mig-single-tilde-divergence",
+      "category": "CURRENT_BEHAVIOR_MIGRATION",
+      "requirement": "current parsers do not treat single tilde as strikethrough",
+      "source": "~gone~",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "gone",
+                "marks": [
+                  {
+                    "kind": "strikethrough"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "note": "Divergence: bespoke parsers leave single-tilde literal."
+    },
+    {
+      "id": "mig-autolink-divergence",
+      "category": "CURRENT_BEHAVIOR_MIGRATION",
+      "requirement": "current parsers do not linkify bare literals",
+      "source": "www.example.test",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "www.example.test",
+                "marks": [
+                  {
+                    "kind": "link",
+                    "href": "http://www.example.test"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "note": "Divergence: bespoke parsers require explicit [text](url) syntax."
+    },
+    {
+      "id": "mig-hard-break-divergence",
+      "category": "CURRENT_BEHAVIOR_MIGRATION",
+      "requirement": "current parsers have no hard-break concept",
+      "source": "one  \ntwo",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "paragraph",
+            "children": [
+              {
+                "kind": "text",
+                "text": "one"
+              },
+              {
+                "kind": "hardBreak"
+              },
+              {
+                "kind": "text",
+                "text": "two"
+              }
+            ]
+          }
+        ]
+      },
+      "note": "Divergence: bespoke parsers collapse this to a soft join."
+    },
+    {
+      "id": "mig-thematic-break",
+      "category": "CURRENT_BEHAVIOR_MIGRATION",
+      "requirement": "current Web parser already renders a horizontal rule",
+      "source": "---",
+      "expect": {
+        "blocks": [
+          {
+            "kind": "thematicBreak"
+          }
+        ]
+      },
+      "note": "Alignment: existing behavior maps onto the new thematicBreak kind."
+    }
+  ]
+}
