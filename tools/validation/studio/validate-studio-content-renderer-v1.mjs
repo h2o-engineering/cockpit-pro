@@ -450,9 +450,10 @@ check('studio.css keeps only structural .cgMsg sizing and the rich halves of the
   assert.equal(narrowRich.length, 1, 'E: the narrow rich user-host rule stays global');
   assert.deepEqual(narrowRich[0].declarations, NARROW_USER_OVERRIDE);
   assert.equal(narrowRich[0].selector.includes('.cgMsg--user'), false, 'C: the canonical member left the global narrow rule');
-  /* I: Reader-route, edit-state and rich rules were not absorbed. */
+  /* I: Reader-route and interactive edit-mode rules were not absorbed (the
+   * persisted .cgMsg--edited accent moved in S3C slice E). */
   assert.ok(rules.some((r) => members(r).includes('body[data-route="reader"] .cgMsg--user')), 'I: Reader-route user rule remains global');
-  assert.ok(rules.some((r) => r.selector === '.cgMsg--edited'), 'I: edit-state rule remains global');
+  assert.equal(rules.some((r) => members(r).some((m) => m.includes('.cgMsg--edited'))), false, 'I: the persisted edit accent no longer lives in studio.css (slice E)');
   assert.ok(rules.some((r) => members(r).includes('.wbReader[data-edit-mode="on"] [data-turn].wbTurn--editing .cgMsg--user')), 'I: edit-mode user rule remains global');
   assert.ok(rules.some((r) => r.selector === '.cgMsg--rich'), 'stale .cgMsg--rich left untouched in this slice');
 });
@@ -520,12 +521,13 @@ check('studio.css keeps the deferred rich rules, the prose/Tailwind layer, Reade
   const readerRich = rules.filter((r) => members(r).some((m) => m.startsWith('body[data-route="reader"] .wbRichRoot') && /cgTurn--user|user-message-bubble-color|data-message-author-role="user"/.test(m)));
   assert.ok(readerRich.length >= 4, `D: Reader-route rich alignment rules remain global (found ${readerRich.length})`);
   assert.ok(readerRich.every((r) => Object.values(r.declarations).every((v) => /!important/.test(v))), 'D: Reader-route rich alignment declarations keep !important');
-  /* E + F: attachment and edit-state rules remain global. */
-  /* wbTurn--edited carries no rule in studio.css; the edit cluster's global
-   * rules are .cgMsg--edited and the edit-mode .wbTurn--editing block. */
-  for (const sel of ['.cgUserAttachmentGrid', '.cgUserAttachmentCard', '.cgMsg--edited', '.wbTurn--editing', '[data-edit-mode="on"]']) {
+  /* E + F: attachment and interactive edit-mode rules remain global. The
+   * persisted .cgMsg--edited accent is profile-owned since S3C slice E;
+   * wbTurn--edited carries no rule anywhere (state hook). */
+  for (const sel of ['.cgUserAttachmentGrid', '.cgUserAttachmentCard', '.wbTurn--editing', '[data-edit-mode="on"]']) {
     assert.ok(rules.some((r) => members(r).some((m) => m.includes(sel))), `${sel} rules remain global`);
   }
+  assert.equal(rules.some((r) => members(r).some((m) => m.includes('.wbTurn--edited'))), false, 'wbTurn--edited has no studio.css rule');
 });
 
 /* S3C slice D: the provider-content compatibility layer is one ordered unit in
@@ -782,10 +784,17 @@ if (!chromium) {
      * `.mt-2` share specificity (0,1,0), so the later rule wins. */
     const rich = document.createElement('div'); rich.className = 'wbRichRoot';
     const richHeading = document.createElement('h2'); richHeading.className = 'leading-tight mt-2'; richHeading.textContent = 'h'; rich.appendChild(richHeading);
-    parent.appendChild(node); parent.appendChild(prose); parent.appendChild(rich);
-    const cs = getComputedStyle(node); const hs = getComputedStyle(inner); const rs = getComputedStyle(richHeading);
-    const out = { display: cs.display, fontSize: cs.fontSize, borderRadius: cs.borderRadius, position: cs.position, color: cs.color, headingLineHeight: hs.lineHeight, headingMarginTop: hs.marginTop, headingFontSize: hs.fontSize, richHeadingFontSize: rs.fontSize, richHeadingLineHeight: rs.lineHeight, richHeadingMarginTop: rs.marginTop, tokenText: getComputedStyle(node).getPropertyValue('--token-text-primary').trim() };
-    node.remove(); prose.remove(); rich.remove(); return out;
+    /* S3C slice E: the persisted edit accent (profile hook cgMsg--edited) and
+     * the unstyled rich edited-turn state hook. */
+    const edited = document.createElement('div'); edited.className = 'cgMsg cgMsg--assistant cgMsg--edited'; edited.textContent = 'edited';
+    const turnPlain = document.createElement('div'); turnPlain.className = 'cgTurn cgTurn--assistant wbTurn wbTurn--rich wbTurn--assistant';
+    const turnEdited = document.createElement('div'); turnEdited.className = 'cgTurn cgTurn--assistant wbTurn wbTurn--rich wbTurn--assistant wbTurn--edited';
+    parent.appendChild(node); parent.appendChild(prose); parent.appendChild(rich); parent.appendChild(edited); parent.appendChild(turnPlain); parent.appendChild(turnEdited);
+    const cs = getComputedStyle(node); const hs = getComputedStyle(inner); const rs = getComputedStyle(richHeading); const es = getComputedStyle(edited);
+    const turnDelta = (() => { const a = getComputedStyle(turnPlain), b = getComputedStyle(turnEdited); const diff = []; for (const k of Array.from(a)) if (a.getPropertyValue(k) !== b.getPropertyValue(k)) diff.push(k); return diff; })();
+    const out = { display: cs.display, fontSize: cs.fontSize, borderRadius: cs.borderRadius, position: cs.position, color: cs.color, headingLineHeight: hs.lineHeight, headingMarginTop: hs.marginTop, headingFontSize: hs.fontSize, richHeadingFontSize: rs.fontSize, richHeadingLineHeight: rs.lineHeight, richHeadingMarginTop: rs.marginTop, tokenText: getComputedStyle(node).getPropertyValue('--token-text-primary').trim(),
+      editedBorderLeftWidth: es.borderLeftWidth, editedBorderLeftColor: es.borderLeftColor, editedPaddingLeft: es.paddingLeft, editedMarginLeft: es.marginLeft, editedTurnDelta: turnDelta };
+    node.remove(); prose.remove(); rich.remove(); edited.remove(); turnPlain.remove(); turnEdited.remove(); return out;
   };
   const scoping = { inside: await page.evaluate(SCOPE_PROBE, 'host'), outside: await page.evaluate(SCOPE_PROBE, 'unscoped') };
   const cascade = { normal: await page.evaluate(PROBE), richNormal: await page.evaluate(RICH_PROBE) };
@@ -828,6 +837,15 @@ if (!chromium) {
     assert.notEqual(o.headingMarginTop, i.headingMarginTop, 'negative scope: prose heading margin does not apply outside the profile root');
     assert.equal(o.richHeadingFontSize, '24px', 'negative scope: the rich baseline heading size is not global');
     assert.equal(o.richHeadingLineHeight, 'normal', 'negative scope: neither the rich baseline nor .leading-tight applies outside the profile root');
+  });
+
+  check('persisted edit accent applies only beneath the profile-marked root and the edited-turn hook stays unstyled (S3C slice E)', () => {
+    const i = scoping.inside, o = scoping.outside;
+    assert.equal(i.editedBorderLeftWidth, '2px'); assert.equal(i.editedBorderLeftColor, 'rgba(122, 182, 255, 0.28)'); assert.equal(i.editedPaddingLeft, '12px'); assert.equal(i.editedMarginLeft, '-14px');
+    assert.equal(o.editedBorderLeftWidth, '0px', 'negative scope: no edit accent outside the profile root');
+    assert.equal(o.editedPaddingLeft, '0px'); assert.equal(o.editedMarginLeft, '0px');
+    assert.deepEqual(i.editedTurnDelta, [], 'G: wbTurn--edited changes no computed property (state hook without presentation)');
+    assert.deepEqual(o.editedTurnDelta, []);
   });
 
   check('rich user bubble skin and its narrow override cascade correctly from the profile stylesheet (S3C slice C)', () => {

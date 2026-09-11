@@ -22,6 +22,7 @@ const ARCHIVE_REL = 'src-surfaces-base/studio/S0D3a. 🎬 Transcript Archive Eng
 const SANITIZER_REL = 'src-surfaces-base/studio/platform/html-sanitizer.js';
 const PRESENTATION_PROFILE_REL = 'src-surfaces-base/studio/renderer/presentation/presentation-profile.v1.js';
 const PRESENTATION_CSS_REL = 'src-surfaces-base/studio/renderer/presentation/chatgpt-reference.v1.css';
+const STUDIO_CSS_REL = 'src-surfaces-base/studio/studio.css';
 /* Semantic sources: parse/ingress/IR. The content renderer is the DOM
  * presentation sink downstream of accepted IR and may consult the profile. */
 const SEMANTIC_SOURCE_RELS = Object.freeze([
@@ -1478,6 +1479,109 @@ function validateRichShellPresentationOwnership() {
   assert.equal(messageEl.getAttribute('data-message-author-role'), 'user');
 }
 
+/* S3C slice E: persisted edit presentation vs interactive Reader edit mode.
+ * The Renderer-projected edited message host (profile hook cgMsg--edited) is
+ * skinned by the profile stylesheet; the rich edited-turn hook stays an
+ * unstyled state hook; the temporary editing interaction (wbTurn--editing,
+ * data-edit-mode, contenteditable, is-ribbon-selected) stays global. */
+function validatePersistedEditPresentationOwnership() {
+  const scope = ':where([data-h2o-presentation-profile="chatgpt-reference"])';
+  const profileCss = readRepo(PRESENTATION_CSS_REL).replace(/\/\*[\s\S]*?\*\//g, ' ');
+  const studioCss = readRepo(STUDIO_CSS_REL).replace(/\/\*[\s\S]*?\*\//g, ' ');
+  /* Minimal rule reader: [{ selector (whitespace-normalized), decls }] in source order; @-preludes are skipped. */
+  const rulesOf = (css) => {
+    const out = []; let buf = ''; let i = 0;
+    while (i < css.length) {
+      const ch = css[i];
+      if (ch === '{') {
+        const sel = buf.trim(); buf = '';
+        if (sel.startsWith('@')) { i += 1; continue; }
+        const end = css.indexOf('}', i);
+        out.push({ selector: sel.replace(/\s+/g, ' '), decls: css.slice(i + 1, end).split(';').map((d) => d.replace(/\s+/g, ' ').trim()).filter(Boolean) });
+        i = end + 1; continue;
+      }
+      if (ch === '}') { buf = ''; i += 1; continue; }
+      buf += ch; i += 1;
+    }
+    return out;
+  };
+  const selectorsOf = (css) => rulesOf(css).map((r) => r.selector);
+  const declarationsOf = (css, selector) => { const hit = rulesOf(css).find((r) => r.selector === selector); return hit ? hit.decls : null; };
+  const context = vm.createContext({});
+  const profile = installPresentationProfile(context).reference();
+  const [messageHook] = profile.editedMessageClasses();
+  const [turnHook] = profile.editedTurnClasses();
+  /* A + F: the hooks are profile property and the Renderer emits them only through the profile. */
+  assert.equal(messageHook, 'cgMsg--edited', 'A: persisted edited-message hook');
+  assert.equal(turnHook, 'wbTurn--edited', 'F: persisted edited-turn hook');
+  assert.match(extractFunction(rendererSource, 'applyEditedMessageBody'), /\.\.\.profile\.editedMessageClasses\(\)/, 'A: the edited host takes the hook from the profile');
+  assert.match(rendererSource, /host\.classList\.add\(\.\.\.activePresentationProfile\(\)\.editedTurnClasses\(\)\)/, 'F: the rich edited turn takes the hook from the profile');
+  assert.doesNotMatch(rendererSource, /cgMsg--edited|wbTurn--edited/, 'J: the Renderer carries no edit-state class literal (profile-only emission)');
+  assert.doesNotMatch(readRepo(CONTENT_RENDERER_REL), /cgMsg--edited|wbTurn--edited|wbTurn--editing/, 'J: the ContentRenderer knows no edit-state vocabulary');
+  /* B + C + D: the accent lives in the profile stylesheet, scoped, declarations verbatim. */
+  const scopedSelector = `${scope} .${messageHook}`;
+  const profileSelectors = selectorsOf(profileCss);
+  assert.ok(profileSelectors.includes(scopedSelector), 'B: cgMsg--edited presentation lives in the profile stylesheet');
+  assert.deepEqual(declarationsOf(profileCss, scopedSelector), ['border-left: 2px solid rgba(122, 182, 255, .28)', 'padding-left: 12px', 'margin-left: -14px'], 'C: declarations match the accepted baseline exactly');
+  assert.equal(profileSelectors.filter((sel) => sel.includes(messageHook)).length, 1, 'D: exactly one profile rule targets the hook');
+  const members = (selector) => { const out = []; let depth = 0; let cur = ''; for (const ch of selector) { if (ch === '(') depth += 1; if (ch === ')') depth -= 1; if (ch === ',' && depth === 0) { out.push(cur.trim()); cur = ''; } else cur += ch; } out.push(cur.trim()); return out; };
+  for (const sel of profileSelectors.flatMap(members)) assert.ok(sel.startsWith(scope), `D: profile-root scoped member: ${sel}`);
+  /* The accepted cascade order keeps the accent before the user bubble skin (equal specificity). */
+  assert.ok(profileSelectors.indexOf(scopedSelector) < profileSelectors.indexOf(`${scope} .cgMsg--user`), 'C: accent ordered before the user bubble skin, as in the accepted baseline');
+  assert.ok(profileSelectors.indexOf(`${scope} .cgMsg`) < profileSelectors.indexOf(scopedSelector), 'C: accent ordered after the base message skin');
+  /* E: global studio.css no longer declares the accent (no fallback duplicate). */
+  const studioSelectors = selectorsOf(studioCss);
+  assert.equal(studioSelectors.filter((sel) => sel.includes(messageHook)).length, 0, 'E: studio.css declares no cgMsg--edited presentation');
+  /* G: the edited-turn hook stays unstyled in both sheets (a state hook, not a look). */
+  assert.equal(studioSelectors.filter((sel) => sel.includes(turnHook)).length, 0, 'G: no wbTurn--edited rule in studio.css');
+  assert.equal(profileSelectors.filter((sel) => sel.includes(turnHook)).length, 0, 'G: no wbTurn--edited rule in the profile stylesheet');
+  /* H + I: interactive Reader edit-mode integration stays global and declaration-equivalent. */
+  const interactive = {
+    '.wbTurn--editing .wbEditBtn': ['display: none'],
+    '.wbEditWrap': null,
+    '.wbReader[data-edit-mode="on"] [data-turn].wbTurn--editing': ['background:transparent', 'outline:none', 'box-shadow:none', 'border-radius:0'],
+    '.wbReader[data-edit-mode="on"] [data-turn].wbTurn--editing [contenteditable="true"]': ['outline:none !important', 'caret-color:var(--wb-text, currentColor)', 'cursor:text', 'background:rgba(122,182,255,.04)', 'border-radius:6px', 'transition:background-color 180ms ease'],
+    '.wbReader[data-edit-mode="on"] [data-turn].is-ribbon-selected': ['background:transparent !important'],
+    '.wbReader[data-edit-mode="on"] [data-turn].is-ribbon-selected::before, .wbReader[data-edit-mode="on"] [data-turn].is-ribbon-selected::after': ['display:none !important'],
+    '.wbReader[data-edit-mode="on"] [data-turn].wbTurn--editing .cgMsg--user, .wbReader[data-edit-mode="on"] [data-turn].wbTurn--editing [data-message-author-role="user"]': ['width:100% !important', 'max-width:none !important', 'background:transparent !important', 'padding:0 !important'],
+    '.wbRibbonAction[data-action-id="edit-mode"][aria-pressed="true"]': null,
+  };
+  for (const [sel, decls] of Object.entries(interactive)) {
+    assert.ok(studioSelectors.includes(sel), `H: interactive edit-mode rule stays global: ${sel}`);
+    if (decls) assert.deepEqual(declarationsOf(studioCss, sel), decls, `H: declaration-equivalent: ${sel}`);
+  }
+  for (const token of ['wbTurn--editing', 'wbEditWrap', 'wbEditBtn', 'data-edit-mode', 'contenteditable', 'is-ribbon-selected', 'wbRibbonAction']) {
+    assert.ok(!profileSelectors.some((sel) => sel.includes(token)), `I: the profile stylesheet owns no interactive edit-mode selector (${token})`);
+  }
+  /* Executed: the persisted edit projection still emits exactly the profile hooks. */
+  const seams = vm.createContext({
+    document: { createElement: (tagName) => new FakeDomElement(tagName) },
+    Element: FakeDomElement, String, Number, Set, Array, Object,
+    TESTID_ATTR: 'data-testid', TURN_TESTID: 'conversation-turn', TURNS_TESTID: 'conversation-turns',
+    ROLE_ATTR: 'data-message-author-role', MESSAGE_ID_ATTR: 'data-message-id', TURN_ID_ATTR: 'data-turn-id', ROLES: roleContract,
+    stampReplayTurnMeta: () => {},
+  });
+  Object.assign(seams, presentationProfileGlobals(seams));
+  vm.runInContext([
+    extractFunction(rendererSource, 'activePresentationProfile'),
+    extractFunction(rendererSource, 'normalizeRole'),
+    extractFunction(rendererSource, 'getAccessibleRoleLabel'),
+    extractFunction(rendererSource, 'applyTurnAccessibility'),
+    extractFunction(rendererSource, 'claimReplayIdentity'),
+    extractFunction(rendererSource, 'buildTurnShell'),
+    extractFunction(rendererSource, 'buildMessageHost'),
+    'function renderSemanticBody(bodyEl){ bodyEl.appendChild(document.createElement("p")); }',
+    extractFunction(rendererSource, 'applyEditedMessageBody'),
+    'this.api = { buildTurnShell, buildMessageHost, applyEditedMessageBody };',
+  ].join('\n'), seams);
+  const host = seams.api.buildMessageHost('assistant', 'canonical', {});
+  seams.api.applyEditedMessageBody(host, 'assistant', 'edited text');
+  assert.equal(host.className, `cgMsg cgMsg--assistant ${messageHook}`, 'A: edited canonical host = structural + role modifier + profile edit hook');
+  const turn = seams.api.buildTurnShell('assistant', 'rich', { turnNo: 2 });
+  turn.classList.add(...profile.editedTurnClasses());
+  assert.equal(turn.className, `cgTurn cgTurn--assistant wbTurn wbTurn--rich wbTurn--assistant ${turnHook}`, 'F: edited rich turn carries the state hook beside the shell classes');
+}
+
 function validateExtractedRendererBoundary() {
   const sanitizerTag = '<script src="./platform/html-sanitizer.js"></script>';
   const rendererTag = '<script src="./renderer/chat-renderer.studio.js"></script>';
@@ -1508,6 +1612,7 @@ validateStructuralShellAuthority();
 validateRichUserBubbleAuthority();
 validatePresentationProfileContract();
 validateRichShellPresentationOwnership();
+validatePersistedEditPresentationOwnership();
 validateExtractedRendererBoundary();
 
 console.log('Studio renderer contract repair validation passed');

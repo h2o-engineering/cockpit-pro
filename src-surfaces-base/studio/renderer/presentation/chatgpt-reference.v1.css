@@ -1,5 +1,5 @@
 /*
- * @version 1.0.3
+ * @version 1.0.4
  * H2O Studio Renderer — chatgpt-reference PresentationProfile stylesheet.
  *
  * Owner:   L-STUDIO-RENDERER
@@ -43,6 +43,18 @@
    host. Structural sizing (.cgMsg min-width) stays in studio.css. */
 :where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsg{
   color:var(--wb-text);
+}
+
+/* Persisted edit result: the Renderer-projected edited message host carries
+   the profile's editedMessageClasses() hook. Ordered before the user bubble
+   skin exactly as in the accepted global cascade. The interactive editing
+   state (wbTurn--editing, data-edit-mode, contenteditable) is Reader
+   authoring integration and stays in studio.css; the rich edited-turn hook
+   is a state hook without presentation. */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsg--edited{
+  border-left: 2px solid rgba(122, 182, 255, .28);
+  padding-left: 12px;
+  margin-left: -14px;
 }
 
 :where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsg--user{
