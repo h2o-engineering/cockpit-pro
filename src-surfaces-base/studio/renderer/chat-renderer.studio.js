@@ -999,7 +999,8 @@ function applyEditedMessageBody(messageEl, role, text){
   if (!normalizedRole) return;
   while (messageEl.firstChild) messageEl.removeChild(messageEl.firstChild);
   messageEl.setAttribute(ROLE_ATTR, normalizedRole);
-  messageEl.classList.add("cgMsg", ...activePresentationProfile().messageClasses(normalizedRole, "canonical"), "cgMsg--edited");
+  const profile = activePresentationProfile();
+  messageEl.classList.add("cgMsg", ...profile.messageClasses(normalizedRole, "canonical"), ...profile.editedMessageClasses());
 
   const bodyEl = document.createElement("div");
   bodyEl.className = "cgMsgBody";
@@ -1100,7 +1101,7 @@ function mountRichTurns(container, richTurns, snapshotId, snap, options){
         ? options.getEditOverride(sid, turn.turnIdx)
         : null;
       if (override !== null && role === "assistant"){
-        host.classList.add("wbTurn--edited");
+        host.classList.add(...activePresentationProfile().editedTurnClasses());
         applyEditedMessageBody(messageEl, role, override);
       }
 

@@ -21,14 +21,16 @@ const STUDIO_HTML_REL = 'src-surfaces-base/studio/studio.html';
 const ARCHIVE_REL = 'src-surfaces-base/studio/S0D3a. 🎬 Transcript Archive Engine - Studio.js';
 const SANITIZER_REL = 'src-surfaces-base/studio/platform/html-sanitizer.js';
 const PRESENTATION_PROFILE_REL = 'src-surfaces-base/studio/renderer/presentation/presentation-profile.v1.js';
+/* Semantic sources: parse/ingress/IR. The content renderer is the DOM
+ * presentation sink downstream of accepted IR and may consult the profile. */
 const SEMANTIC_SOURCE_RELS = Object.freeze([
   'src-surfaces-base/studio/renderer/semantic/render-ir.v1.js',
   'src-surfaces-base/studio/renderer/semantic/semantic-ingress.v1.js',
   'src-surfaces-base/studio/renderer/markdown/h2o-gfm.v1.js',
   'src-surfaces-base/studio/renderer/markdown/markdown-engine.v1.js',
   'src-surfaces-base/studio/renderer/markdown/markdown-ir-adapter.v1.js',
-  'src-surfaces-base/studio/renderer/content/content-renderer.v1.js',
 ]);
+const CONTENT_RENDERER_REL = 'src-surfaces-base/studio/renderer/content/content-renderer.v1.js';
 
 function readRepo(rel) {
   return fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');
@@ -311,7 +313,8 @@ class FakeElement {
     this.message = null;
     this.removed = false;
     this.appended = [];
-    this.classList = { add() {} };
+    this.addedClasses = [];
+    this.classList = { add: (...values) => { this.addedClasses.push(...values); } };
   }
   appendChild(node) { this.appended.push(node); return node; }
   remove() { this.removed = true; }
@@ -362,7 +365,11 @@ function createRichMountHarness() {
       return !(host.appended[0] && host.appended[0].html === 'UNADOPTABLE');
     },
   };
-  const { fn } = loadFunction(rendererSource, 'mountRichTurns', globals);
+  /* S3B: the edited-turn presentation hook is read from the real profile. */
+  const profileContext = vm.createContext({});
+  Object.assign(globals, presentationProfileGlobals(profileContext));
+  const { fn, context } = loadFunction(rendererSource, 'mountRichTurns', globals);
+  vm.runInContext(extractFunction(rendererSource, 'activePresentationProfile'), context);
   return { fn, decorated: shells, shells, attachedUsers, sanitizedContent, adoptions, order };
 }
 
@@ -414,6 +421,19 @@ function validateRichMountContract() {
     assert.deepEqual(h.adoptions, ['user'], 'rich user-bubble adoption must run for user turns only - assistant/system/tool get no invented bubble');
     assert.deepEqual(h.order, [['adopt', 'user'], ['project', 'user'], ['project', 'assistant'], ['project', 'system'], ['project', 'tool']],
       'user-bubble adoption must run on the sanitized host before post-sanitizer content projection');
+  }
+
+  {
+    const h = createRichMountHarness();
+    const appended = [];
+    const result = h.fn({ appendChild: (host) => appended.push(host) }, [
+      { turnIdx: 1, role: 'user', outerHTML: 'user' },
+      { turnIdx: 2, role: 'assistant', outerHTML: 'assistant' },
+      { turnIdx: 3, role: 'assistant', outerHTML: 'assistant-2' },
+    ], 'snap', { messages: [] }, { getEditOverride: (sid, turnIdx) => (sid === 'snap' && turnIdx === 2 ? 'edited text' : null) });
+    assert.equal(result.fallbackRequired, false);
+    assert.deepEqual(appended.map((host) => host.addedClasses), [[], ['wbTurn--edited'], []],
+      'exactly the overridden assistant turn carries the profile edited-turn hook');
   }
 
   {
@@ -1224,7 +1244,11 @@ function validateRichUserBubbleAuthority() {
  * decision; structure, role, identity, accessibility and semantics are not.
  */
 function validatePresentationProfileContract() {
-  const STRUCTURAL = ['cgFrame', 'cgBody', 'cgThread', 'cgScroll', 'cgTurn', 'cgMsg', 'cgMsgBody', 'cgBubble', 'cgBubble--user', 'cgBubbleRail'];
+  const STRUCTURAL = ['cgFrame', 'cgBody', 'cgThread', 'cgScroll', 'cgTurn', 'cgMsg', 'cgMsgBody', 'cgBubble', 'cgBubble--user', 'cgBubbleRail',
+    /* attachment structure / content state - the Renderer decides these */
+    'cgUserAttachmentGrid', 'cgUserAttachmentCard', 'cgTurn--has-attachments'];
+  /* Reader integration: identifies the Reader scroll surface, never a look. */
+  const READER_INTEGRATION = ['wbReaderScroll'];
   const ROLES = ['user', 'assistant', 'system', 'tool'];
 
   /* A + B + C + D. Install the real module in an isolated window. */
@@ -1260,6 +1284,17 @@ function validatePresentationProfileContract() {
   assert.equal(profile.userBubbleMarkerClass(), 'user-message-bubble-color', 'E: provider bubble marker');
   assert.deepEqual([...profile.transcriptClasses('rich')], ['wbRichRoot', 'is-rich'], 'E: rich transcript mode');
   assert.deepEqual([...profile.transcriptClasses('canonical')], ['wbRichRoot'], 'E: canonical transcript mode');
+  /* S3B slice B: content and edit-state hooks, exactly these. */
+  assert.deepEqual([...profile.codeBlockClasses()], ['wbCodeBlock'], 'code-block container hook');
+  assert.deepEqual([...profile.codeLanguageClasses()], ['wbCodeLang'], 'code-language badge hook');
+  assert.deepEqual([...profile.editedTurnClasses()], ['wbTurn--edited'], 'edited-turn hook');
+  assert.deepEqual([...profile.editedMessageClasses()], ['cgMsg--edited'], 'edited-message hook');
+  for (const arr of [profile.hooks.content.codeBlock.container, profile.hooks.content.codeBlock.language, profile.hooks.state.edited.turn, profile.hooks.state.edited.message]) {
+    assert.equal(Object.isFrozen(arr), true, 'new hook arrays are deep-frozen');
+    assert.throws(() => { 'use strict'; arr.push('x'); }, { name: 'TypeError' });
+  }
+  assert.equal(Object.isFrozen(profile.hooks.content) && Object.isFrozen(profile.hooks.state), true);
+  assert.equal(api.__version, '0.2.0-m03-foundation', 'additive helper surface bumps the module API version');
   for (const bad of ['admin', 'USER', '', null, undefined, 'user ', 'user; drop']) {
     assert.throws(() => profile.turnClasses(bad, 'rich'), { name: 'TypeError' }, `helpers reject unknown role ${JSON.stringify(bad)}`);
     assert.throws(() => profile.messageClasses(bad, 'canonical'), { name: 'TypeError' });
@@ -1275,13 +1310,29 @@ function validatePresentationProfileContract() {
   const collect = (node) => { if (Array.isArray(node)) hookValues.push(...node); else if (typeof node === 'string') hookValues.push(node); else if (node && typeof node === 'object') Object.values(node).forEach(collect); };
   collect(profile.hooks);
   for (const token of STRUCTURAL) assert.equal(hookValues.includes(token), false, `G: structural class ${token} must not be profile-owned`);
+  for (const token of READER_INTEGRATION) assert.equal(hookValues.includes(token), false, `H: Reader integration hook ${token} must not be profile-owned`);
+  assert.deepEqual([...hookValues].filter((t) => /^(wb|cg|is-|user-)/.test(t)).sort(), [
+    'cgMsg--assistant', 'cgMsg--edited', 'cgMsg--system', 'cgMsg--tool', 'cgMsg--user', 'is-rich', 'user-message-bubble-color', 'user-message-bubble-color',
+    'wbCodeBlock', 'wbCodeLang', 'wbRichRoot', 'wbRichRoot', 'wbTurn', 'wbTurn--assistant', 'wbTurn--edited', 'wbTurn--fallback', 'wbTurn--rich', 'wbTurn--system', 'wbTurn--tool', 'wbTurn--user',
+  ], 'the reference profile owns exactly the accepted presentation vocabulary and nothing else');
   assert.doesNotMatch(stripJsComments(presentationProfileSource), /document\.|innerHTML|localStorage|sessionStorage|indexedDB|renderIR|markdownEngine|contentRenderer|semanticIngress|data-message-id|data-turn-id/,
     'the profile module has no DOM, persistence, semantic or identity coupling');
 
   /* F. chat-renderer consumes the profile: no duplicated map of the moved hooks. */
   const code = stripJsComments(rendererSource);
-  for (const token of ['wbRichRoot', 'is-rich', 'wbTurn--rich', 'wbTurn--fallback', 'user-message-bubble-color', 'chatgpt-reference']) {
+  for (const token of ['wbRichRoot', 'is-rich', 'wbTurn--rich', 'wbTurn--fallback', 'user-message-bubble-color', 'chatgpt-reference', 'wbTurn--edited', 'cgMsg--edited', 'wbCodeBlock', 'wbCodeLang']) {
     assert.equal(code.includes(token), false, `F: chat-renderer must not hardcode moved presentation token ${token}`);
+  }
+  assert.match(extractFunction(rendererSource, 'applyEditedMessageBody'), /\.editedMessageClasses\(\)/, 'E: edited message hook comes from the profile');
+  assert.match(extractFunction(rendererSource, 'mountRichTurns'), /host\.classList\.add\(\.\.\.activePresentationProfile\(\)\.editedTurnClasses\(\)\)/, 'E: edited turn hook comes from the profile');
+  const contentCode = stripJsComments(readRepo(CONTENT_RENDERER_REL));
+  for (const token of ['wbCodeBlock', 'wbCodeLang', 'chatgpt-reference']) {
+    assert.equal(contentCode.includes(token), false, `D: content renderer must not hardcode ${token}`);
+  }
+  assert.match(contentCode, /profile\.codeBlockClasses\(\)/, 'C: content renderer takes code-block classes from the profile');
+  assert.match(contentCode, /profile\.codeLanguageClasses\(\)/, 'C: content renderer takes code-language classes from the profile');
+  for (const token of ['wbReaderScroll', 'cgUserAttachmentGrid', 'cgUserAttachmentCard', 'cgTurn--has-attachments']) {
+    assert.equal(code.includes(`"${token}"`), true, `H/I: ${token} stays a Renderer literal`);
   }
   assert.doesNotMatch(code, /["'`]wbTurn(--\$\{|["'`])/, 'F: chat-renderer must not hardcode wbTurn / wbTurn--<role>');
   assert.doesNotMatch(code, /cgMsg--\$\{|["'`]cgMsg--(user|assistant|system|tool)["'`]/, 'F: chat-renderer must not hardcode cgMsg--<role>');
@@ -1318,6 +1369,20 @@ function validatePresentationProfileContract() {
     extractFunction(rendererSource, 'buildRichUserBubbleShell'),
     'this.api = { buildConversationShell, buildTurnShell, buildMessageHost, buildRichUserBubbleShell };',
   ].join('\n'), seams);
+  vm.runInContext([
+    'function renderSemanticBody(bodyEl){ bodyEl.appendChild(document.createElement("p")); }',
+    extractFunction(rendererSource, 'applyEditedMessageBody'),
+    'this.api.applyEditedMessageBody = applyEditedMessageBody;',
+  ].join('\n'), seams);
+  {
+    const host = seams.api.buildMessageHost('assistant', 'rich', { seenMessageIds: new Set(), seenTurnIds: new Set(), messageId: 'm', turnId: 't' });
+    host.appendChild(new FakeDomElement('div'));
+    seams.api.applyEditedMessageBody(host, 'assistant', 'edited');
+    assert.equal(host.className, 'cgMsg cgMsg--assistant cgMsg--edited', 'edited host classes: structural + profile modifier + profile edit-state hook');
+    assert.equal(host.getAttribute('data-message-author-role'), 'assistant');
+    assert.equal(host.getAttribute('data-message-id'), 'm', 'identity untouched by the edit-state hook');
+    assert.equal(host.children.length, 1); assert.equal(host.children[0].className, 'cgMsgBody', 'edited body slot is the structural cgMsgBody');
+  }
   const shell = seams.api.buildConversationShell({ title: 'T', chatId: 'c', projectId: 'p' });
   assert.equal(shell.root.getAttribute('data-h2o-presentation-profile'), 'chatgpt-reference', 'H: conversation root carries the profile marker');
   assert.equal(shell.turnsEl.getAttribute('data-h2o-presentation-profile'), null, 'H: the marker is on the conversation root only');

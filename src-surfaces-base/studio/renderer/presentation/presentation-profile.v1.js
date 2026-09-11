@@ -17,8 +17,13 @@
  * Structural vocabulary stays with the Renderer and is profile-independent:
  *   cgFrame cgBody cgThread cgScroll cgTurn cgTurn--<role> cgMsg cgMsgBody
  *   cgBubble cgBubble--user cgBubbleRail
- * Structural node existence, role attributes, identity attributes and
- * accessibility are Renderer decisions, not profile decisions.
+ *   cgUserAttachmentGrid cgUserAttachmentCard cgTurn--has-attachments
+ *   (attachment structure and content state follow attachment data)
+ * and so does the Reader integration hook wbReaderScroll (the Reader scroll
+ * surface, not a look). Structural node existence, role attributes, identity
+ * attributes, accessibility, edit semantics and Reader scroll behaviour are
+ * Renderer decisions, not profile decisions; the profile only names the class
+ * hooks that make an accepted structure or state look the ChatGPT way.
  *
  * The built-in `chatgpt-reference` profile maps the accepted ChatGPT-compatible
  * class vocabulary exactly as the Renderer emitted it before this contract
@@ -37,7 +42,7 @@
 
   const SCHEMA = "h2o.renderer.presentation-profile";
   const SCHEMA_VERSION = 1;
-  const API_VERSION = "0.1.0-m03-foundation";
+  const API_VERSION = "0.2.0-m03-foundation";
   const REFERENCE_ID = "chatgpt-reference";
 
   /* Bounded inputs: the canonical roles and shell modes the Renderer already
@@ -70,6 +75,8 @@
    *   userBubble.compat       compatibility classes on the H2O rich user bubble
    *   userBubble.providerMarker   the provider class that locates a captured
    *                               bubble inside sanitized content
+   *   content.codeBlock.container / .language   code-block wrapper and badge
+   *   state.edited.turn / .message   edit-state presentation on turn and host
    */
   function defineProfile(definition) {
     const hooks = deepFreeze(definition.hooks);
@@ -96,6 +103,18 @@
       },
       userBubbleMarkerClass() {
         return hooks.userBubble.providerMarker;
+      },
+      codeBlockClasses() {
+        return hooks.content.codeBlock.container;
+      },
+      codeLanguageClasses() {
+        return hooks.content.codeBlock.language;
+      },
+      editedTurnClasses() {
+        return hooks.state.edited.turn;
+      },
+      editedMessageClasses() {
+        return hooks.state.edited.message;
       },
     };
     return Object.freeze(profile);
@@ -136,6 +155,18 @@
       userBubble: {
         compat: ["user-message-bubble-color"],
         providerMarker: "user-message-bubble-color",
+      },
+      content: {
+        codeBlock: {
+          container: ["wbCodeBlock"],
+          language: ["wbCodeLang"],
+        },
+      },
+      state: {
+        edited: {
+          turn: ["wbTurn--edited"],
+          message: ["cgMsg--edited"],
+        },
       },
     },
   });

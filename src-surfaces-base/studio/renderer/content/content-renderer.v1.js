@@ -74,6 +74,27 @@
     return decision && typeof decision === "object" ? decision : { ok: false, reason: "policy-returned-nothing" };
   }
 
+  /*
+   * Presentation is the active PresentationProfile's decision (S3B): the
+   * classes a content node carries come from the reference profile, never from
+   * a class map kept here. The same override rule as the URL policy applies -
+   * an explicit context value (even null) is honoured, an absent key resolves
+   * the installed profile module - and no profile fails clearly rather than
+   * falling back to an embedded duplicate.
+   */
+  function resolvePresentationProfile(context) {
+    const profile = context && Object.prototype.hasOwnProperty.call(context, "presentationProfile")
+      ? context.presentationProfile
+      : (Renderer.presentationProfile && Renderer.presentationProfile.__installed === true
+        && typeof Renderer.presentationProfile.reference === "function"
+        ? Renderer.presentationProfile.reference()
+        : null);
+    if (!profile || typeof profile.codeBlockClasses !== "function" || typeof profile.codeLanguageClasses !== "function") {
+      throw new TypeError("contentRenderer requires the Renderer PresentationProfile (renderer/presentation/presentation-profile.v1.js) for content presentation; no embedded fallback exists");
+    }
+    return profile;
+  }
+
   function el(context, tag) { return resolveDocument(context).createElement(tag); }
   function textNode(context, value) { return resolveDocument(context).createTextNode(asText(value)); }
 
@@ -207,13 +228,15 @@
   });
 
   register("codeBlock", (block, context) => {
-    /* Preserves the established wbCodeBlock / wbCodeLang visual convention. */
+    /* Wrapper, optional language badge, pre > code with the author's text; the
+     * wrapper and badge presentation classes come from the active profile. */
+    const profile = resolvePresentationProfile(context);
     const wrap = el(context, "div");
-    wrap.className = "wbCodeBlock";
+    wrap.className = profile.codeBlockClasses().join(" ");
     const language = asText(block.language).trim();
     if (language) {
       const badge = el(context, "div");
-      badge.className = "wbCodeLang";
+      badge.className = profile.codeLanguageClasses().join(" ");
       badge.appendChild(textNode(context, language));
       wrap.appendChild(badge);
     }

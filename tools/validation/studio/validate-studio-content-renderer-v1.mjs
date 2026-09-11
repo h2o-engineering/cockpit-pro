@@ -19,6 +19,7 @@ const REPO_ROOT = path.resolve(path.dirname(__filename), '..', '..', '..');
 const STUDIO = path.join(REPO_ROOT, 'src-surfaces-base/studio');
 const CONTENT_REL = 'renderer/content/content-renderer.v1.js';
 const RENDERER_REL = 'renderer/chat-renderer.studio.js';
+const PROFILE_REL = 'renderer/presentation/presentation-profile.v1.js';
 
 const STRICT = /^(1|true|yes)$/i.test(String(process.env.H2O_REQUIRE_CONTENT_RENDERER_TIER2 || ''));
 
@@ -32,11 +33,40 @@ const read = (rel) => fs.readFileSync(path.join(STUDIO, rel), 'utf8');
 
 /* ------------------------------------------------------------ Tier 1 */
 
-function loadRegistry() {
+function loadRegistry({ withProfile = false } = {}) {
   const sandbox = vm.createContext({ console });
   sandbox.globalThis = sandbox;
+  /* S3B: the real PresentationProfile module, in its production position
+   * (before the content renderer), when a check needs presentation. */
+  if (withProfile) vm.runInContext(read(PROFILE_REL), sandbox, { filename: 'presentation-profile.v1.js' });
   vm.runInContext(read(CONTENT_REL), sandbox, { filename: 'content-renderer.v1.js' });
   return sandbox.H2O.Studio.Renderer.contentRenderer;
+}
+
+/* Minimal element fake for Tier-1 presentation checks: class, children, text. */
+function fakeDocument() {
+  const make = (tagName) => ({
+    tagName: String(tagName).toUpperCase(), className: '', children: [], text: '',
+    appendChild(node) { this.children.push(node); return node; },
+    setAttribute() {},
+  });
+  return {
+    createElement: (tagName) => make(tagName),
+    createTextNode: (value) => ({ nodeType: 3, text: String(value), children: [] }),
+  };
+}
+
+function stripComments(source) {
+  let out = ''; let i = 0; let quote = '';
+  while (i < source.length) {
+    const ch = source[i]; const next = source[i + 1];
+    if (quote) { if (ch === '\\') { out += ch + (next ?? ''); i += 2; continue; } if (ch === quote) quote = ''; out += ch; i += 1; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; out += ch; i += 1; continue; }
+    if (ch === '/' && next === '*') { const e = source.indexOf('*/', i + 2); i = e === -1 ? source.length : e + 2; out += ' '; continue; }
+    if (ch === '/' && next === '/') { const e = source.indexOf('\n', i); i = e === -1 ? source.length : e; out += ' '; continue; }
+    out += ch; i += 1;
+  }
+  return out;
 }
 
 check('registry exposes the small typed API and registers the core kinds once', () => {
@@ -167,6 +197,61 @@ check('the S2C path has no HTML-string sink and names sanitizer v2 as the only l
   assert.doesNotMatch(s2c.slice(0, s2c.indexOf('function renderSemanticBlocks')), /\.html\b/, 'safeTextFromBlocks must never read an html payload');
 });
 
+/* -------------------------------------------- Tier 1: S3B presentation */
+
+check('code-block presentation classes come from the active PresentationProfile', () => {
+  const cr = loadRegistry({ withProfile: true });
+  const doc = fakeDocument();
+  const withLang = cr.renderBlock({ kind: 'codeBlock', language: 'js', code: 'const x = 1;\n' }, { document: doc });
+  assert.equal(withLang.tagName, 'DIV');
+  assert.equal(withLang.className, 'wbCodeBlock', 'wrapper class must be the profile code-block container hook');
+  assert.equal(withLang.children.length, 2, 'language badge + pre');
+  assert.equal(withLang.children[0].className, 'wbCodeLang', 'badge class must be the profile code-language hook');
+  assert.equal(withLang.children[0].children[0].text, 'js');
+  assert.equal(withLang.children[1].tagName, 'PRE');
+  assert.equal(withLang.children[1].children[0].tagName, 'CODE');
+  assert.equal(withLang.children[1].children[0].children[0].text, 'const x = 1;\n', 'author code text enters as text data');
+  const noLang = cr.renderBlock({ kind: 'codeBlock', code: 'plain' }, { document: doc });
+  assert.equal(noLang.className, 'wbCodeBlock');
+  assert.equal(noLang.children.length, 1, 'no language means no badge');
+  assert.equal(noLang.children[0].tagName, 'PRE');
+});
+
+check('code-block presentation fails clearly without a profile - no embedded duplicate map', () => {
+  const doc = fakeDocument();
+  const bare = loadRegistry();
+  assert.throws(() => bare.renderBlock({ kind: 'codeBlock', code: 'x' }, { document: doc }), /PresentationProfile/,
+    'a missing profile module must fail clearly');
+  const cr = loadRegistry({ withProfile: true });
+  assert.throws(() => cr.renderBlock({ kind: 'codeBlock', code: 'x' }, { document: doc, presentationProfile: null }), /PresentationProfile/,
+    'an explicit null override must not fall back to the installed profile');
+  assert.throws(() => cr.renderBlock({ kind: 'codeBlock', code: 'x' }, { document: doc, presentationProfile: { id: 'not-a-profile' } }), /PresentationProfile/,
+    'an object without the presentation helpers is not a profile');
+  const custom = { codeBlockClasses: () => ['x-block'], codeLanguageClasses: () => ['x-lang'] };
+  const rendered = cr.renderBlock({ kind: 'codeBlock', language: 'go', code: 'y' }, { document: doc, presentationProfile: custom });
+  assert.equal(rendered.className, 'x-block', 'an explicit profile override is honoured');
+  assert.equal(rendered.children[0].className, 'x-lang');
+  /* Paragraph rendering does not consult the profile at all. */
+  assert.equal(bare.renderBlock({ kind: 'paragraph', children: [{ kind: 'text', text: 'p' }] }, { document: doc }).tagName, 'P');
+});
+
+check('the content renderer embeds no presentation class map and stays semantics-neutral', () => {
+  const code = stripComments(read(CONTENT_REL));
+  for (const token of ['wbCodeBlock', 'wbCodeLang', 'chatgpt-reference']) {
+    assert.equal(code.includes(token), false, `content renderer must not hardcode ${token}`);
+  }
+  assert.match(code, /function resolvePresentationProfile\(context\)/);
+  assert.match(code, /hasOwnProperty\.call\(context, "presentationProfile"\)/, 'explicit override rule mirrors the URL policy seam');
+  assert.match(code, /Renderer\.presentationProfile\.reference\(\)/, 'the installed reference profile is the default authority');
+  /* One definition plus exactly one call site (the codeBlock renderer). */
+  assert.equal((code.match(/resolvePresentationProfile\(context\)/g) || []).length, 2, 'only the codeBlock renderer consults presentation');
+  assert.match(code, /register\("codeBlock", \(block, context\) => \{\s*const profile = resolvePresentationProfile\(context\);/);
+  assert.doesNotMatch(code, /presentationProfile[^\n]*(renderIR|markdown|blocks\.push|kind\s*=)/, 'profile data never reaches Render IR or block shape');
+  for (const rel of ['renderer/semantic/render-ir.v1.js', 'renderer/semantic/semantic-ingress.v1.js', 'renderer/markdown/markdown-ir-adapter.v1.js', 'renderer/markdown/markdown-engine.v1.js', 'renderer/markdown/h2o-gfm.v1.js']) {
+    assert.doesNotMatch(stripComments(read(rel)), /presentationProfile/, `${rel} must stay profile-free`);
+  }
+});
+
 /* ------------------------------------------------------------ Tier 2 */
 
 async function resolvePlaywright() {
@@ -247,6 +332,10 @@ if (!chromium) {
     'const x = 1;',
     '```',
     '',
+    '```',
+    'plain block',
+    '```',
+    '',
     '| a | b |',
     '|:--|--:|',
     '| 1 | 2 |',
@@ -284,6 +373,7 @@ if (!chromium) {
       blockquote: q('blockquote').map((n) => n.textContent.trim()),
       codeBlock: q('div.wbCodeBlock pre code').map((n) => n.textContent),
       codeLang: q('div.wbCodeLang').map((n) => n.textContent),
+      codeWrappers: q('div.wbCodeBlock').map((n) => ({ cls: n.className, badge: n.querySelector(':scope > .wbCodeLang')?.textContent ?? null, firstChild: n.firstElementChild.tagName.toLowerCase(), lastChild: n.lastElementChild.tagName.toLowerCase() })),
       th: q('th').map((n) => ({ text: n.textContent, align: n.style.textAlign, scope: n.getAttribute('scope') })),
       td: q('td').map((n) => ({ text: n.textContent, align: n.style.textAlign })),
       images: q('img').map((n) => ({ src: n.getAttribute('src'), alt: n.getAttribute('alt') })),
@@ -299,11 +389,17 @@ if (!chromium) {
     assert.deepEqual(dom.h2, ['Heading two']);
     assert.deepEqual(dom.strong, ['strong']);
     assert.deepEqual(dom.em, ['emphasis']);
-    assert.deepEqual(dom.code, ['code', 'const x = 1;\n']);
+    assert.deepEqual(dom.code, ['code', 'const x = 1;\n', 'plain block\n']);
     assert.deepEqual(dom.struck, ['struck']);
     assert.deepEqual(dom.blockquote, ['quoted']);
-    assert.deepEqual(dom.codeBlock, ['const x = 1;\n']);
+    assert.deepEqual(dom.codeBlock, ['const x = 1;\n', 'plain block\n']);
     assert.deepEqual(dom.codeLang, ['js']);
+    /* S3B: the effective code-block classes are unchanged with the profile as
+     * their authority; a bare fence carries the wrapper and no badge. */
+    assert.deepEqual(dom.codeWrappers, [
+      { cls: 'wbCodeBlock', badge: 'js', firstChild: 'div', lastChild: 'pre' },
+      { cls: 'wbCodeBlock', badge: null, firstChild: 'pre', lastChild: 'pre' },
+    ]);
     assert.equal(dom.ul, 1);
     assert.equal(dom.ol, 1);
     assert.deepEqual(dom.olStart, ['3'], 'an explicit ordered start must reach the DOM');
