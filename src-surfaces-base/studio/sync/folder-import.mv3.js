@@ -470,6 +470,10 @@
       backgroundAutoImport: false,
       chromeWritesSyncFolder: state.lastChromeExportStatus === 'chrome-to-desktop-exported' || chromeExportReady,
     }, safeObject(patch));
+    /* M2: File System Access permission is live browser state. Historical
+     * rows may contain this field, but no write from this module preserves or
+     * creates it; loadStoredHandle() always queries the handle instead. */
+    delete next.permission;
     await writeKv(STATE_KEY, next);
   }
 
@@ -524,6 +528,10 @@
     }
   }
 
+  function objectProtocolOwnsAutomaticMutation() {
+    return !!global.H2O?.Studio?.sync?.objectAutoReconcile;
+  }
+
   function desktopLatestFileSignature(file) {
     return String(numberOrZero(file && file.lastModified)) + ':' + String(numberOrZero(file && file.size));
   }
@@ -544,6 +552,7 @@
 
   async function pollDesktopLatestForChanges(reason) {
     var cleanReason = cleanString(reason) || 'desktop-latest-poll';
+    if (objectProtocolOwnsAutomaticMutation()) return null;
     if (!state.autoSyncEnabled || !state.handle || !documentIsVisible()) return null;
     if (state.desktopLatestPollRunning || state.autoSyncRunning || state.syncInFlight) return null;
     state.desktopLatestPollRunning = true;
@@ -590,6 +599,7 @@
   }
 
   function startDesktopLatestPoller(reason) {
+    if (objectProtocolOwnsAutomaticMutation()) return false;
     if (state.desktopLatestPollTimer || !state.autoSyncEnabled || !state.handle) return false;
     state.desktopLatestPollTimer = global.setInterval(function () {
       pollDesktopLatestForChanges('desktop-latest-poll:' + cleanString(reason || 'interval'))
@@ -4561,6 +4571,74 @@
     return !!state.handle;
   }
 
+  function getConnectedDirectoryHandle() {
+    return state.handle || null;
+  }
+
+  /* Permission escalation belongs to this explicit product gesture. It never
+   * writes a delivery slot or publication ledger; after a successful grant it
+   * only asks the existing canonical reconciler to re-evaluate its own Auto
+   * authority and normal publication path. */
+  async function authorizeChromePublishing() {
+    var handle = state.handle;
+    if (!handle) {
+      return Object.freeze({
+        ok: false,
+        permission: 'not-checked',
+        authorized: false,
+        scheduled: false,
+        status: 'sync-folder-not-connected'
+      });
+    }
+    var permission = await queryReadWritePermission(handle);
+    var requested = false;
+    if (permission !== 'granted') {
+      if (typeof handle.requestPermission !== 'function') {
+        return Object.freeze({
+          ok: false,
+          permission: 'unavailable',
+          authorized: false,
+          requested: false,
+          scheduled: false,
+          status: 'chrome-publishing-authorization-unavailable'
+        });
+      }
+      requested = true;
+      try {
+        permission = await handle.requestPermission({ mode: 'readwrite' });
+      } catch (error) {
+        pushError('authorize-chrome-publishing', error);
+        permission = 'unavailable';
+      }
+    }
+    if (permission !== 'granted') {
+      return Object.freeze({
+        ok: false,
+        permission: permission,
+        authorized: false,
+        requested: requested,
+        scheduled: false,
+        status: permission === 'denied'
+          ? 'chrome-publishing-authorization-denied'
+          : (permission === 'unavailable'
+            ? 'chrome-publishing-authorization-unavailable'
+            : 'chrome-publishing-authorization-required')
+      });
+    }
+    var reconciler = H2O.Studio.sync && H2O.Studio.sync.objectAutoReconcile;
+    var scheduled = !!reconciler &&
+      typeof reconciler.scheduleReconcile === 'function' &&
+      reconciler.scheduleReconcile('chrome-publishing-authorization-granted') === true;
+    return Object.freeze({
+      ok: true,
+      permission: 'granted',
+      authorized: true,
+      requested: requested,
+      scheduled: scheduled,
+      status: 'chrome-publishing-authorized'
+    });
+  }
+
   async function enableAutoSync() {
     await loadStoredHandle();
     state.autoSyncEnabled = true;
@@ -4615,6 +4693,17 @@
 
   async function runAutoSync(reason) {
     var cleanReason = cleanString(reason) || state.autoSyncScheduledReason || 'auto-sync';
+    if (objectProtocolOwnsAutomaticMutation()) {
+      return {
+        ok: false,
+        phase: PHASE,
+        mode: MODE,
+        enabled: false,
+        autoSync: true,
+        reason: cleanReason,
+        status: 'object-protocol-auto-owner',
+      };
+    }
     if (!state.autoSyncEnabled) {
       return {
         ok: false,
@@ -4736,6 +4825,19 @@
   async function scheduleAutoSync(reason) {
     var cleanReason = cleanString(reason) || 'auto-sync';
     await loadStoredHandle();
+    if (objectProtocolOwnsAutomaticMutation()) {
+      clearAutoSyncTimer();
+      clearDesktopLatestPollTimer();
+      return {
+        ok: false,
+        phase: PHASE,
+        mode: MODE,
+        enabled: false,
+        scheduled: false,
+        reason: cleanReason,
+        status: 'object-protocol-auto-owner',
+      };
+    }
     if (!state.autoSyncEnabled) {
       return {
         ok: false,
@@ -4943,6 +5045,87 @@
         (!!state.handle && getChromeExportWriteGate().effectiveFlagEnabled === true),
       chromeDesktopExportApiAvailable: !!getChromeAutoImportApi(),
     };
+  }
+
+  async function getReadinessSnapshot(options) {
+    var opts = options && typeof options === 'object' ? options : {};
+    var readinessApi = H2O.Studio.sync && H2O.Studio.sync.readiness;
+    if (!readinessApi || typeof readinessApi.deriveSnapshot !== 'function') {
+      throw new Error('sync-readiness-derivation-unavailable');
+    }
+    await loadStoredHandle();
+    /* Live query wins over any historical/null status. Never request from a
+     * diagnostic read: requestPermission remains user-gesture-only. */
+    var permission = state.handle ? await queryPermission(state.handle) : 'not-checked';
+    var publishingPermission = state.handle
+      ? await queryReadWritePermission(state.handle)
+      : 'not-checked';
+    state.permission = permission;
+    var normalizedPermission = readinessApi.normalizePermission(permission);
+    var platform = H2O.Studio && H2O.Studio.platform;
+    var storage = { ready: true, backend: 'chrome', status: 'ready' };
+    if (platform && typeof platform.whenStorageAuthorityReady === 'function') {
+      try { storage = await platform.whenStorageAuthorityReady(); }
+      catch (_) { storage = { ready: false, backend: 'unavailable', status: 'unavailable' }; }
+    }
+    var connected = !!state.handle;
+    var prerequisitesSatisfied = connected && normalizedPermission === 'granted';
+    /* Focus/visibility listeners are the scheduler authority. The polling
+     * timer is intentionally paused while the document is hidden, which must
+     * not falsely relabel configured automation as permanently inactive. */
+    var schedulerActive = !!state.autoSyncEventsBound;
+    var reason = !state.autoSyncEnabled ? 'not-configured'
+      : (!connected ? 'folder-not-connected'
+        : (normalizedPermission !== 'granted' ? (normalizedPermission === 'prompt'
+          ? 'permission-required' : 'permission-' + normalizedPermission)
+          : (!schedulerActive ? 'scheduler-not-running' : '')));
+    return readinessApi.deriveSnapshot({
+      foundation: {
+        uiMounted: opts.uiMounted === true,
+        runtimeLoaded: true,
+        storage: storage,
+        identity: { required: false, ready: false, canonical: false, status: 'not-applicable' },
+      },
+      localFolder: {
+        configValid: false,
+        authorizationValid: false,
+        authorizationStatus: 'not-applicable',
+      },
+      browserDelivery: {
+        handlePresent: connected,
+        permission: normalizedPermission,
+        publishingPermission: readinessApi.normalizePermission(publishingPermission),
+        livePermission: connected,
+        deliveryAvailable: typeof syncNow === 'function',
+        operation: {
+          state: state.syncInFlight || state.autoSyncRunning ? 'in-flight'
+            : (state.lastSyncError || state.lastAutoSyncError ? 'error' : 'idle'),
+          reason: state.lastSyncError || state.lastAutoSyncError || '',
+          lastActivity: state.lastAutoSyncAt || state.lastAppliedAt || null,
+        },
+      },
+      webdav: {
+        descriptorValid: false,
+        credentialsReady: false,
+        reachabilityReady: false,
+        reason: 'desktop-only',
+      },
+      automation: {
+        chromeAutoImport: {
+          configured: state.autoSyncEnabled === true,
+          prerequisitesSatisfied: prerequisitesSatisfied,
+          schedulerActive: schedulerActive,
+          reason: reason,
+          lastActivity: state.lastAutoSyncAt || state.lastAppliedAt || null,
+          operation: { state: state.autoSyncRunning ? 'in-flight' : 'idle' },
+        },
+      },
+      archiveRecovery: {
+        available: false,
+        ready: false,
+        reason: 'not-assessed-m2',
+      },
+    });
   }
 
   function tombstoneReviewIngestUnavailable(code) {
@@ -7487,6 +7670,8 @@
     connectFolder: connectFolder,
     disconnectFolder: disconnectFolder,
     hasFolder: hasFolder,
+    getConnectedDirectoryHandle: getConnectedDirectoryHandle,
+    authorizeChromePublishing: authorizeChromePublishing,
     status: status,
     syncNow: syncNow,
     exportChromeToSyncFolder: exportChromeToSyncFolder,
@@ -7500,6 +7685,7 @@
     disableAutoSync: disableAutoSync,
     isAutoSyncEnabled: isAutoSyncEnabled,
     scheduleAutoSync: scheduleAutoSync,
+    getReadinessSnapshot: getReadinessSnapshot,
     diagnose: diagnose,
     diagnoseHealth: diagnoseHealth,
     getDesktopCanonicalLibraryMetadata: getDesktopCanonicalLibraryMetadata,

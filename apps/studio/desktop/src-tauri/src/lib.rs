@@ -46,6 +46,58 @@ pub mod sqlite_writer_identity;
 // implementation slice.
 pub mod real_transport_capability_probe;
 
+// Round 2A transport-free revision/head document authority. Canonical bytes and
+// document validation only: no transport, credential or registry dependency.
+mod sync_object_document;
+
+// P02 Wave 1 / Z1 additive strict v2 contract models and deterministic
+// cross-platform vector authority. No transport or persistent-state effects;
+// frozen later units consume the foundation after Z1 review.
+#[allow(dead_code)]
+mod sync_contract_v2;
+
+// Round 2A production object-sync transport. The generic core is injected in
+// tests; registered commands resolve the existing private write-grade target
+// only when explicitly invoked by the user-facing object runtime.
+pub mod sync_object_transport;
+pub mod webdav_transport_core;
+
+// Round 2A local-only acceptance fixture. The command owns one fixed
+// synthetic chat and two deterministic immutable revisions; it has no caller-
+// selected content or transport dependency.
+pub mod round2a_fixture_authoring;
+/* P02 identity-orphan reconciliation v2. The Round2A v1 module below stays
+ * frozen: this successor shares no constant, lease or backup leaf with it. */
+pub mod p02_identity_reconciliation;
+pub mod round2a_identity_recovery;
+
+// Round 2 / Item 11 — Rust-owned authorization mirror and fixed-name atomic
+// browser-delivery writer. JavaScript never grants or supplies a write path.
+pub mod item11_delivery_destination;
+
+// Local publication Desktop intake. Reads one native-owned fixed slot from
+// the existing Item 11-authorized folder and stages immutable inbound branch
+// evidence only. It has no apply, transport, or shared-folder write path.
+pub mod local_publication_intake;
+// P02 V7 prerequisite: governed repository-root resolver and format-gate
+// ceremony writer. Read-only resolution; activation requires explicit
+// governed authorization and is unreachable from any normal runtime path.
+pub mod p02_activation;
+/* O1-T19: native P01 writer-generation gate. A JS refusal is a refusal only
+ * for callers that go through the JS, so the native delivery writer carries
+ * its own check. */
+pub mod p01_generation_gate;
+pub mod p02_publication_authority;
+/* O1-T17: dormant steady publication lease. Registered so its cfg(test)
+ * dormancy proofs run; no command is exposed, because nothing may begin a
+ * steady window until the T19 standdown ceremony has run. */
+pub mod p02_steady_authority;
+pub mod p02_writer_storage;
+// Governed Desktop maintenance suppression: ephemeral, launch-environment
+// authority that removes P01 automatic mutation capability for one process
+// without touching persisted Sync configuration.
+pub mod sync_maintenance_suppression;
+
 // F7.4.2b — exact-gated real DB rollback proof for future folder.metadata
 // color apply. Always rolls back and verifies unchanged state; no apply path.
 pub mod folder_metadata_apply_rollback_proof;
@@ -1444,7 +1496,256 @@ fn studio_migrations() -> Vec<Migration> {
             "#,
             kind: MigrationKind::Up,
         },
-    ]
+        // v18 — Round 2A per-peer/per-object durable sync operation state.
+        // This table is intentionally unprotected: it contains bookkeeping
+        // only and is written through ordinary plugin-sql statements. Domain
+        // chat/snapshot protections and writer identities are unchanged.
+        Migration {
+            version: 18,
+            description: "init single object sync state",
+            sql: r#"
+                CREATE TABLE IF NOT EXISTS sync_object_state (
+                  sync_peer_id                         TEXT NOT NULL,
+                  object_id                            TEXT NOT NULL,
+                  last_published_revision_id            TEXT,
+                  last_published_revision_blob_sha256   TEXT,
+                  last_applied_revision_id              TEXT,
+                  last_applied_revision_blob_sha256     TEXT,
+                  remote_head_strong_etag               TEXT,
+                  remote_head_revision_blob_sha256      TEXT,
+                  pending_operation                     TEXT,
+                  operation_phase                       TEXT,
+                  operation_token                       TEXT,
+                  owner_boot_id                         TEXT,
+                  owner_context_id                      TEXT,
+                  owner_token                           TEXT,
+                  intended_object_key                   TEXT,
+                  intended_revision_id                  TEXT,
+                  intended_payload_sha256               TEXT,
+                  intended_revision_blob_sha256         TEXT,
+                  convergence_watermark_sha256          TEXT,
+                  consumed_revision_blob_sha256         TEXT,
+                  last_conflict_class                   TEXT,
+                  last_error_code                       TEXT,
+                  created_at                            TEXT NOT NULL,
+                  updated_at                            TEXT NOT NULL,
+                  PRIMARY KEY (sync_peer_id, object_id)
+                );
+            "#,
+            kind: MigrationKind::Up,
+        },
+        // v19 — immutable inbound local-publication observation authority.
+        // This table stages Chrome-authored canonical revision/head bytes but
+        // never applies them to chats, snapshots, turns, or sync object state.
+        Migration {
+            version: 19,
+            description: "init inbound local publication observations",
+            sql: r#"
+                CREATE TABLE IF NOT EXISTS sync_inbound_revision_observations (
+                  key                              TEXT PRIMARY KEY,
+                  schema                           TEXT NOT NULL CHECK (schema = 'h2o.studio.inbound-revision-observation.v1'),
+                  peer_object_key                  TEXT NOT NULL,
+                  object_id                        TEXT NOT NULL,
+                  object_key_sha256_hex            TEXT NOT NULL,
+                  revision_id                      TEXT NOT NULL,
+                  revision_key_sha256_hex          TEXT NOT NULL,
+                  parent_revision_id               TEXT,
+                  parent_key                       TEXT NOT NULL,
+                  admission_disposition            TEXT NOT NULL CHECK (admission_disposition IN ('accepted-linear', 'divergent-staged')),
+                  admission_reason                 TEXT NOT NULL,
+                  canonical_head_bytes             BLOB NOT NULL,
+                  canonical_revision_bytes         BLOB NOT NULL,
+                  head_sha256_hex                  TEXT NOT NULL,
+                  revision_blob_sha256_hex         TEXT NOT NULL,
+                  payload_sha256_hex               TEXT NOT NULL,
+                  writer_sync_peer_id_sha256_hex   TEXT NOT NULL,
+                  observed_state                   TEXT NOT NULL CHECK (observed_state = 'observed'),
+                  apply_state                      TEXT NOT NULL CHECK (apply_state = 'not-applied'),
+                  first_observed_at                 TEXT NOT NULL,
+                  last_observed_at                  TEXT NOT NULL,
+                  observation_count                 INTEGER NOT NULL CHECK (observation_count >= 1),
+                  admitted_at                       TEXT NOT NULL,
+                  CHECK (key = revision_key_sha256_hex),
+                  CHECK (parent_key = CASE
+                    WHEN parent_revision_id IS NULL THEN 'root'
+                    ELSE 'p:' || parent_revision_id
+                  END),
+                  UNIQUE(peer_object_key, revision_id)
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_inbound_one_accepted_child
+                  ON sync_inbound_revision_observations(peer_object_key, parent_key)
+                  WHERE admission_disposition = 'accepted-linear';
+                CREATE INDEX IF NOT EXISTS idx_sync_inbound_peer_object
+                  ON sync_inbound_revision_observations(peer_object_key);
+                CREATE INDEX IF NOT EXISTS idx_sync_inbound_object
+                  ON sync_inbound_revision_observations(object_id);
+
+                CREATE TRIGGER IF NOT EXISTS trg_sync_inbound_immutable_authority
+                BEFORE UPDATE ON sync_inbound_revision_observations
+                WHEN
+                  NEW.key IS NOT OLD.key OR
+                  NEW.schema IS NOT OLD.schema OR
+                  NEW.peer_object_key IS NOT OLD.peer_object_key OR
+                  NEW.object_id IS NOT OLD.object_id OR
+                  NEW.object_key_sha256_hex IS NOT OLD.object_key_sha256_hex OR
+                  NEW.revision_id IS NOT OLD.revision_id OR
+                  NEW.revision_key_sha256_hex IS NOT OLD.revision_key_sha256_hex OR
+                  NEW.parent_revision_id IS NOT OLD.parent_revision_id OR
+                  NEW.parent_key IS NOT OLD.parent_key OR
+                  NEW.admission_disposition IS NOT OLD.admission_disposition OR
+                  NEW.admission_reason IS NOT OLD.admission_reason OR
+                  NEW.canonical_head_bytes IS NOT OLD.canonical_head_bytes OR
+                  NEW.canonical_revision_bytes IS NOT OLD.canonical_revision_bytes OR
+                  NEW.head_sha256_hex IS NOT OLD.head_sha256_hex OR
+                  NEW.revision_blob_sha256_hex IS NOT OLD.revision_blob_sha256_hex OR
+                  NEW.payload_sha256_hex IS NOT OLD.payload_sha256_hex OR
+                  NEW.writer_sync_peer_id_sha256_hex IS NOT OLD.writer_sync_peer_id_sha256_hex OR
+                  NEW.observed_state IS NOT OLD.observed_state OR
+                  NEW.apply_state IS NOT OLD.apply_state OR
+                  NEW.first_observed_at IS NOT OLD.first_observed_at OR
+                  NEW.admitted_at IS NOT OLD.admitted_at OR
+                  NEW.observation_count IS NOT OLD.observation_count + 1
+                BEGIN
+                  SELECT RAISE(ABORT, 'sync-inbound-immutable-authority');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_sync_inbound_append_only
+                BEFORE DELETE ON sync_inbound_revision_observations
+                BEGIN
+                  SELECT RAISE(ABORT, 'sync-inbound-append-only');
+                END;
+            "#,
+            kind: MigrationKind::Up,
+        },
+        // v20 — close every current INSERT OR REPLACE deletion path for the
+        // append-only inbound authority. BEFORE INSERT runs before SQLite's
+        // conflict algorithm can delete a row, and covers the table primary
+        // key, peer/revision UNIQUE constraint, accepted-child partial UNIQUE
+        // index, and an explicitly supplied colliding rowid. Normal replay is
+        // an UPDATE and remains governed by the immutable-authority trigger.
+        Migration {
+            version: 20,
+            description: "guard inbound local publication replacement",
+            sql: r#"
+                CREATE TRIGGER IF NOT EXISTS trg_sync_inbound_replacement_guard
+                BEFORE INSERT ON sync_inbound_revision_observations
+                WHEN
+                  EXISTS (
+                    SELECT 1 FROM sync_inbound_revision_observations
+                    WHERE key = NEW.key
+                  ) OR
+                  EXISTS (
+                    SELECT 1 FROM sync_inbound_revision_observations
+                    WHERE peer_object_key = NEW.peer_object_key
+                      AND revision_id = NEW.revision_id
+                  ) OR
+                  (
+                    NEW.admission_disposition = 'accepted-linear' AND
+                    EXISTS (
+                      SELECT 1 FROM sync_inbound_revision_observations
+                      WHERE peer_object_key = NEW.peer_object_key
+                        AND parent_key = NEW.parent_key
+                        AND admission_disposition = 'accepted-linear'
+                    )
+                  ) OR
+                  EXISTS (
+                    SELECT 1 FROM sync_inbound_revision_observations
+                    WHERE rowid = NEW.rowid
+                  )
+                BEGIN
+                  SELECT RAISE(ABORT, 'sync-inbound-replacement-guard');
+                END;
+            "#,
+            kind: MigrationKind::Up,
+        },
+        // v21 — P02 Wave 1 / Z6 (frozen V4, G.3, G.4, Y-8).
+        //
+        // Strictly additive. The accepted append-only inbound observation
+        // ledger is NOT touched: its admission_disposition CHECK, its
+        // idx_sync_inbound_one_accepted_child partial unique index and its
+        // immutability/append-only/replacement triggers all stand unchanged,
+        // so no accepted evidence is rewritten or reclassified. New P02
+        // branch state lands in this new table instead of extending the
+        // protected column in place.
+        //
+        // This table is a DERIVED, REBUILDABLE cache of the immutable
+        // evidence, never a second source of truth. It therefore carries no
+        // append-only trigger by design: dropping every row and rebuilding it
+        // from sync_inbound_revision_observations must reproduce the same
+        // graph and the same Y-9 classification. apply_state is CHECK-pinned
+        // to 'not-applied' so retained branch evidence can never claim to be
+        // applied (C2/G.5); canonical applied-ness stays in sync_object_state.
+        Migration {
+            version: 21,
+            description: "add p02 derived branch evidence state",
+            sql: r#"
+                CREATE TABLE IF NOT EXISTS sync_branch_evidence_state (
+                  peer_object_key                   TEXT NOT NULL,
+                  object_id                         TEXT NOT NULL,
+                  revision_id                       TEXT NOT NULL,
+                  revision_blob_sha256_hex          TEXT NOT NULL,
+                  parent_revision_id                TEXT,
+                  parent_revision_blob_sha256_hex   TEXT,
+                  branch_disposition                TEXT NOT NULL CHECK (branch_disposition IN (
+                    'accepted-linear',
+                    'retained-divergent',
+                    'retained-unproven-parent',
+                    'quarantined',
+                    'admitted-closure'
+                  )),
+                  closure_type                      TEXT CHECK (
+                    closure_type IS NULL OR
+                    closure_type IN ('branch-superseded', 'object-deleted')
+                  ),
+                  selected_revision_id              TEXT,
+                  selected_revision_blob_sha256_hex TEXT,
+                  proven                            INTEGER NOT NULL CHECK (proven IN (0, 1)),
+                  apply_state                       TEXT NOT NULL CHECK (apply_state = 'not-applied'),
+                  rebuilt_at                        TEXT NOT NULL,
+                  CHECK (
+                    (parent_revision_id IS NULL) = (parent_revision_blob_sha256_hex IS NULL) OR
+                    branch_disposition = 'retained-unproven-parent'
+                  ),
+                  CHECK (
+                    (closure_type = 'branch-superseded') =
+                    (selected_revision_id IS NOT NULL)
+                  ),
+                  PRIMARY KEY (peer_object_key, revision_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_sync_branch_evidence_object
+                  ON sync_branch_evidence_state(object_id);
+                CREATE INDEX IF NOT EXISTS idx_sync_branch_evidence_parent
+                  ON sync_branch_evidence_state(peer_object_key, parent_revision_id);
+            "#,
+            kind: MigrationKind::Up,
+        },
+        // v22 — DP-CANONICAL-REVISION-IDENTITY-01 (approved 2026-08-26).
+        //
+        // Convergence cannot be decided by comparing revision blob hashes: the
+        // anchors live in different representation domains. The canonical
+        // projection blob is a v1 source document, the published anchor is a v2
+        // P02 envelope, and the applied anchor is a transport envelope. Their
+        // bytes differ by design, so a published object could never converge.
+        // Payload identity is the one identity all three representations embed
+        // unchanged, so it is recorded here alongside the direction that
+        // produced the current anchor.
+        //
+        // Deliberately additive only: nullable, no DEFAULT, no backfill, no
+        // trigger, no CHECK, no index. A NULL direction means "no P02 anchor
+        // recorded", which is exactly the legacy P01 regime, so every existing
+        // row keeps its current meaning and its current classification.
+        Migration {
+            version: 22,
+            description: "add p02 payload equivalence identity",
+            sql: r#"
+                ALTER TABLE sync_object_state ADD COLUMN last_published_payload_sha256 TEXT;
+                ALTER TABLE sync_object_state ADD COLUMN last_applied_payload_sha256 TEXT;
+                ALTER TABLE sync_object_state ADD COLUMN last_converged_direction TEXT;
+            "#,
+            kind: MigrationKind::Up,
+        },    ]
 }
 
 async fn f5g4_setup_proof_schema(conn: &mut SqliteConnection) -> Result<(), String> {
@@ -2602,6 +2903,44 @@ macro_rules! h2o_studio_invoke_handler {
             real_transport_capability_probe::h2o_rt_webdav_setup_hydrate_form,
             real_transport_capability_probe::h2o_rt_write_grade_read_only_probe,
             real_transport_capability_probe::h2o_rt_first_write,
+            sync_object_transport::h2o_sync_object_runtime_session,
+            sync_object_transport::h2o_sync_object_publish_transport,
+            sync_object_transport::h2o_sync_object_pull_transport,
+            p02_identity_reconciliation::h2o_p02_identity_orphan_reconciliation_v2_prepare,
+            p02_identity_reconciliation::h2o_p02_identity_orphan_reconciliation_v2_lease_status,
+            p02_identity_reconciliation::h2o_p02_identity_orphan_reconciliation_v2_authorize_remove,
+            p02_identity_reconciliation::h2o_p02_identity_orphan_reconciliation_v2_complete_remove,
+            p02_identity_reconciliation::h2o_p02_identity_orphan_reconciliation_v2_cancel_remove,
+            p02_identity_reconciliation::h2o_p02_identity_orphan_reconciliation_v2_authorize_rollback,
+            p02_identity_reconciliation::h2o_p02_identity_orphan_reconciliation_v2_read_backup_with_nonce,
+            p02_identity_reconciliation::h2o_p02_identity_orphan_reconciliation_v2_cancel_rollback,
+            round2a_identity_recovery::h2o_round2a_identity_orphan_reconciliation_prepare,
+            round2a_identity_recovery::h2o_round2a_identity_orphan_reconciliation_authorize_remove,
+            round2a_identity_recovery::h2o_round2a_identity_orphan_reconciliation_complete_remove,
+            round2a_identity_recovery::h2o_round2a_identity_orphan_reconciliation_cancel_remove,
+            round2a_identity_recovery::h2o_round2a_identity_orphan_reconciliation_authorize_rollback,
+            round2a_identity_recovery::h2o_round2a_identity_orphan_reconciliation_read_backup_with_nonce,
+            round2a_identity_recovery::h2o_round2a_identity_orphan_reconciliation_cancel_rollback,
+            item11_delivery_destination::h2o_item11_select_delivery_folder,
+            item11_delivery_destination::h2o_item11_validate_delivery_authorization,
+            item11_delivery_destination::h2o_item11_read_lineage,
+            p02_steady_authority::h2o_p02_read_writer_generation_authority,
+            p02_steady_authority::h2o_p02_steady_begin,
+            p02_steady_authority::h2o_p02_steady_finish,
+            p02_activation::h2o_p02_read_library_authority,
+            item11_delivery_destination::h2o_item11_prepare_delivery,
+            item11_delivery_destination::h2o_item11_prepare_local_delivery,
+            sync_maintenance_suppression::h2o_sync_maintenance_suppression,
+            p02_activation::h2o_p02_resolve_repository_root,
+            p02_activation::h2o_p02_activate_format_gate,
+            p02_writer_storage::h2o_p02_storage_read,
+            p02_writer_storage::h2o_p02_storage_write_temporary,
+            p02_writer_storage::h2o_p02_storage_read_temporary,
+            p02_writer_storage::h2o_p02_storage_promote_temporary,
+            p02_publication_authority::h2o_p02_publication_begin,
+            p02_publication_authority::h2o_p02_publication_finish,
+            local_publication_intake::h2o_local_publication_receive,
+            local_publication_intake::h2o_local_publication_read_branches,
             ingest_conflict_candidates,
             mark_sync_conflict_decision,
             prove_folder_metadata_color_apply_rollback,
@@ -2656,6 +2995,44 @@ macro_rules! h2o_studio_invoke_handler {
             real_transport_capability_probe::h2o_rt_webdav_setup_hydrate_form,
             real_transport_capability_probe::h2o_rt_write_grade_read_only_probe,
             real_transport_capability_probe::h2o_rt_first_write,
+            sync_object_transport::h2o_sync_object_runtime_session,
+            sync_object_transport::h2o_sync_object_publish_transport,
+            sync_object_transport::h2o_sync_object_pull_transport,
+            p02_identity_reconciliation::h2o_p02_identity_orphan_reconciliation_v2_prepare,
+            p02_identity_reconciliation::h2o_p02_identity_orphan_reconciliation_v2_lease_status,
+            p02_identity_reconciliation::h2o_p02_identity_orphan_reconciliation_v2_authorize_remove,
+            p02_identity_reconciliation::h2o_p02_identity_orphan_reconciliation_v2_complete_remove,
+            p02_identity_reconciliation::h2o_p02_identity_orphan_reconciliation_v2_cancel_remove,
+            p02_identity_reconciliation::h2o_p02_identity_orphan_reconciliation_v2_authorize_rollback,
+            p02_identity_reconciliation::h2o_p02_identity_orphan_reconciliation_v2_read_backup_with_nonce,
+            p02_identity_reconciliation::h2o_p02_identity_orphan_reconciliation_v2_cancel_rollback,
+            round2a_identity_recovery::h2o_round2a_identity_orphan_reconciliation_prepare,
+            round2a_identity_recovery::h2o_round2a_identity_orphan_reconciliation_authorize_remove,
+            round2a_identity_recovery::h2o_round2a_identity_orphan_reconciliation_complete_remove,
+            round2a_identity_recovery::h2o_round2a_identity_orphan_reconciliation_cancel_remove,
+            round2a_identity_recovery::h2o_round2a_identity_orphan_reconciliation_authorize_rollback,
+            round2a_identity_recovery::h2o_round2a_identity_orphan_reconciliation_read_backup_with_nonce,
+            round2a_identity_recovery::h2o_round2a_identity_orphan_reconciliation_cancel_rollback,
+            item11_delivery_destination::h2o_item11_select_delivery_folder,
+            item11_delivery_destination::h2o_item11_validate_delivery_authorization,
+            item11_delivery_destination::h2o_item11_read_lineage,
+            p02_steady_authority::h2o_p02_read_writer_generation_authority,
+            p02_steady_authority::h2o_p02_steady_begin,
+            p02_steady_authority::h2o_p02_steady_finish,
+            p02_activation::h2o_p02_read_library_authority,
+            item11_delivery_destination::h2o_item11_prepare_delivery,
+            item11_delivery_destination::h2o_item11_prepare_local_delivery,
+            sync_maintenance_suppression::h2o_sync_maintenance_suppression,
+            p02_activation::h2o_p02_resolve_repository_root,
+            p02_activation::h2o_p02_activate_format_gate,
+            p02_writer_storage::h2o_p02_storage_read,
+            p02_writer_storage::h2o_p02_storage_write_temporary,
+            p02_writer_storage::h2o_p02_storage_read_temporary,
+            p02_writer_storage::h2o_p02_storage_promote_temporary,
+            p02_publication_authority::h2o_p02_publication_begin,
+            p02_publication_authority::h2o_p02_publication_finish,
+            local_publication_intake::h2o_local_publication_receive,
+            local_publication_intake::h2o_local_publication_read_branches,
             ingest_conflict_candidates,
             mark_sync_conflict_decision,
             prove_folder_metadata_color_apply_rollback,

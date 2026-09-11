@@ -14,6 +14,8 @@
  *
  * Public API:
  *   H2O.Studio.identity.whenReady()       Promise<PeerIdentity | null>
+ *   H2O.Studio.identity.whenSyncReady()   Promise<PeerIdentity> (fail-closed
+ *                                           Chrome sync readiness boundary)
  *   H2O.Studio.identity.get()             PeerIdentity | null   (synchronous;
  *                                           returns null until whenReady resolves)
  *   H2O.Studio.identity.diagnose()        { …UI-safe redacted view… }
@@ -48,8 +50,13 @@
 
   var IDENTITY_KEY    = 'h2o:sync:peer-identity:v1';
   var IDENTITY_SCHEMA = 'h2o.studio.peer-identity.v1';
-  var MODULE_VERSION  = '0.1.0-f2';
+  var MODULE_VERSION  = '0.1.0-item9-1';
   var DISPLAY_NAME_MAX = 80;
+  var SYNC_ERROR = Object.freeze({
+    UNAVAILABLE: 'round2-item9-identity-unavailable',
+    MALFORMED: 'round2-item9-identity-malformed',
+    UNSUPPORTED: 'round2-item9-identity-classification-unsupported'
+  });
 
   /* Surface enums — single source of truth. Native-host strings are
    * deliberately NOT in SURFACE_KIND; that enforces the F2 architecture
@@ -130,6 +137,12 @@
   function warnOnce(msg) {
     try { console.warn('[H2O F2 peer-identity] ' + msg); }
     catch (_) { /* ignore */ }
+  }
+
+  function syncIdentityError(code) {
+    var error = new Error(code);
+    error.code = code;
+    return error;
   }
 
   /* ─── Surface detection ───────────────────────────────────────────── */
@@ -244,49 +257,80 @@
     };
   }
 
-  /* Repair syncPeerId if it drifts from the derived value (mutates raw). */
-  function ensureSyncPeerIdConsistent(raw) {
-    var derived = deriveSyncPeerId(raw.surfaceKind, raw.appKind, raw.storeKind, raw.installId);
-    if (raw.syncPeerId !== derived) {
-      raw.syncPeerId = derived;
-      raw.updatedAt = nowIso();
-      return true;
-    }
-    return false;
-  }
-
-  /* Option A surface-transition reconciliation: preserve installId, update
-   * current markers, append the prior surface to surfaceHistory. */
-  function reconcileSurface(raw, current) {
-    if (raw.surfaceKind === current.surfaceKind
-        && raw.appKind === current.appKind
-        && raw.storeKind === current.storeKind) {
-      return false;
-    }
-    var history = Array.isArray(raw.surfaceHistory) ? raw.surfaceHistory.slice() : [];
-    history.push({
-      surfaceKind: raw.surfaceKind,
-      appKind:     raw.appKind,
-      storeKind:   raw.storeKind,
-      observedUntil: raw.updatedAt
-    });
-    raw.surfaceKind = current.surfaceKind;
-    raw.appKind     = current.appKind;
-    raw.storeKind   = current.storeKind;
-    raw.surfaceHistory = history;
-    raw.syncPeerId = deriveSyncPeerId(current.surfaceKind, current.appKind, current.storeKind, raw.installId);
-    raw.updatedAt  = nowIso();
-    return true;
-  }
-
   /* ─── Init state (in-memory) ──────────────────────────────────────── */
 
   var state = {
     initStarted: false,
     initPromise: null,
     identity:    null,
-    lastWarn:    null
+    lastWarn:    null,
+    syncReadinessErrorCode: null,
+    authority: {
+      desktop: false,
+      ready: false,
+      canonical: false,
+      status: 'not-applicable',
+      backend: 'unknown',
+      sqliteFingerprintSha256Hex: null,
+      localStorageFingerprintSha256Hex: null,
+      copiesMatch: false
+    }
   };
+
+  function desktopAuthorityApi() {
+    return H2O.Studio && H2O.Studio.platform;
+  }
+
+  function setDesktopAuthority(snapshot) {
+    var safe = snapshot && typeof snapshot === 'object' ? snapshot : {};
+    state.authority = {
+      desktop: true,
+      ready: safe.ready === true,
+      canonical: safe.canonical === true,
+      status: isString(safe.status) ? safe.status : 'unavailable',
+      backend: isString(safe.backend) ? safe.backend : 'unavailable',
+      sqliteFingerprintSha256Hex: isString(safe.sqliteFingerprintSha256Hex)
+        ? safe.sqliteFingerprintSha256Hex : null,
+      localStorageFingerprintSha256Hex: isString(safe.localStorageFingerprintSha256Hex)
+        ? safe.localStorageFingerprintSha256Hex : null,
+      copiesMatch: safe.copiesMatch === true
+    };
+    return state.authority;
+  }
+
+  function awaitDesktopAuthority(surface) {
+    if (surface.appKind !== APP_KIND.TAURI_DESKTOP) return Promise.resolve(null);
+    var platform = desktopAuthorityApi();
+    if (!platform || typeof platform.__desktopIdentityReady !== 'function') {
+      setDesktopAuthority({ status: 'unavailable', backend: 'unavailable' });
+      return Promise.reject(new Error('desktop identity readiness unavailable'));
+    }
+    return platform.__desktopIdentityReady().then(function (snapshot) {
+      var authority = setDesktopAuthority(snapshot);
+      if (!authority.ready || authority.backend !== 'sqlite') {
+        throw new Error('desktop identity backend unavailable');
+      }
+      if (!authority.canonical && authority.status !== 'missing') {
+        throw new Error('desktop identity ' + authority.status);
+      }
+      return authority;
+    });
+  }
+
+  function refreshDesktopAuthority(surface) {
+    if (surface.appKind !== APP_KIND.TAURI_DESKTOP) return Promise.resolve(null);
+    var platform = desktopAuthorityApi();
+    if (!platform || typeof platform.__refreshDesktopIdentityAuthority !== 'function') {
+      return Promise.reject(new Error('desktop identity refresh unavailable'));
+    }
+    return platform.__refreshDesktopIdentityAuthority().then(function (snapshot) {
+      return setDesktopAuthority(snapshot);
+    });
+  }
+
+  function identityJson(value) {
+    try { return JSON.stringify(value); } catch (_) { return ''; }
+  }
 
   function init() {
     if (state.initStarted) return state.initPromise;
@@ -300,29 +344,93 @@
         return Promise.resolve(null);
       }
 
-      return storageGet(IDENTITY_KEY)
+      return awaitDesktopAuthority(surface)
+        .then(function () { return storageGet(IDENTITY_KEY); })
         .then(function (raw) {
           if (raw) {
             var v = validateIdentity(raw);
             if (v.ok) {
-              var reconciled = reconcileSurface(raw, surface);
-              var repaired   = ensureSyncPeerIdConsistent(raw);
-              if (reconciled || repaired) {
-                return storageSet(IDENTITY_KEY, raw).then(function () { return raw; });
+              if (surface.appKind === APP_KIND.TAURI_DESKTOP) {
+                var expectedPeerId = deriveSyncPeerId(
+                  surface.surfaceKind,
+                  surface.appKind,
+                  surface.storeKind,
+                  raw.installId
+                );
+                if (raw.surfaceKind !== surface.surfaceKind ||
+                    raw.appKind !== surface.appKind ||
+                    raw.storeKind !== surface.storeKind ||
+                    raw.syncPeerId !== expectedPeerId) {
+                  throw new Error('desktop identity schema inconsistent');
+                }
+                return raw;
+              }
+              var expectedChromePeerId = deriveSyncPeerId(
+                surface.surfaceKind,
+                surface.appKind,
+                surface.storeKind,
+                raw.installId
+              );
+              if (raw.surfaceKind !== surface.surfaceKind ||
+                  raw.appKind !== surface.appKind ||
+                  raw.storeKind !== surface.storeKind) {
+                state.syncReadinessErrorCode = SYNC_ERROR.UNSUPPORTED;
+                throw syncIdentityError(SYNC_ERROR.UNSUPPORTED);
+              }
+              if (raw.syncPeerId !== expectedChromePeerId) {
+                state.syncReadinessErrorCode = SYNC_ERROR.MALFORMED;
+                throw syncIdentityError(SYNC_ERROR.MALFORMED);
               }
               return raw;
             }
-            state.lastWarn = 'Existing identity invalid (' + v.reason + '); minting new.';
-            warnOnce(state.lastWarn);
+            if (surface.appKind === APP_KIND.TAURI_DESKTOP) {
+              throw new Error('desktop identity invalid (' + v.reason + ')');
+            }
+            state.syncReadinessErrorCode = SYNC_ERROR.MALFORMED;
+            throw syncIdentityError(SYNC_ERROR.MALFORMED);
+          }
+          /* T12: the canonical SQLite authority wins on Desktop. A fresh peer
+           * may be minted only from a positively-observed absence ('missing').
+           * Any other Desktop authority state reaching this point — canonical
+           * (a durable identity already exists) or unavailable/unobserved —
+           * must fail closed rather than mint a second, independent
+           * localStorage peer that would diverge the authority permanently. */
+          if (surface.appKind === APP_KIND.TAURI_DESKTOP &&
+              state.authority.status !== 'missing') {
+            throw new Error(
+              'desktop identity mint refused (' + state.authority.status + ')'
+            );
           }
           var fresh = mintIdentity(surface);
-          return storageSet(IDENTITY_KEY, fresh).then(function () { return fresh; });
+          var expectedJson = identityJson(fresh);
+          return storageSet(IDENTITY_KEY, fresh)
+            .then(function () { return storageGet(IDENTITY_KEY); })
+            .then(function (readback) {
+              if (!validateIdentity(readback).ok || identityJson(readback) !== expectedJson) {
+                throw new Error('peer identity persistence verification failed');
+              }
+              return refreshDesktopAuthority(surface).then(function (authority) {
+                if (surface.appKind === APP_KIND.TAURI_DESKTOP &&
+                    (!authority || !authority.canonical)) {
+                  throw new Error('desktop identity not canonical after persistence');
+                }
+                return readback;
+              });
+            });
         })
         .then(function (identity) {
           state.identity = identity;
+          state.syncReadinessErrorCode = null;
           return identity;
         })
         .catch(function (err) {
+          if (err && (err.code === SYNC_ERROR.MALFORMED ||
+                      err.code === SYNC_ERROR.UNSUPPORTED ||
+                      err.code === SYNC_ERROR.UNAVAILABLE)) {
+            state.syncReadinessErrorCode = err.code;
+          } else if (!state.syncReadinessErrorCode) {
+            state.syncReadinessErrorCode = SYNC_ERROR.UNAVAILABLE;
+          }
           state.lastWarn = 'Init failed: ' + String((err && err.message) || err);
           warnOnce(state.lastWarn);
           return null;
@@ -336,7 +444,46 @@
 
   function whenReady() { return init(); }
 
+  function whenSyncReady() {
+    return init().then(function (identity) {
+      if (!identity) {
+        throw syncIdentityError(state.syncReadinessErrorCode || SYNC_ERROR.UNAVAILABLE);
+      }
+      var validation = validateIdentity(identity);
+      if (!validation.ok || !Array.isArray(identity.surfaceHistory)) {
+        throw syncIdentityError(SYNC_ERROR.MALFORMED);
+      }
+      if (identity.surfaceKind !== SURFACE_KIND.STUDIO_CHROME ||
+          identity.appKind !== APP_KIND.MV3_CHROME ||
+          identity.storeKind !== STORE_KIND.IDB_ARCHIVE) {
+        throw syncIdentityError(SYNC_ERROR.UNSUPPORTED);
+      }
+      if (identity.syncPeerId !== deriveSyncPeerId(
+        identity.surfaceKind,
+        identity.appKind,
+        identity.storeKind,
+        identity.installId
+      )) {
+        throw syncIdentityError(SYNC_ERROR.MALFORMED);
+      }
+      return identity;
+    });
+  }
+
   function get() { return state.identity; }
+
+  function authority() {
+    return {
+      desktop: state.authority.desktop === true,
+      ready: state.authority.ready === true,
+      canonical: state.authority.canonical === true,
+      status: state.authority.status,
+      backend: state.authority.backend,
+      sqliteFingerprintSha256Hex: state.authority.sqliteFingerprintSha256Hex,
+      localStorageFingerprintSha256Hex: state.authority.localStorageFingerprintSha256Hex,
+      copiesMatch: state.authority.copiesMatch === true
+    };
+  }
 
   /* diagnose(): UI-safe redacted view.
    *   Omitted: installId, physicalDeviceId, syncPeerId (latter embeds installId).
@@ -347,10 +494,12 @@
     var id = state.identity;
     if (!id) {
       return {
-        status:         'pending',
+        status:         state.authority.desktop && state.authority.status === 'divergent'
+          ? 'divergent' : 'pending',
         schema:         IDENTITY_SCHEMA,
         moduleVersion:  MODULE_VERSION,
-        lastWarn:       state.lastWarn
+        lastWarn:       state.lastWarn,
+        authority:      authority()
       };
     }
     return {
@@ -363,13 +512,17 @@
       createdAt:           id.createdAt,
       updatedAt:           id.updatedAt,
       surfaceHistoryDepth: Array.isArray(id.surfaceHistory) ? id.surfaceHistory.length : 0,
-      moduleVersion:       MODULE_VERSION
+      moduleVersion:       MODULE_VERSION,
+      authority:           authority()
     };
   }
 
   function setDisplayName(name) {
     return whenReady().then(function (id) {
       if (!id) throw new Error('peer identity not initialized');
+      if (state.authority.desktop) {
+        throw new Error('desktop peer identity metadata is immutable');
+      }
       var trimmed = String(name == null ? '' : name);
       if (trimmed.length > DISPLAY_NAME_MAX) trimmed = trimmed.slice(0, DISPLAY_NAME_MAX);
       if (trimmed === id.displayName) return id;
@@ -382,7 +535,9 @@
   /* ─── Registration ────────────────────────────────────────────────── */
 
   H2O.Studio.identity.whenReady          = whenReady;
+  H2O.Studio.identity.whenSyncReady      = whenSyncReady;
   H2O.Studio.identity.get                = get;
+  H2O.Studio.identity.authority          = authority;
   H2O.Studio.identity.diagnose           = diagnose;
   H2O.Studio.identity.setDisplayName     = setDisplayName;
   H2O.Studio.identity.constants          = Object.freeze({
@@ -390,6 +545,7 @@
     APP_KIND:       APP_KIND,
     STORE_KIND:     STORE_KIND,
     CAPTURE_SOURCE: CAPTURE_SOURCE,
+    SYNC_ERROR:     SYNC_ERROR,
     KEY:            IDENTITY_KEY,
     SCHEMA:         IDENTITY_SCHEMA
   });

@@ -62,6 +62,13 @@
    * M2 will replace this with a SQLite-backed shim driven by
    * tauri-plugin-sql. The entity stores will not need to change.
    */
+  /* Item 11 runtime-authority fix: records whether a REAL browser-extension
+   * chrome.storage.local was already present when this file loaded. A real
+   * extension backend is authoritative immediately; the temporary
+   * localStorage shim installed below never is. Read only by
+   * whenStorageAuthorityReady(). */
+  var realChromeStorageDetected = false;
+
   (function installChromeStorageShim() {
     try {
       if (typeof global.chrome === 'undefined') {
@@ -74,7 +81,11 @@
         global.chrome.runtime = {};
       }
       if (!global.chrome.storage) global.chrome.storage = {};
-      if (global.chrome.storage.local) return; /* real chrome.storage present; don't shim */
+      if (global.chrome.storage.local) {
+        /* real chrome.storage present; don't shim — and it is authoritative. */
+        realChromeStorageDetected = true;
+        return;
+      }
 
       var changeListeners = new Set();
 
@@ -103,6 +114,11 @@
         },
         set: function (items, cb) {
           try {
+            if (orphanIdentityWriteBlocked(Object.keys(items || {}))) {
+              if (typeof cb === 'function') cb();
+              return Promise.reject(new Error(
+                'round2-item11-identity-orphan-identity-write-blocked-by-lease'));
+            }
             var changed = {};
             var keys = Object.keys(items || {});
             for (var i = 0; i < keys.length; i += 1) {
@@ -129,6 +145,11 @@
         },
         remove: function (keys, cb) {
           try {
+            if (orphanIdentityWriteBlocked(keys)) {
+              if (typeof cb === 'function') cb();
+              return Promise.reject(new Error(
+                'round2-item11-identity-orphan-identity-write-blocked-by-lease'));
+            }
             var arr = Array.isArray(keys) ? keys.slice() : [keys];
             var changed = {};
             for (var i = 0; i < arr.length; i += 1) {
@@ -985,6 +1006,8 @@
    */
   var SQLITE_DB_URL = 'sqlite:studio-v1.db';
   var SQLITE_MIGRATION_MARKER_KEY = '__h2o_v1_localstorage_migration';
+  var DESKTOP_PEER_IDENTITY_KEY = 'h2o:sync:peer-identity:v1';
+  var DESKTOP_PEER_IDENTITY_SCHEMA = 'h2o.studio.peer-identity.v1';
   var sqliteState = {
     ready: false,
     backend: 'localStorage',     /* current active backend for chrome.storage.local */
@@ -992,8 +1015,242 @@
     dbUrl: SQLITE_DB_URL,
     migrationCompletedAt: null,  /* epoch ms | null */
     keysMigrated: 0,
+    identityAuthority: {
+      ready: false,
+      backend: 'localStorage',
+      status: 'initializing',
+      canonical: false,
+      sqliteFingerprintSha256Hex: null,
+      localStorageFingerprintSha256Hex: null,
+      copiesMatch: false,
+    },
   };
   var sqliteReadyPromise = null;
+
+  function validDesktopIdentity(rawText) {
+    if (typeof rawText !== 'string' || !rawText || rawText.length > 16384) return null;
+    var value;
+    try { value = JSON.parse(rawText); } catch (_) { return null; }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    var expectedKeys = [
+      'schema', 'installId', 'physicalDeviceId', 'syncPeerId', 'surfaceKind',
+      'appKind', 'storeKind', 'displayName', 'createdAt', 'updatedAt',
+      'surfaceHistory'
+    ];
+    try {
+      var keys = Object.keys(value);
+      if (keys.length !== expectedKeys.length ||
+          !expectedKeys.every(function (key) {
+            return Object.prototype.hasOwnProperty.call(value, key);
+          })) return null;
+    } catch (_) { return null; }
+    var uuidV4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if (value.schema !== DESKTOP_PEER_IDENTITY_SCHEMA ||
+        !uuidV4.test(String(value.installId || '')) ||
+        !uuidV4.test(String(value.physicalDeviceId || '')) ||
+        value.surfaceKind !== 'studio-desktop' ||
+        value.appKind !== 'tauri-desktop' ||
+        value.storeKind !== 'sqlite' ||
+        typeof value.displayName !== 'string' || value.displayName.length > 80 ||
+        typeof value.createdAt !== 'string' || !value.createdAt || value.createdAt.length > 64 ||
+        typeof value.updatedAt !== 'string' || !value.updatedAt || value.updatedAt.length > 64 ||
+        !Array.isArray(value.surfaceHistory) || value.surfaceHistory.length > 32) {
+      return null;
+    }
+    for (var historyIndex = 0; historyIndex < value.surfaceHistory.length; historyIndex += 1) {
+      var entry = value.surfaceHistory[historyIndex];
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+      var historyKeys;
+      try { historyKeys = Object.keys(entry); } catch (_) { return null; }
+      if (historyKeys.length !== 4 ||
+          ['studio-desktop', 'studio-chrome', 'studio-mobile', 'studio-firefox']
+            .indexOf(entry.surfaceKind) < 0 ||
+          ['tauri-desktop', 'mv3-chrome', 'mv3-firefox', 'expo-mobile']
+            .indexOf(entry.appKind) < 0 ||
+          ['sqlite', 'idb-shared', 'idb-archive', 'expo-sqlite', 'expo-fs']
+            .indexOf(entry.storeKind) < 0 ||
+          typeof entry.observedUntil !== 'string' ||
+          !entry.observedUntil || entry.observedUntil.length > 64) return null;
+    }
+    var expectedPeerId = 'studio-desktop:tauri-desktop:sqlite:' + value.installId;
+    if (value.syncPeerId !== expectedPeerId) return null;
+    return value;
+  }
+
+  function sha256Text(value) {
+    try {
+      if (!global.crypto || !global.crypto.subtle ||
+          typeof global.crypto.subtle.digest !== 'function' ||
+          typeof global.TextEncoder !== 'function') {
+        return Promise.resolve(null);
+      }
+      return global.crypto.subtle.digest(
+        'SHA-256',
+        new global.TextEncoder().encode(String(value))
+      ).then(function (digest) {
+        return Array.from(new Uint8Array(digest)).map(function (byte) {
+          return byte.toString(16).padStart(2, '0');
+        }).join('');
+      }, function () { return null; });
+    } catch (_) {
+      return Promise.resolve(null);
+    }
+  }
+
+  function localStorageIdentityRaw() {
+    try { return global.localStorage.getItem(DESKTOP_PEER_IDENTITY_KEY); }
+    catch (_) { return null; }
+  }
+
+  function sqliteIdentityRaw() {
+    var invoke = getTauriInvoke();
+    if (!invoke || !sqliteState.ready) return Promise.resolve(null);
+    return invoke('plugin:sql|select', {
+      db: SQLITE_DB_URL,
+      query: 'SELECT value FROM kv_store WHERE key = ? LIMIT 1',
+      values: [DESKTOP_PEER_IDENTITY_KEY],
+    }).then(function (rows) {
+      return Array.isArray(rows) && rows.length === 1 &&
+        rows[0] && typeof rows[0].value === 'string' ? rows[0].value : null;
+    });
+  }
+
+  /* T12 identity-observation invariant.
+   *
+   * The identity authority may report 'missing' ONLY on positive evidence that
+   * SQLite holds no identity row, because 'missing' is the one status that
+   * authorises peer-identity.js to mint a fresh peer. Every other outcome —
+   * the backend not being ready, a select that cannot run, or a row that is
+   * present but not observable as text (an unexpected plugin row shape) — is
+   * "not observed", NOT "absent". Conflating the two lets a Desktop that
+   * already owns a canonical SQLite identity mint a second, independent
+   * localStorage peer, which then diverges the authority permanently and fails
+   * every outbound writer closed with round2a-sync-peer-identity-divergent.
+   *
+   * Returns { observed, raw }:
+   *   observed:false            -> absence is unproven; caller must fail closed
+   *   observed:true,  raw:null  -> the row genuinely does not exist
+   *   observed:true,  raw:text  -> the stored identity text */
+  function sqliteIdentityObservation() {
+    var invoke = getTauriInvoke();
+    if (!invoke || !sqliteState.ready) {
+      return Promise.resolve({ observed: false, raw: null });
+    }
+    return invoke('plugin:sql|select', {
+      db: SQLITE_DB_URL,
+      query: 'SELECT value FROM kv_store WHERE key = ? LIMIT 1',
+      values: [DESKTOP_PEER_IDENTITY_KEY],
+    }).then(function (rows) {
+      if (!Array.isArray(rows)) return { observed: false, raw: null };
+      if (rows.length === 0) return { observed: true, raw: null };
+      var row = rows[0];
+      if (!row || typeof row.value !== 'string') {
+        return { observed: false, raw: null };
+      }
+      return { observed: true, raw: row.value };
+    });
+  }
+
+  function safeIdentityAuthority(status, sqliteIdentity, localIdentity, copiesMatch) {
+    return Promise.all([
+      sqliteIdentity ? sha256Text(sqliteIdentity.syncPeerId) : Promise.resolve(null),
+      localIdentity ? sha256Text(localIdentity.syncPeerId) : Promise.resolve(null),
+    ]).then(function (fingerprints) {
+      var canonical = status === 'matching' || status === 'sqlite-only' || status === 'migrated';
+      sqliteState.identityAuthority = {
+        ready: true,
+        backend: 'sqlite',
+        status: status,
+        canonical: canonical,
+        sqliteFingerprintSha256Hex: fingerprints[0],
+        localStorageFingerprintSha256Hex: fingerprints[1],
+        copiesMatch: copiesMatch === true,
+      };
+      return sqliteState.identityAuthority;
+    });
+  }
+
+  /* Establish the Desktop identity authority before exposing the SQLite
+   * chrome.storage backend. The generic M2 migration never handles the
+   * identity key. This routine either preserves an existing valid SQLite
+   * value, migrates one exact valid localStorage value into an empty SQLite
+   * slot, reports a missing value for peer-identity.js to mint after
+   * readiness, or fails closed on invalid/divergent copies. */
+  function prepareDesktopIdentityAuthority() {
+    var invoke = getTauriInvoke();
+    if (!invoke || !sqliteState.ready) {
+      sqliteState.identityAuthority = {
+        ready: false,
+        backend: sqliteState.backend,
+        status: 'unavailable',
+        canonical: false,
+        sqliteFingerprintSha256Hex: null,
+        localStorageFingerprintSha256Hex: null,
+        copiesMatch: false,
+      };
+      return Promise.resolve(sqliteState.identityAuthority);
+    }
+    var localRaw = localStorageIdentityRaw();
+    return sqliteIdentityObservation().then(function (sqliteObservation) {
+      /* T12: absence must be proven, never assumed. An unobservable SQLite
+       * identity row is 'unavailable' (fail closed), never 'missing'. */
+      if (!sqliteObservation.observed) {
+        return safeIdentityAuthority(
+          'unavailable', null, localRaw == null ? null : validDesktopIdentity(localRaw), false
+        );
+      }
+      var sqliteRaw = sqliteObservation.raw;
+      var sqliteIdentity = sqliteRaw == null ? null : validDesktopIdentity(sqliteRaw);
+      var localIdentity = localRaw == null ? null : validDesktopIdentity(localRaw);
+      if (sqliteRaw != null && !sqliteIdentity) {
+        return safeIdentityAuthority('invalid', null, localIdentity, false);
+      }
+      if (localRaw != null && !localIdentity) {
+        return safeIdentityAuthority('invalid', sqliteIdentity, null, false);
+      }
+      if (sqliteIdentity) {
+        if (!localIdentity) {
+          return safeIdentityAuthority('sqlite-only', sqliteIdentity, null, false);
+        }
+        if (sqliteRaw === localRaw) {
+          return safeIdentityAuthority('matching', sqliteIdentity, localIdentity, true);
+        }
+        return safeIdentityAuthority('divergent', sqliteIdentity, localIdentity, false);
+      }
+      if (!localIdentity) {
+        return safeIdentityAuthority('missing', null, null, false);
+      }
+      var now = Date.now();
+      return invoke('plugin:sql|execute', {
+        db: SQLITE_DB_URL,
+        query: 'INSERT INTO kv_store (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO NOTHING',
+        values: [DESKTOP_PEER_IDENTITY_KEY, localRaw, now],
+      }).then(function () {
+        return sqliteIdentityRaw();
+      }).then(function (readbackRaw) {
+        var readbackIdentity = validDesktopIdentity(readbackRaw);
+        if (!readbackIdentity || readbackRaw !== localRaw) {
+          return safeIdentityAuthority('divergent', readbackIdentity, localIdentity, false);
+        }
+        return safeIdentityAuthority('migrated', readbackIdentity, localIdentity, true);
+      });
+    }).catch(function () {
+      return safeIdentityAuthority('unavailable', null, null, false);
+    });
+  }
+
+  function desktopIdentityAuthoritySnapshot() {
+    var source = sqliteState.identityAuthority || {};
+    return {
+      ready: source.ready === true,
+      backend: String(source.backend || 'unavailable'),
+      status: String(source.status || 'unavailable'),
+      canonical: source.canonical === true,
+      sqliteFingerprintSha256Hex: source.sqliteFingerprintSha256Hex || null,
+      localStorageFingerprintSha256Hex: source.localStorageFingerprintSha256Hex || null,
+      copiesMatch: source.copiesMatch === true,
+    };
+  }
 
   function sqliteInit() {
     if (sqliteReadyPromise) return sqliteReadyPromise;
@@ -1010,6 +1267,9 @@
           return migrateLocalStorageToSqlite();
         })
         .then(function () {
+          return prepareDesktopIdentityAuthority();
+        })
+        .then(function () {
           if (sqliteState.ready) {
             upgradeChromeStorageToSqlite();
             sqliteState.backend = 'sqlite';
@@ -1020,12 +1280,72 @@
         })
         .catch(function (e) {
           sqliteState.initError = String((e && e.message) || e);
+          sqliteState.identityAuthority = {
+            ready: false,
+            backend: sqliteState.backend,
+            status: 'unavailable',
+            canonical: false,
+            sqliteFingerprintSha256Hex: null,
+            localStorageFingerprintSha256Hex: null,
+            copiesMatch: false,
+          };
           try { console.warn('[H2O.Studio.platform.tauri] SQLite init failed; staying on localStorage shim', e); }
           catch (_) { /* ignore */ }
           return false;
         });
     })();
     return sqliteReadyPromise;
+  }
+
+  /* ── Item 11 storage-authority readiness ──────────────────────────────
+   * One memoized promise, resolved after the full sqliteInit() chain has
+   * run upgradeChromeStorageToSqlite(). Never rejects. See the contract
+   * documented at platform.whenStorageAuthorityReady below. */
+  var storageAuthorityReadyPromise = null;
+  var orphanReconciliationRestartRequired = false;
+  /* Item 11 removal lease mirror: lets the chrome.storage shims fail closed on
+   * the identity key without an await inside the write path. The NATIVE lease is
+   * the authority; this flag is set only from a native authorization and cleared
+   * on completion or cancellation. */
+  var orphanRemovalLeaseHeld = false;
+  function orphanIdentityWriteBlocked(keys) {
+    if (!orphanRemovalLeaseHeld) return false;
+    var list = Array.isArray(keys) ? keys : [keys];
+    for (var i = 0; i < list.length; i += 1) {
+      if (list[i] === DESKTOP_PEER_IDENTITY_KEY) return true;
+    }
+    return false;
+  }
+
+  function storageAuthoritySnapshot() {
+    if (realChromeStorageDetected) {
+      return Object.freeze({ ready: true, backend: 'chrome', status: 'ready' });
+    }
+    if (sqliteState.ready === true && sqliteState.backend === 'sqlite') {
+      return Object.freeze({ ready: true, backend: 'sqlite', status: 'ready' });
+    }
+    /* The temporary localStorage shim is never authoritative. Distinguish a
+     * surface that has no Tauri bridge at all from a real init/upgrade
+     * failure so callers can report the reason truthfully. */
+    var unavailable = String(sqliteState.initError || '').indexOf('tauri invoke unavailable') >= 0;
+    return Object.freeze({
+      ready: false,
+      backend: 'localstorage',
+      status: unavailable ? 'unavailable' : 'failed',
+    });
+  }
+
+  function whenStorageAuthorityReady() {
+    if (storageAuthorityReadyPromise) return storageAuthorityReadyPromise;
+    if (realChromeStorageDetected) {
+      storageAuthorityReadyPromise = Promise.resolve(storageAuthoritySnapshot());
+      return storageAuthorityReadyPromise;
+    }
+    storageAuthorityReadyPromise = sqliteInit().then(
+      function () { return storageAuthoritySnapshot(); },
+      function () { return storageAuthoritySnapshot(); }
+    );
+    return storageAuthorityReadyPromise;
   }
 
   /* One-shot copy of all `h2o:*` keys from localStorage into SQLite's
@@ -1058,12 +1378,16 @@
       var now = Date.now();
       var copyChain = Promise.resolve();
       keys.forEach(function (key) {
+        if (key === DESKTOP_PEER_IDENTITY_KEY) return;
         copyChain = copyChain.then(function () {
           var raw = global.localStorage.getItem(key);
           if (raw == null) return null;
+          /* Insert-if-absent, never overwrite. An older process booting late
+           * must not replace canonical authority a newer one already wrote -
+           * which a blind INSERT OR REPLACE did, silently. */
           return invoke('plugin:sql|execute', {
             db: SQLITE_DB_URL,
-            query: 'INSERT OR REPLACE INTO kv_store (key, value, updated_at) VALUES (?, ?, ?)',
+            query: 'INSERT INTO kv_store (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO NOTHING',
             values: [key, raw, now],
           }).catch(function (e) {
             try { console.warn('[H2O.Studio.platform.tauri] migration: failed to copy key ' + key, e); }
@@ -1080,6 +1404,108 @@
           query: 'INSERT OR REPLACE INTO kv_store (key, value, updated_at) VALUES (?, ?, ?)',
           values: [SQLITE_MIGRATION_MARKER_KEY, marker, now],
         }).catch(function () { /* swallow; non-fatal */ });
+      });
+    });
+  }
+
+  /* Rows affected by the last execute. The Tauri sql plugin answers
+   * [rowsAffected, lastInsertId]; tolerate an object shape too rather than
+   * trusting one plugin version. An unreadable answer is NOT a win. */
+  function sqliteAffectedRows(result) {
+    if (Array.isArray(result) && result.length > 0) return Number(result[0]) || 0;
+    if (result && typeof result === 'object' && 'rowsAffected' in result) {
+      return Number(result.rowsAffected) || 0;
+    }
+    return 0;
+  }
+
+  function sqliteRawValue(key) {
+    var invoke = getTauriInvoke();
+    if (!invoke) return Promise.resolve(null);
+    return invoke('plugin:sql|select', {
+      db: SQLITE_DB_URL,
+      query: 'SELECT value FROM kv_store WHERE key = ? LIMIT 1',
+      values: [key],
+    }).then(function (rows) {
+      return Array.isArray(rows) && rows.length === 1 &&
+        rows[0] && typeof rows[0].value === 'string' ? rows[0].value : null;
+    });
+  }
+
+  /* Canonical compare-and-set for ONE key.
+   *
+   * This statement - not any JavaScript queue - is the authority. A promise
+   * tail serializes one realm, and production runs several Desktop processes
+   * against this same database file, each with its own realm and its own
+   * pooled connection. So the conditional lives in SQL, where every process
+   * competing for the row has to go through it.
+   *
+   * `expectedRaw` MUST be the exact TEXT a canonical read returned, never a
+   * re-serialization of a parsed value: two different JSON spellings of the
+   * same object are the same authority to a reader and different bytes to
+   * SQLite, and comparing the wrong one silently disables the guard.
+   *
+   * Exactly one atomic statement per attempt. Absent row: insert that loses
+   * politely if someone else inserted first. Existing row: update conditioned
+   * on the bytes we read. Rows affected is the whole verdict - 1 won, 0 lost -
+   * and a loser is handed the current raw value so the caller can re-decide
+   * against real authority instead of guessing. */
+  function sqliteCompareAndSetRaw(key, expectedRaw, nextRaw) {
+    var invoke = getTauriInvoke();
+    if (!invoke || !sqliteState.ready) {
+      return Promise.reject(Object.assign(
+        new Error('canonical-storage-cas-unavailable'),
+        { code: 'canonical-storage-cas-unavailable' }
+      ));
+    }
+    if (typeof key !== 'string' || !key ||
+        typeof nextRaw !== 'string' ||
+        (expectedRaw !== null && typeof expectedRaw !== 'string')) {
+      return Promise.reject(Object.assign(
+        new Error('canonical-storage-cas-invalid'),
+        { code: 'canonical-storage-cas-invalid' }
+      ));
+    }
+    var now = Date.now();
+    var attempt = expectedRaw === null
+      ? invoke('plugin:sql|execute', {
+          db: SQLITE_DB_URL,
+          query: 'INSERT INTO kv_store (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO NOTHING',
+          values: [key, nextRaw, now],
+        })
+      : invoke('plugin:sql|execute', {
+          db: SQLITE_DB_URL,
+          query: 'UPDATE kv_store SET value = ?, updated_at = ? WHERE key = ? AND value = ?',
+          values: [nextRaw, now, key, expectedRaw],
+        });
+    /* A failed execute is a failure, never a win inferred from read-back. */
+    return attempt.then(function (result) {
+      if (sqliteAffectedRows(result) < 1) {
+        return sqliteRawValue(key).then(function (currentRaw) {
+          return { won: false, currentRaw: currentRaw };
+        });
+      }
+      return sqliteRawValue(key).then(function (currentRaw) {
+        if (currentRaw !== nextRaw) {
+          throw Object.assign(new Error('canonical-storage-cas-readback-mismatch'),
+            { code: 'canonical-storage-cas-readback-mismatch' });
+        }
+        /* Only an actual winning mutation announces a change. */
+        try {
+          var onChanged = global.chrome && global.chrome.storage && global.chrome.storage.onChanged;
+          if (onChanged && typeof onChanged.__dispatch === 'function') {
+            var payload = {};
+            var oldValue;
+            if (expectedRaw !== null) {
+              try { oldValue = JSON.parse(expectedRaw); } catch (_) { oldValue = expectedRaw; }
+            }
+            var newValue;
+            try { newValue = JSON.parse(nextRaw); } catch (_) { newValue = nextRaw; }
+            payload[key] = { newValue: newValue, oldValue: oldValue };
+            onChanged.__dispatch(payload);
+          }
+        } catch (_) { /* an observer must not undo a committed write */ }
+        return { won: true, currentRaw: currentRaw };
       });
     });
   }
@@ -1122,6 +1548,16 @@
     }
 
     function sqliteSet(items, cb) {
+      /* Serialized against the Item 11 orphan-removal lease: no production path
+       * may write the identity row while a removal is authorized. Unrelated keys
+       * are unaffected. */
+      if (orphanIdentityWriteBlocked(Object.keys(items || {}))) {
+        var blockedSet = Promise.reject(new Error(
+          'round2-item11-identity-orphan-identity-write-blocked-by-lease'));
+        blockedSet.catch(function () { /* surfaced to the caller */ });
+        if (typeof cb === 'function') { try { cb(); } catch (_) { /* ignore */ } }
+        return blockedSet;
+      }
       var keys = Object.keys(items || {});
       var now = Date.now();
       var changed = {};
@@ -1163,6 +1599,13 @@
     }
 
     function sqliteRemove(keys, cb) {
+      if (orphanIdentityWriteBlocked(keys)) {
+        var blockedRemove = Promise.reject(new Error(
+          'round2-item11-identity-orphan-identity-write-blocked-by-lease'));
+        blockedRemove.catch(function () { /* surfaced to the caller */ });
+        if (typeof cb === 'function') { try { cb(); } catch (_) { /* ignore */ } }
+        return blockedRemove;
+      }
       var arr = Array.isArray(keys) ? keys.slice() : [keys];
       if (arr.length === 0) {
         if (typeof cb === 'function') { try { cb(); } catch (_) {} }
@@ -1205,6 +1648,9 @@
     }
 
     global.chrome.storage.local.get = sqliteGet;
+    /* Narrow, named, one key at a time. Not a generic SQL surface. */
+    global.chrome.storage.local.__h2oCanonicalCompareAndSet = sqliteCompareAndSetRaw;
+    global.chrome.storage.local.__h2oCanonicalRawValue = sqliteRawValue;
     global.chrome.storage.local.set = sqliteSet;
     global.chrome.storage.local.remove = sqliteRemove;
   }
@@ -1222,7 +1668,855 @@
         dbUrl: sqliteState.dbUrl,
         migrationCompletedAt: sqliteState.migrationCompletedAt,
         keysMigrated: sqliteState.keysMigrated,
+        identityAuthorityStatus: sqliteState.identityAuthority.status,
       };
+    };
+
+    /* Item 11 runtime-authority fix — storage authority readiness contract.
+     *
+     * Desktop installs a temporary localStorage-backed chrome.storage.local
+     * shim synchronously, then swaps it for the SQLite-backed implementation
+     * asynchronously inside sqliteInit(). Consumers that read an
+     * authoritative persisted configuration MUST await this promise first,
+     * otherwise they observe the non-authoritative shim and can fall back to
+     * defaults (the b8c54511 startup-readiness failure).
+     *
+     * Resolves to a frozen { ready, backend, status } and NEVER rejects:
+     *   { ready: true,  backend: 'chrome',       status: 'ready'       }
+     *   { ready: true,  backend: 'sqlite',       status: 'ready'       }
+     *   { ready: false, backend: 'localstorage', status: 'failed'      }
+     *   { ready: false, backend: 'localstorage', status: 'unavailable' }
+     *
+     * Only 'chrome' and 'sqlite' are authoritative. The Desktop localStorage
+     * shim is never authoritative. One memoized promise is shared by every
+     * caller; late callers receive the settled result immediately and the
+     * result cannot transition twice. Exposes no SQLite handle, database URL,
+     * filesystem path, credential, or token. */
+    platform.whenStorageAuthorityReady = whenStorageAuthorityReady;
+
+    /* Stable Desktop-only readiness boundary for peer identity. It resolves
+     * only after SQLite, migrations, identity-copy classification, and the
+     * SQLite chrome.storage backend are all ready. It never returns identity
+     * material—only fingerprints and safe authority state. */
+    platform.__desktopIdentityReady = function () {
+      return sqliteInit().then(function () {
+        return desktopIdentityAuthoritySnapshot();
+      });
+    };
+    platform.__desktopIdentityStatus = desktopIdentityAuthoritySnapshot;
+    platform.__refreshDesktopIdentityAuthority = function () {
+      if (!sqliteState.ready || sqliteState.backend !== 'sqlite') {
+        return Promise.resolve(desktopIdentityAuthoritySnapshot());
+      }
+      return prepareDesktopIdentityAuthority().then(function () {
+        return desktopIdentityAuthoritySnapshot();
+      });
+    };
+
+    /* ── Item 11 orphan-identity reconciliation ──────────────────────────
+     * SQLite is the authoritative Desktop peer identity: it owns every
+     * peer-scoped row. The Desktop localStorage copy is a pre-SQLite orphan
+     * that owns none. Rust cannot reach WKWebView localStorage, so it produces
+     * the evidence verdict and the protected rollback backup; this routine
+     * performs the removal, and only when that verdict authorises it.
+     *
+     * The end state is status 'sqlite-only' / canonical true. copiesMatch is
+     * false by design — there is deliberately no second copy. This never writes
+     * SQLite, never touches another localStorage key, and never restarts. */
+    var ORPHAN_RECONCILIATION_SCHEMA = 'h2o.round2.item11.identity-orphan-reconciliation.v1';
+    var ORPHAN_RECONCILIATION_VERDICT = 'sqlite-authoritative-orphan-localstorage-confirmed';
+    var ORPHAN_BACKUP_SCHEMA = 'h2o.round2.item11.identity-orphan-backup.v1';
+    var ORPHAN_BACKUP_LEAF_NAME = 'localstorage-identity-backup.v1.json';
+    var ORPHAN_BACKUP_MODE = '0600';
+
+    /* The protected rollback backup is the only way back from a removal, so the
+     * prepare result must carry a COMPLETE backup contract before apply may
+     * authorize anything. A success-shaped result whose backup fields are
+     * missing, unrecognised or malformed is rejected here — before the native
+     * lease exists and before removeItem — rather than being echoed back to the
+     * caller as if it had succeeded. */
+    function orphanBackupContractComplete(prepared) {
+      return prepared.backupCreated === true &&
+        prepared.backupLeafName === ORPHAN_BACKUP_LEAF_NAME &&
+        prepared.backupMode === ORPHAN_BACKUP_MODE &&
+        typeof prepared.backupSha256Hex === 'string' &&
+        /^[0-9a-f]{64}$/.test(prepared.backupSha256Hex) &&
+        prepared.identityMutationPerformed === false;
+    }
+
+    function orphanBlocked(errorCode) {
+      return Object.freeze({
+        schema: ORPHAN_RECONCILIATION_SCHEMA,
+        ok: false,
+        verdict: 'blocked',
+        removalPerformed: false,
+        backupCreated: false,
+        restartRequired: false,
+        identityMutationPerformed: false,
+        sqliteMutationPerformed: false,
+        noNetwork: true,
+        errorCode: String(errorCode || 'round2-item11-identity-orphan-blocked'),
+      });
+    }
+
+    function orphanSha256Hex(value) {
+      return sha256Text(value).then(function (digest) {
+        return typeof digest === 'string' && /^[0-9a-f]{64}$/.test(digest) ? digest : null;
+      });
+    }
+
+    /* Reads the Desktop localStorage identity exactly once per call. */
+    function orphanLocalRaw() {
+      try {
+        var raw = global.localStorage.getItem(DESKTOP_PEER_IDENTITY_KEY);
+        return typeof raw === 'string' && raw ? raw : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function orphanPrepare(rawText, digest, snapshot) {
+      var invoke = getTauriInvoke();
+      if (!invoke) return Promise.resolve(null);
+      return invoke('h2o_round2a_identity_orphan_reconciliation_prepare', {
+        candidateIdentityJson: rawText,
+        expectedSqliteRowSha256Hex: snapshot.sqliteRowSha256Hex,
+        expectedSqliteFingerprintSha256Hex: snapshot.sqliteFingerprintSha256Hex,
+        expectedLocalStorageFingerprintSha256Hex: digest.fingerprint,
+        createdAt: new Date().toISOString(),
+      }).catch(function () { return null; });
+    }
+
+    /* Prepare-only: proves the orphan verdict and writes the rollback backup.
+     * Performs no removal. Safe to call repeatedly. */
+    platform.__inspectDesktopIdentityOrphanReconciliation = function () {
+      if (!sqliteState.ready || sqliteState.backend !== 'sqlite') {
+        return Promise.resolve(orphanBlocked('round2-item11-identity-orphan-database-unavailable'));
+      }
+      var rawText = orphanLocalRaw();
+      if (!rawText) {
+        return Promise.resolve(orphanBlocked('round2-item11-identity-orphan-localstorage-absent'));
+      }
+      var identity = validDesktopIdentity(rawText);
+      if (!identity) {
+        return Promise.resolve(orphanBlocked('round2-item11-identity-orphan-candidate-invalid'));
+      }
+      var authority = desktopIdentityAuthoritySnapshot();
+      if (authority.status !== 'divergent' || authority.canonical === true) {
+        return Promise.resolve(orphanBlocked('round2-item11-identity-orphan-authority-not-divergent'));
+      }
+      return Promise.all([
+        orphanSha256Hex(rawText),
+        orphanSha256Hex(identity.syncPeerId),
+        sqliteIdentityRaw().then(function (value) {
+          return value == null ? null : orphanSha256Hex(value);
+        }),
+      ]).then(function (values) {
+        var rawDigest = values[0];
+        var fingerprint = values[1];
+        var sqliteRowDigest = values[2];
+        if (!rawDigest || !fingerprint || !sqliteRowDigest) {
+          return orphanBlocked('round2-item11-identity-orphan-digest-unavailable');
+        }
+        if (fingerprint !== authority.localStorageFingerprintSha256Hex) {
+          return orphanBlocked('round2-item11-identity-orphan-candidate-fingerprint-mismatch');
+        }
+        return orphanPrepare(rawText, { fingerprint: fingerprint }, {
+          sqliteRowSha256Hex: sqliteRowDigest,
+          sqliteFingerprintSha256Hex: authority.sqliteFingerprintSha256Hex,
+        }).then(function (native) {
+          if (!native || native.ok !== true ||
+              native.schema !== ORPHAN_RECONCILIATION_SCHEMA ||
+              native.verdict !== ORPHAN_RECONCILIATION_VERDICT ||
+              native.removalAuthorized !== true) {
+            return orphanBlocked((native && native.errorCode) ||
+              'round2-item11-identity-orphan-prepare-failed');
+          }
+          return Object.freeze({
+            schema: ORPHAN_RECONCILIATION_SCHEMA,
+            ok: true,
+            verdict: native.verdict,
+            removalAuthorized: true,
+            removalPerformed: false,
+            backupCreated: native.backupCreated === true,
+            backupLeafName: native.backupLeafName || null,
+            backupSha256Hex: native.backupSha256Hex || null,
+            backupMode: native.backupMode || null,
+            sqliteFingerprintSha256Hex: native.sqliteFingerprintSha256Hex || null,
+            localStorageFingerprintSha256Hex: native.localStorageFingerprintSha256Hex || null,
+            /* Needed to bind the removal lease; both are digests, never raw. */
+            sqliteRowSha256Hex: native.sqliteRowSha256Hex || null,
+            localStorageRawSha256Hex: native.localStorageRawSha256Hex || null,
+            sqliteOwnershipCount: native.sqliteOwnershipCount,
+            localStorageOwnershipCount: native.localStorageOwnershipCount,
+            expectedOwnershipBreakdownMatched: native.expectedOwnershipBreakdownMatched === true,
+            restartRequired: false,
+            identityMutationPerformed: false,
+            sqliteMutationPerformed: false,
+            noNetwork: true,
+          });
+        });
+      }).catch(function () {
+        return orphanBlocked('round2-item11-identity-orphan-prepare-failed');
+      });
+    };
+
+    /* Apply: byte-for-byte compare-and-swap removal of exactly the inspected
+     * and backed-up value, bracketed by a native one-use removal lease.
+     *
+     * The lease closes the window between the native re-read of SQLite and this
+     * removal: while it is held, the pinned Profile-A recovery and both
+     * chrome.storage shims fail closed on the identity key. The nonce stays in a
+     * function-local variable and never reaches a public result, diagnostic, UI
+     * surface, log or evidence file. */
+    platform.__applyDesktopIdentityOrphanReconciliation = function () {
+      var inspected = orphanLocalRaw();
+      if (!inspected) {
+        return Promise.resolve(orphanBlocked('round2-item11-identity-orphan-localstorage-absent'));
+      }
+      var invoke = getTauriInvoke();
+      if (!invoke) {
+        return Promise.resolve(orphanBlocked('round2-item11-identity-orphan-database-unavailable'));
+      }
+      var nonce = '';
+      var prepared = null;
+
+      function cancelLease(code) {
+        orphanRemovalLeaseHeld = false;
+        if (!nonce) return Promise.resolve(orphanBlocked(code));
+        var used = nonce;
+        nonce = '';
+        return invoke('h2o_round2a_identity_orphan_reconciliation_cancel_remove', {
+          removalNonce: used,
+        }).catch(function () { return null; }).then(function () {
+          return orphanBlocked(code);
+        });
+      }
+
+      return platform.__inspectDesktopIdentityOrphanReconciliation().then(function (result) {
+        prepared = result;
+        if (!prepared || prepared.ok !== true) {
+          return prepared || orphanBlocked('round2-item11-identity-orphan-prepare-failed');
+        }
+        if (prepared.removalAuthorized !== true) {
+          return orphanBlocked('round2-item11-identity-orphan-removal-not-authorized');
+        }
+        if (!orphanBackupContractComplete(prepared)) {
+          return orphanBlocked('round2-item11-identity-orphan-backup-contract-incomplete');
+        }
+        if (orphanLocalRaw() !== inspected) {
+          return orphanBlocked('round2-item11-identity-orphan-localstorage-changed');
+        }
+        return invoke('h2o_round2a_identity_orphan_reconciliation_authorize_remove', {
+          expectedSqliteFingerprintSha256Hex: prepared.sqliteFingerprintSha256Hex,
+          expectedSqliteRowSha256Hex: prepared.sqliteRowSha256Hex,
+          expectedLocalStorageFingerprintSha256Hex: prepared.localStorageFingerprintSha256Hex,
+          expectedLocalStorageRawSha256Hex: prepared.localStorageRawSha256Hex,
+          expectedBackupSha256Hex: prepared.backupSha256Hex,
+        }).catch(function () { return null; }).then(function (authorized) {
+          if (!authorized || authorized.ok !== true ||
+              authorized.authorizationCreated !== true ||
+              typeof authorized.removalNonce !== 'string' || !authorized.removalNonce) {
+            return orphanBlocked((authorized && authorized.errorCode) ||
+              'round2-item11-identity-orphan-lease-unavailable');
+          }
+          nonce = authorized.removalNonce;
+          orphanRemovalLeaseHeld = true;
+
+          /* ── no await from here until removeItem ──────────────────────── */
+          var current = orphanLocalRaw();
+          if (current !== inspected) {
+            return cancelLease('round2-item11-identity-orphan-localstorage-changed');
+          }
+          var authority = desktopIdentityAuthoritySnapshot();
+          if (authority.status !== 'divergent' || authority.canonical === true ||
+              authority.sqliteFingerprintSha256Hex !== prepared.sqliteFingerprintSha256Hex ||
+              authority.localStorageFingerprintSha256Hex !==
+                prepared.localStorageFingerprintSha256Hex) {
+            return cancelLease('round2-item11-identity-orphan-authority-changed');
+          }
+          try {
+            global.localStorage.removeItem(DESKTOP_PEER_IDENTITY_KEY);
+          } catch (_) {
+            return cancelLease('round2-item11-identity-orphan-removal-failed');
+          }
+          if (orphanLocalRaw() !== null) {
+            return cancelLease('round2-item11-identity-orphan-removal-failed');
+          }
+          /* ── removal done; awaits are safe again ─────────────────────── */
+
+          var completionNonce = nonce;
+          return invoke('h2o_round2a_identity_orphan_reconciliation_complete_remove', {
+            removalNonce: completionNonce,
+            expectedSqliteFingerprintSha256Hex: prepared.sqliteFingerprintSha256Hex,
+            expectedSqliteRowSha256Hex: prepared.sqliteRowSha256Hex,
+            expectedLocalStorageRawSha256Hex: prepared.localStorageRawSha256Hex,
+            expectedBackupSha256Hex: prepared.backupSha256Hex,
+          }).catch(function () { return null; }).then(function (completed) {
+            if (!completed || completed.ok !== true || completed.leaseConsumed !== true) {
+              /* In-flight restoration: put the exact pre-removal bytes back from
+               * the value still held locally, so a failed completion is atomic.
+               * This is NOT the protected-backup rollback flow. */
+              var restored = false;
+              try {
+                global.localStorage.setItem(DESKTOP_PEER_IDENTITY_KEY, inspected);
+                restored = orphanLocalRaw() === inspected;
+              } catch (_) { restored = false; }
+              return cancelLease(restored
+                ? 'round2-item11-identity-orphan-completion-failed-restored'
+                : 'round2-item11-identity-orphan-completion-failed-unrestored')
+                .then(function (blocked) {
+                  return platform.__refreshDesktopIdentityAuthority()
+                    .catch(function () { return null; })
+                    .then(function () { return blocked; });
+                });
+            }
+            nonce = '';
+            orphanRemovalLeaseHeld = false;
+            return platform.__refreshDesktopIdentityAuthority().then(function (after) {
+              if (!after || after.status !== 'sqlite-only' || after.canonical !== true ||
+                  after.sqliteFingerprintSha256Hex !== prepared.sqliteFingerprintSha256Hex ||
+                  after.localStorageFingerprintSha256Hex) {
+                return orphanBlocked(
+                  'round2-item11-identity-orphan-post-removal-authority-invalid');
+              }
+              orphanReconciliationRestartRequired = true;
+              return Object.freeze({
+                schema: ORPHAN_RECONCILIATION_SCHEMA,
+                ok: true,
+                verdict: 'orphan-reconciliation-complete-restart-required',
+                removalAuthorized: true,
+                removalPerformed: true,
+                leaseConsumed: true,
+                backupCreated: true,
+                backupLeafName: prepared.backupLeafName,
+                backupSha256Hex: prepared.backupSha256Hex,
+                backupMode: prepared.backupMode,
+                status: after.status,
+                canonical: after.canonical,
+                copiesMatch: after.copiesMatch === true,
+                sqliteFingerprintSha256Hex: after.sqliteFingerprintSha256Hex,
+                localStorageFingerprintSha256Hex: null,
+                restartRequired: true,
+                identityMutationPerformed: false,
+                sqliteMutationPerformed: false,
+                noNetwork: true,
+              });
+            });
+          });
+        });
+      }).catch(function () {
+        orphanRemovalLeaseHeld = false;
+        return orphanBlocked('round2-item11-identity-orphan-removal-failed');
+      });
+    };
+
+    /* Emergency/test rollback. The raw backed-up identity is sensitive recovery
+     * material, so it now crosses into JavaScript exactly once, under a
+     * short-lived one-use nonce bound to the same digests the reconciliation
+     * proved. Never offered as an ordinary operator action; there is no UI
+     * control and nothing invokes it on startup. */
+    /* ─────────────────────────────────────────────────────────────────────
+     * P02 identity-orphan reconciliation v2.
+     *
+     * The v1 flow above stays exactly as it is. This is the successor for
+     * advanced P02 state, where canonical legitimately owns more rows than v1's
+     * frozen invariant allows and legitimately owns sync_object_state.
+     *
+     * The mutation is identical in kind - one localStorage removeItem - but the
+     * proof around it is different: v2 binds the complete global peer-ownership
+     * baseline, so nothing anywhere may shift while the ceremony runs, and it
+     * refuses if the orphan owns any authoritative row or any repository
+     * writer. SQLite receives zero writes on this path.
+     * ───────────────────────────────────────────────────────────────────── */
+    var orphanV2LeaseHeld = false;
+
+    function orphanV2Blocked(code) {
+      return Object.freeze({
+        schema: 'h2o.p02.identity-orphan-reconciliation.v2',
+        ok: false, verdict: 'blocked', errorCode: code || null,
+        sqliteWrites: 0, remint: false,
+      });
+    }
+
+    /* Prepare-only. Proves the verdict, captures the global ownership baseline
+     * and writes the content-addressed backup. Removes nothing. */
+    platform.__inspectP02IdentityOrphanReconciliationV2 = function () {
+      if (!sqliteState.ready || sqliteState.backend !== 'sqlite') {
+        return Promise.resolve(
+          orphanV2Blocked('p02-identity-orphan-v2-database-unavailable'));
+      }
+      var invoke = getTauriInvoke();
+      if (!invoke) {
+        return Promise.resolve(
+          orphanV2Blocked('p02-identity-orphan-v2-database-unavailable'));
+      }
+      var rawText = orphanLocalRaw();
+      if (!rawText) {
+        return Promise.resolve(
+          orphanV2Blocked('p02-identity-orphan-v2-candidate-invalid'));
+      }
+      return invoke('h2o_p02_identity_orphan_reconciliation_v2_prepare', {
+        candidateIdentityJson: rawText,
+        createdAt: new Date().toISOString(),
+      }).catch(function () { return null; }).then(function (prepared) {
+        return prepared || orphanV2Blocked('p02-identity-orphan-v2-transaction-failed');
+      });
+    };
+
+    /*
+     * The governed removal. Every value the lease bound is re-proved by the
+     * backend at authorize AND at complete; this layer additionally re-reads
+     * the live record immediately before removeItem and performs NO await
+     * between that read and the removal, so nothing can slip in between.
+     */
+    platform.__applyP02IdentityOrphanReconciliationV2 = function () {
+      var invoke = getTauriInvoke();
+      if (!invoke) {
+        return Promise.resolve(
+          orphanV2Blocked('p02-identity-orphan-v2-database-unavailable'));
+      }
+      var nonce = '';
+      var prepared = null;
+      var inspected = null;
+
+      function cancelLease(code) {
+        orphanV2LeaseHeld = false;
+        if (!nonce) return Promise.resolve(orphanV2Blocked(code));
+        nonce = '';
+        return invoke('h2o_p02_identity_orphan_reconciliation_v2_cancel_remove', {})
+          .catch(function () { return null; })
+          .then(function () { return orphanV2Blocked(code); });
+      }
+
+      return platform.__inspectP02IdentityOrphanReconciliationV2().then(function (result) {
+        if (!result || result.ok !== true) {
+          return result || orphanV2Blocked('p02-identity-orphan-v2-transaction-failed');
+        }
+        prepared = result;
+        inspected = orphanLocalRaw();
+        if (inspected === null) {
+          return orphanV2Blocked('p02-identity-orphan-v2-target-drift');
+        }
+        return invoke('h2o_p02_identity_orphan_reconciliation_v2_authorize_remove', {
+          candidateIdentityJson: inspected,
+          reconciliationRequestId: prepared.reconciliationRequestId,
+          expectedBackupLeafName: prepared.backupLeafName,
+          expectedBackupSha256Hex: prepared.backupSha256Hex,
+          expectedOwnershipBaselineSha256Hex:
+            prepared.ownershipBaseline && prepared.ownershipBaseline.baselineSha256Hex,
+        }).catch(function () { return null; }).then(function (authorized) {
+          if (!authorized || authorized.ok !== true || !authorized.nonce) {
+            return orphanV2Blocked((authorized && authorized.errorCode) ||
+              'p02-identity-orphan-v2-lease-unavailable');
+          }
+          nonce = authorized.nonce;
+          orphanV2LeaseHeld = true;
+
+          /* ── v2 removal: no further await before removeItem ─────────── */
+          var current = orphanLocalRaw();
+          if (current !== inspected) {
+            return cancelLease('p02-identity-orphan-v2-target-drift');
+          }
+          var authority = desktopIdentityAuthoritySnapshot();
+          if (authority.status !== 'divergent' || authority.canonical === true) {
+            return cancelLease('p02-identity-orphan-v2-target-drift');
+          }
+          try {
+            global.localStorage.removeItem(DESKTOP_PEER_IDENTITY_KEY);
+          } catch (_) {
+            return cancelLease('p02-identity-orphan-v2-target-drift');
+          }
+          if (orphanLocalRaw() !== null) {
+            return cancelLease('p02-identity-orphan-v2-target-drift');
+          }
+          /* ── v2 removal complete; awaits are safe again ─────────────── */
+
+          return invoke('h2o_p02_identity_orphan_reconciliation_v2_complete_remove', {
+            reconciliationRequestId: prepared.reconciliationRequestId,
+            leaseNonce: nonce,
+            observedLocalStorageRaw: inspected,
+          }).catch(function () { return null; }).then(function (completed) {
+            orphanV2LeaseHeld = false;
+            if (!completed || completed.ok !== true) {
+              /* In-flight restoration of the exact pre-removal bytes, so a
+               * failed completion leaves the world as it was. This is NOT the
+               * protected-backup rollback flow. */
+              var restored = false;
+              try {
+                global.localStorage.setItem(DESKTOP_PEER_IDENTITY_KEY, inspected);
+                restored = orphanLocalRaw() === inspected;
+              } catch (_) { restored = false; }
+              return orphanV2Blocked(restored
+                ? 'p02-identity-orphan-v2-completion-failed-restored'
+                : 'p02-identity-orphan-v2-completion-failed-unrestored');
+            }
+            nonce = '';
+            /* Re-derive authority from the store the identity module reads. */
+            return platform.__refreshDesktopIdentityAuthority().catch(function () { return null; })
+              .then(function () {
+                return Object.freeze({
+                  schema: 'h2o.p02.identity-orphan-reconciliation.v2',
+                  ok: true,
+                  verdict: 'reconciled',
+                  errorCode: null,
+                  removedSyncPeerId: completed.removedSyncPeerId,
+                  canonicalSyncPeerId: completed.canonicalSyncPeerId,
+                  ownershipBaselinePreserved: completed.ownershipBaselinePreserved === true,
+                  ownershipBaselineSha256Hex: completed.ownershipBaselineSha256Hex,
+                  backupLeafName: prepared.backupLeafName,
+                  backupSha256Hex: prepared.backupSha256Hex,
+                  /* Everything the governed rollback must bind, carried from
+                   * the prepare receipt that produced the backup. Hash-safe:
+                   * digests and ids only, never raw identity JSON. */
+                  rollbackBinding: Object.freeze({
+                    reconciliationRequestId: prepared.reconciliationRequestId,
+                    backupLeafName: prepared.backupLeafName,
+                    backupSha256Hex: prepared.backupSha256Hex,
+                    targetRawSha256Hex: prepared.orphanRawSha256Hex,
+                    targetFingerprintSha256Hex: prepared.orphanFingerprintSha256Hex,
+                    canonicalRawSha256Hex: prepared.canonicalRawSha256Hex,
+                    canonicalFingerprintSha256Hex: prepared.canonicalFingerprintSha256Hex,
+                    ownershipBaselineSha256Hex: (prepared.ownershipBaseline &&
+                      prepared.ownershipBaseline.baselineSha256Hex) || null,
+                  }),
+                  authority: desktopIdentityAuthoritySnapshot().status,
+                  sqliteWrites: 0,
+                  remint: false,
+                });
+              });
+          });
+        });
+      });
+    };
+
+    /* Read-only view of the v2 authorization. Never re-reveals the nonce. */
+    platform.__p02IdentityOrphanReconciliationV2LeaseStatus = function () {
+      var invoke = getTauriInvoke();
+      if (!invoke) {
+        return Promise.resolve(orphanV2Blocked('p02-identity-orphan-v2-database-unavailable'));
+      }
+      return invoke('h2o_p02_identity_orphan_reconciliation_v2_lease_status', {})
+        .catch(function () { return null; })
+        .then(function (status) {
+          return status || orphanV2Blocked('p02-identity-orphan-v2-lease-unavailable');
+        });
+    };
+
+    /*
+     * The governed v2 rollback: restore exactly the protected backup that the
+     * v2 removal wrote, through the v2 lease only. It never calls a v1 command
+     * and never touches v1 state. Every bound value is re-proved by the backend
+     * at authorize AND again at read; this layer additionally re-reads the live
+     * record immediately before setItem with no await in between, so nothing
+     * can slip into the slot we are restoring.
+     */
+    platform.__rollbackP02IdentityOrphanReconciliationV2 = function (binding) {
+      var invoke = getTauriInvoke();
+      if (!invoke) {
+        return Promise.resolve(orphanV2Blocked('p02-identity-orphan-v2-database-unavailable'));
+      }
+      var bound = binding && typeof binding === 'object' ? binding : {};
+      if (!bound.reconciliationRequestId || !bound.backupLeafName || !bound.backupSha256Hex ||
+          !bound.targetRawSha256Hex || !bound.targetFingerprintSha256Hex ||
+          !bound.canonicalRawSha256Hex || !bound.canonicalFingerprintSha256Hex ||
+          !bound.ownershipBaselineSha256Hex) {
+        return Promise.resolve(orphanV2Blocked('p02-identity-orphan-v2-rollback-binding-missing'));
+      }
+      var nonce = '';
+
+      function cancelRollback(code) {
+        orphanV2LeaseHeld = false;
+        if (!nonce) return Promise.resolve(orphanV2Blocked(code));
+        nonce = '';
+        return invoke('h2o_p02_identity_orphan_reconciliation_v2_cancel_rollback', {})
+          .catch(function () { return null; })
+          .then(function () { return orphanV2Blocked(code); });
+      }
+
+      /* Report the authority truthfully after any partial failure rather than
+       * claiming a state that was not independently verified. */
+      function blockedWithAuthority(code) {
+        return platform.__refreshDesktopIdentityAuthority()
+          .catch(function () { return null; })
+          .then(function () { return orphanV2Blocked(code); });
+      }
+
+      /* Rollback restores absence; it never overwrites a present record. */
+      if (orphanLocalRaw() !== null) {
+        return Promise.resolve(orphanV2Blocked('p02-identity-orphan-v2-target-drift'));
+      }
+      return platform.__refreshDesktopIdentityAuthority().then(function (before) {
+        if (!before || before.ready !== true || before.backend !== 'sqlite' ||
+            before.status !== 'sqlite-only' || before.canonical !== true ||
+            before.copiesMatch === true || before.localStorageFingerprintSha256Hex) {
+          return orphanV2Blocked('p02-identity-orphan-v2-rollback-authority-invalid');
+        }
+        if (before.sqliteFingerprintSha256Hex !== bound.canonicalFingerprintSha256Hex) {
+          return orphanV2Blocked('p02-identity-orphan-v2-canonical-fingerprint-mismatch');
+        }
+        if (orphanLocalRaw() !== null) {
+          return orphanV2Blocked('p02-identity-orphan-v2-target-drift');
+        }
+        return invoke('h2o_p02_identity_orphan_reconciliation_v2_authorize_rollback', {
+          reconciliationRequestId: bound.reconciliationRequestId,
+          expectedBackupLeafName: bound.backupLeafName,
+          expectedBackupSha256Hex: bound.backupSha256Hex,
+          expectedLocalStorageRawSha256Hex: bound.targetRawSha256Hex,
+          expectedLocalStorageFingerprintSha256Hex: bound.targetFingerprintSha256Hex,
+          expectedCanonicalRawSha256Hex: bound.canonicalRawSha256Hex,
+          expectedCanonicalFingerprintSha256Hex: bound.canonicalFingerprintSha256Hex,
+          expectedOwnershipBaselineSha256Hex: bound.ownershipBaselineSha256Hex,
+        }).catch(function () { return null; }).then(function (authorized) {
+          if (!authorized || authorized.ok !== true || !authorized.nonce) {
+            return orphanV2Blocked((authorized && authorized.errorCode) ||
+              'p02-identity-orphan-v2-lease-unavailable');
+          }
+          nonce = authorized.nonce;
+          orphanV2LeaseHeld = true;
+          if (orphanLocalRaw() !== null) {
+            return cancelRollback('p02-identity-orphan-v2-target-drift');
+          }
+          return invoke('h2o_p02_identity_orphan_reconciliation_v2_read_backup_with_nonce', {
+            reconciliationRequestId: bound.reconciliationRequestId,
+            leaseNonce: nonce,
+            expectedBackupSha256Hex: bound.backupSha256Hex,
+            expectedLocalStorageRawSha256Hex: bound.targetRawSha256Hex,
+          }).catch(function () { return null; }).then(function (material) {
+            /* One-use: the authorization is spent either way. */
+            nonce = '';
+            orphanV2LeaseHeld = false;
+            if (!material || material.ok !== true || material.leaseConsumed !== true ||
+                typeof material.localStorageIdentityRaw !== 'string') {
+              return orphanV2Blocked((material && material.errorCode) ||
+                'p02-identity-orphan-v2-backup-read-failed');
+            }
+            var restoredRaw = material.localStorageIdentityRaw;
+            var record = validDesktopIdentity(restoredRaw);
+            if (!record) {
+              return orphanV2Blocked('p02-identity-orphan-v2-backup-read-failed');
+            }
+            return orphanSha256Hex(restoredRaw).then(function (rawDigest) {
+              return orphanSha256Hex(record.syncPeerId).then(function (fingerprint) {
+                if (rawDigest !== bound.targetRawSha256Hex ||
+                    fingerprint !== bound.targetFingerprintSha256Hex ||
+                    fingerprint === before.sqliteFingerprintSha256Hex) {
+                  return orphanV2Blocked('p02-identity-orphan-v2-backup-read-failed');
+                }
+                /* ── v2 restore: no further await before setItem ────── */
+                if (orphanLocalRaw() !== null) {
+                  return blockedWithAuthority('p02-identity-orphan-v2-target-drift');
+                }
+                try {
+                  global.localStorage.setItem(DESKTOP_PEER_IDENTITY_KEY, restoredRaw);
+                } catch (_) {
+                  return blockedWithAuthority('p02-identity-orphan-v2-rollback-failed');
+                }
+                if (orphanLocalRaw() !== restoredRaw) {
+                  return blockedWithAuthority('p02-identity-orphan-v2-rollback-failed');
+                }
+                /* ── v2 restore complete; awaits are safe again ─────── */
+                return platform.__refreshDesktopIdentityAuthority().then(function (after) {
+                  if (!after || after.status !== 'divergent' || after.canonical === true ||
+                      after.copiesMatch === true ||
+                      after.sqliteFingerprintSha256Hex !== before.sqliteFingerprintSha256Hex ||
+                      after.localStorageFingerprintSha256Hex !==
+                        bound.targetFingerprintSha256Hex) {
+                    return orphanV2Blocked('p02-identity-orphan-v2-rollback-authority-invalid');
+                  }
+                  return Object.freeze({
+                    schema: 'h2o.p02.identity-orphan-reconciliation.v2',
+                    ok: true,
+                    verdict: 'rolled-back',
+                    errorCode: null,
+                    restoredSyncPeerId: record.syncPeerId,
+                    restoredFingerprintSha256Hex: fingerprint,
+                    backupLeafName: material.backupLeafName,
+                    backupSha256Hex: material.backupSha256Hex,
+                    backupRetained: true,
+                    ownershipBaselineSha256Hex: material.ownershipBaselineSha256Hex,
+                    ownershipBaselinePreserved:
+                      material.ownershipBaselineSha256Hex === bound.ownershipBaselineSha256Hex,
+                    authority: after.status,
+                    restartRequired: true,
+                    sqliteWrites: 0,
+                    remint: false,
+                  });
+                });
+              });
+            });
+          });
+        });
+      });
+    };
+
+    platform.__rollbackDesktopIdentityOrphanReconciliation = function (expected) {
+      var invoke = getTauriInvoke();
+      if (!invoke) {
+        return Promise.resolve(orphanBlocked('round2-item11-identity-orphan-database-unavailable'));
+      }
+      var binding = expected && typeof expected === 'object' ? expected : {};
+      if (!binding.backupSha256Hex || !binding.localStorageRawSha256Hex ||
+          !binding.localStorageFingerprintSha256Hex) {
+        return Promise.resolve(orphanBlocked('round2-item11-identity-orphan-rollback-binding-missing'));
+      }
+      var nonce = '';
+      var restoredRaw = '';
+
+      function cancelRollback(code) {
+        if (!nonce) return Promise.resolve(orphanBlocked(code));
+        var used = nonce;
+        nonce = '';
+        return invoke('h2o_round2a_identity_orphan_reconciliation_cancel_rollback', {
+          rollbackNonce: used,
+        }).catch(function () { return null; }).then(function () {
+          return orphanBlocked(code);
+        });
+      }
+
+      /* Report the authority truthfully after any partial failure rather than
+       * claiming a state that was not independently verified. */
+      function blockedWithAuthority(code) {
+        return platform.__refreshDesktopIdentityAuthority()
+          .catch(function () { return null; })
+          .then(function () { return orphanBlocked(code); });
+      }
+
+      if (orphanLocalRaw() !== null) {
+        return Promise.resolve(orphanBlocked('round2-item11-identity-orphan-localstorage-present'));
+      }
+      return platform.__refreshDesktopIdentityAuthority().then(function (before) {
+        if (!before || before.ready !== true || before.backend !== 'sqlite' ||
+            before.status !== 'sqlite-only' || before.canonical !== true ||
+            before.copiesMatch === true || before.localStorageFingerprintSha256Hex) {
+          return orphanBlocked('round2-item11-identity-orphan-authority-not-sqlite-only');
+        }
+        if (orphanLocalRaw() !== null) {
+          return orphanBlocked('round2-item11-identity-orphan-localstorage-present');
+        }
+        return sqliteIdentityRaw().then(function (sqliteRaw) {
+          if (sqliteRaw == null) {
+            return orphanBlocked('round2-item11-identity-orphan-sqlite-identity-invalid');
+          }
+          return orphanSha256Hex(sqliteRaw).then(function (sqliteRowDigest) {
+            if (!sqliteRowDigest) {
+              return orphanBlocked('round2-item11-identity-orphan-digest-unavailable');
+            }
+            return invoke('h2o_round2a_identity_orphan_reconciliation_authorize_rollback', {
+              expectedSqliteFingerprintSha256Hex: before.sqliteFingerprintSha256Hex,
+              expectedSqliteRowSha256Hex: sqliteRowDigest,
+              expectedBackupSha256Hex: binding.backupSha256Hex,
+              expectedLocalStorageRawSha256Hex: binding.localStorageRawSha256Hex,
+              expectedLocalStorageFingerprintSha256Hex: binding.localStorageFingerprintSha256Hex,
+            }).catch(function () { return null; }).then(function (authorized) {
+              if (!authorized || authorized.ok !== true ||
+                  authorized.rollbackAuthorized !== true ||
+                  typeof authorized.rollbackNonce !== 'string' || !authorized.rollbackNonce) {
+                return orphanBlocked((authorized && authorized.errorCode) ||
+                  'round2-item11-identity-orphan-rollback-not-authorized');
+              }
+              nonce = authorized.rollbackNonce;
+              /* The key must still be absent: never overwrite a value that
+               * reappeared while we were authorizing. */
+              if (orphanLocalRaw() !== null) {
+                return cancelRollback('round2-item11-identity-orphan-localstorage-present');
+              }
+              return invoke('h2o_round2a_identity_orphan_reconciliation_read_backup_with_nonce', {
+                rollbackNonce: nonce,
+                expectedSqliteFingerprintSha256Hex: before.sqliteFingerprintSha256Hex,
+                expectedSqliteRowSha256Hex: sqliteRowDigest,
+                expectedBackupSha256Hex: binding.backupSha256Hex,
+                expectedLocalStorageRawSha256Hex: binding.localStorageRawSha256Hex,
+              }).catch(function () { return null; }).then(function (raw) {
+                /* The nonce is one-use and now consumed; drop it either way. */
+                nonce = '';
+                if (!raw || raw.ok !== true || raw.leaseConsumed !== true ||
+                    typeof raw.localStorageIdentityRaw !== 'string') {
+                  return orphanBlocked((raw && raw.errorCode) ||
+                    'round2-item11-identity-orphan-backup-read-failed');
+                }
+                restoredRaw = raw.localStorageIdentityRaw;
+                var record = validDesktopIdentity(restoredRaw);
+                if (!record) {
+                  restoredRaw = '';
+                  return orphanBlocked('round2-item11-identity-orphan-backup-read-failed');
+                }
+                return orphanSha256Hex(restoredRaw).then(function (rawDigest) {
+                  return orphanSha256Hex(record.syncPeerId).then(function (fingerprint) {
+                    if (rawDigest !== binding.localStorageRawSha256Hex ||
+                        fingerprint !== binding.localStorageFingerprintSha256Hex ||
+                        fingerprint === before.sqliteFingerprintSha256Hex) {
+                      restoredRaw = '';
+                      return orphanBlocked('round2-item11-identity-orphan-backup-read-failed');
+                    }
+                    /* ── no await from here until setItem ─────────────────── */
+                    if (orphanLocalRaw() !== null) {
+                      restoredRaw = '';
+                      return blockedWithAuthority(
+                        'round2-item11-identity-orphan-localstorage-present');
+                    }
+                    var written = restoredRaw;
+                    restoredRaw = '';
+                    try {
+                      global.localStorage.setItem(DESKTOP_PEER_IDENTITY_KEY, written);
+                    } catch (_) {
+                      return blockedWithAuthority(
+                        'round2-item11-identity-orphan-rollback-failed');
+                    }
+                    if (orphanLocalRaw() !== written) {
+                      return blockedWithAuthority(
+                        'round2-item11-identity-orphan-rollback-failed');
+                    }
+                    /* ── restoration done; awaits are safe again ──────────── */
+                    return platform.__refreshDesktopIdentityAuthority().then(function (after) {
+                      if (!after || after.status !== 'divergent' || after.canonical === true ||
+                          after.copiesMatch === true ||
+                          after.sqliteFingerprintSha256Hex !== before.sqliteFingerprintSha256Hex ||
+                          after.localStorageFingerprintSha256Hex !==
+                            binding.localStorageFingerprintSha256Hex) {
+                        return orphanBlocked(
+                          'round2-item11-identity-orphan-rollback-authority-invalid');
+                      }
+                      orphanReconciliationRestartRequired = true;
+                      return Object.freeze({
+                        schema: ORPHAN_RECONCILIATION_SCHEMA,
+                        ok: true,
+                        verdict: 'orphan-reconciliation-rolled-back-restart-required',
+                        removalPerformed: false,
+                        rollbackPerformed: true,
+                        backupRetained: true,
+                        status: after.status,
+                        canonical: after.canonical,
+                        copiesMatch: after.copiesMatch === true,
+                        sqliteFingerprintSha256Hex: after.sqliteFingerprintSha256Hex,
+                        localStorageFingerprintSha256Hex: after.localStorageFingerprintSha256Hex,
+                        restartRequired: true,
+                        identityMutationPerformed: false,
+                        sqliteMutationPerformed: false,
+                        noNetwork: true,
+                      });
+                    });
+                  });
+                });
+              });
+            });
+          });
+        });
+      }).catch(function () {
+        restoredRaw = '';
+        nonce = '';
+        return orphanBlocked('round2-item11-identity-orphan-rollback-failed');
+      });
+    };
+
+    /* Test/diagnostic visibility only: reports whether the JS mirror of the
+     * native lease is held. Never returns the nonce. */
+    platform.__desktopIdentityOrphanLeaseHeld = function () {
+      return orphanRemovalLeaseHeld === true;
+    };
+
+    platform.__desktopIdentityOrphanRestartRequired = function () {
+      return orphanReconciliationRestartRequired === true;
     };
 
     /* Returns a Promise<{ ready, tables, indexes, rowCounts, error? }>.

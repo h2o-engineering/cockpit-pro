@@ -1483,14 +1483,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "h2o-p02-authority-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "h2o-studio-desktop"
 version = "0.1.0"
 dependencies = [
  "flate2",
  "glob",
+ "h2o-p02-authority-core",
  "libc",
  "libsqlite3-sys",
  "percent-encoding",
+ "quick-xml",
  "reqwest",
  "serde",
  "serde_json",

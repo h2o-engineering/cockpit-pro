@@ -39,7 +39,7 @@ const SOURCE_SAFE_CONTRACT = Object.freeze({
   publicationValidationComplete: false,
   stageE3Required: true
 });
-const EXPECTED_STUDIO_MIGRATION_MAX = 17;
+const EXPECTED_STUDIO_MIGRATION_MAX = 22;
 let sourceSafeRealBuilderExecutions = 0;
 let sourceSafeValidatedFileCount = 0;
 

@@ -2815,8 +2815,40 @@
     return bundle;
   }
 
+  /*
+   * O1-T19. The legacy/manual sync-bundle exporter writes P01 publication bytes
+   * to the sync folder, so it is a P01 mutation seam like any other - and being
+   * user-initiated is precisely why it needs the check rather than exempting it
+   * from one. A gesture does not change which generation owns the data.
+   */
+  async function generationPermitsP01Mutation() {
+    var root = (typeof globalThis !== 'undefined' ? globalThis : this);
+    var gate = root.H2O && root.H2O.Studio && root.H2O.Studio.sync &&
+      root.H2O.Studio.sync.writerGeneration;
+    if (!gate || typeof gate.p01MayMutate !== 'function') {
+      /*
+       * No gate surface at all: a pre-T19 runtime, and the compatibility
+       * position is that P01 behaves exactly as it did before. This is a
+       * statement about the BUILD, not the store - once a gate is installed
+       * its observation governs, and an unreadable STORE still refuses.
+       */
+      return { permitted: true, reason: null };
+    }
+    try { return await gate.p01MayMutate(); }
+    catch (_) { return { permitted: false, reason: 'generation-unobserved' }; }
+  }
+
   async function exportLatestSyncBundle(options) {
     var startedAt = Date.now();
+    var generation = await generationPermitsP01Mutation();
+    if (generation.permitted !== true) {
+      return {
+        ok: false,
+        reason: generation.reason || 'p01-writer-stood-down',
+        generation: generation.generation || null,
+        startedAt: startedAt
+      };
+    }
     try {
       var baseDir = getHomeBaseDir();
       var bundle = await exportFullBundle(Object.assign({}, safeObject(options), {

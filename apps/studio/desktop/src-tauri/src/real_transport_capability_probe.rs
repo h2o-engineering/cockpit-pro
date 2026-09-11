@@ -344,17 +344,17 @@ impl RtCapabilityProbeResult {
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct DescriptorRegistry {
+pub(crate) struct DescriptorRegistry {
     schema: String,
     endpoint_ref_hash: String,
     remote_root_ref_hash: String,
     credential_ref_hash: String,
     #[serde(default)]
-    endpoint_url_private: Option<String>,
+    pub(crate) endpoint_url_private: Option<String>,
     #[serde(default)]
-    remote_root_path_private: Option<String>,
+    pub(crate) remote_root_path_private: Option<String>,
     #[serde(default)]
-    auth_header_private: Option<String>,
+    pub(crate) auth_header_private: Option<String>,
     #[serde(default)]
     descriptor_mode: Option<String>,
     #[serde(flatten)]
@@ -3797,13 +3797,13 @@ fn validate_write_grade_receipt(
     mode
 }
 
-struct ResolvedWriteGradeLiveRegistry {
+pub(crate) struct ResolvedWriteGradeLiveRegistry {
     path_info: DescriptorRegistryPathInfo,
     status: RtWebDavSetupStatusResult,
-    registry: DescriptorRegistry,
+    pub(crate) registry: DescriptorRegistry,
 }
 
-fn resolve_write_grade_live_registry(
+pub(crate) fn resolve_write_grade_live_registry(
     command: &'static str,
 ) -> Result<ResolvedWriteGradeLiveRegistry, &'static str> {
     let path_info = descriptor_registry_path_for_setup_status();

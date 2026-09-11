@@ -1,0 +1,229 @@
+{
+  "schema": "h2o.studio.syncContractVectors.p02.z1.v1",
+  "contract": {
+    "objectKeyDomainSeparator": "objectDomain + 0x00 + objectId",
+    "writerKeyDomain": "h2o.studio.sync-writer.v1",
+    "closureTypes": [
+      "object-deleted",
+      "branch-superseded"
+    ],
+    "v1SchemasRemain": [
+      "h2o.studio.syncRevision.v1",
+      "h2o.studio.syncHead.v1"
+    ]
+  },
+  "limits": {
+    "maxRevisionBytes": 5242880,
+    "maxPayloadBytes": 5242880,
+    "maxHeadBytes": 65536,
+    "maxHeadsSnapshotBytes": 5242880,
+    "maxPointerBytes": 4096,
+    "maxLibraryInfoBytes": 65536,
+    "maxReceiptBytes": 65536,
+    "maxIdLength": 512
+  },
+  "limitEvidence": {
+    "inheritedBaselines": "revision and payload 5 MiB; head 64 KiB; identifier 512 characters",
+    "headsSnapshot": "5 MiB exceeds the freeze-pack measurement of approximately 1.2 MiB per writer at 5,000 objects while remaining explicitly bounded",
+    "writerPointer": "4 KiB bounds the pointer with more than 30x margin over the measured 133-byte pointer"
+  },
+  "positive": [
+    {
+      "id": "live-root-revision",
+      "kind": "revision",
+      "canonicalBytes": "{\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"payload\":{\"schema\":\"h2o.studio.syncPayload.test.v1\",\"value\":\"root\"},\"payloadSha256\":\"e4b52541eeb547a172c06b9ecb48828aa348c86ddb2ca0e39e95ca9a8f47926d\",\"previousRevisionBlobSha256\":null,\"previousRevisionId\":null,\"revisionId\":\"p02-z1-r1\",\"schema\":\"h2o.studio.syncRevision.v2\",\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "3d50368cccc3ff31f804129a081754570dda3953173d3ca3f8488c1145daa9cd"
+    },
+    {
+      "id": "live-child-revision",
+      "kind": "revision",
+      "canonicalBytes": "{\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"payload\":{\"schema\":\"h2o.studio.syncPayload.test.v1\",\"value\":\"child\"},\"payloadSha256\":\"d5563f69629e729d0e2cf2bc4dd6d82e50dbb49acaf9f375403e5739367202ef\",\"previousRevisionBlobSha256\":\"3d50368cccc3ff31f804129a081754570dda3953173d3ca3f8488c1145daa9cd\",\"previousRevisionId\":\"p02-z1-r1\",\"revisionId\":\"p02-z1-r2\",\"schema\":\"h2o.studio.syncRevision.v2\",\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "b90c20aad82c45f368dc2406c01e8a36efb8225efd24550401fe564fc7cd83b5"
+    },
+    {
+      "id": "branch-superseded-closure",
+      "kind": "revision",
+      "canonicalBytes": "{\"closureType\":\"branch-superseded\",\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"payload\":{\"schema\":\"h2o.studio.syncClosurePayload.v1\"},\"payloadSha256\":\"d6c3cda913565c15f90c8d0777e93ccecf8926a593cb48ac6de9590f2aeff12c\",\"previousRevisionBlobSha256\":\"b90c20aad82c45f368dc2406c01e8a36efb8225efd24550401fe564fc7cd83b5\",\"previousRevisionId\":\"p02-z1-r2\",\"revisionId\":\"p02-z1-r3-close\",\"schema\":\"h2o.studio.syncRevision.v2\",\"selectedRevision\":{\"revisionBlobSha256\":\"3d50368cccc3ff31f804129a081754570dda3953173d3ca3f8488c1145daa9cd\",\"revisionId\":\"p02-z1-r1\"},\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "3970c1bbf1eed1f69914adb4459f70ad072387971fcc1f9e83d7bc40cc708790"
+    },
+    {
+      "id": "object-deleted-closure",
+      "kind": "revision",
+      "canonicalBytes": "{\"closureType\":\"object-deleted\",\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"payload\":{\"schema\":\"h2o.studio.syncClosurePayload.v1\"},\"payloadSha256\":\"d6c3cda913565c15f90c8d0777e93ccecf8926a593cb48ac6de9590f2aeff12c\",\"previousRevisionBlobSha256\":\"b90c20aad82c45f368dc2406c01e8a36efb8225efd24550401fe564fc7cd83b5\",\"previousRevisionId\":\"p02-z1-r2\",\"revisionId\":\"p02-z1-r4-delete\",\"schema\":\"h2o.studio.syncRevision.v2\",\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "2488648c6677b2d8f696fd656dcb3f50d2abd27b37db547e684c6afe200af659"
+    },
+    {
+      "id": "root-head-v2",
+      "kind": "head",
+      "canonicalBytes": "{\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"objectKey\":\"cc282d10ed0a56aa1f45fa401ae8bcc13d03a770828d7438078b7d04612ba4a9\",\"payloadSha256\":\"e4b52541eeb547a172c06b9ecb48828aa348c86ddb2ca0e39e95ca9a8f47926d\",\"previousRevisionBlobSha256\":null,\"previousRevisionId\":null,\"revisionBlobSha256\":\"3d50368cccc3ff31f804129a081754570dda3953173d3ca3f8488c1145daa9cd\",\"revisionId\":\"p02-z1-r1\",\"schema\":\"h2o.studio.syncHead.v2\",\"sourceUpdatedAtIso\":\"2026-08-24T12:00:00.000Z\",\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "964e9205b4e3e31733622e36a118b3de06484c0205a55a14f4292ef1a1e769da"
+    },
+    {
+      "id": "grouped-multi-tip-heads-snapshot",
+      "kind": "heads-snapshot",
+      "canonicalBytes": "{\"objects\":[{\"headSchema\":\"h2o.studio.syncHead.v2\",\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"objectKey\":\"cc282d10ed0a56aa1f45fa401ae8bcc13d03a770828d7438078b7d04612ba4a9\",\"tips\":[{\"payloadSha256\":\"d6c3cda913565c15f90c8d0777e93ccecf8926a593cb48ac6de9590f2aeff12c\",\"previousRevisionBlobSha256\":\"b90c20aad82c45f368dc2406c01e8a36efb8225efd24550401fe564fc7cd83b5\",\"previousRevisionId\":\"p02-z1-r2\",\"revisionBlobSha256\":\"3970c1bbf1eed1f69914adb4459f70ad072387971fcc1f9e83d7bc40cc708790\",\"revisionId\":\"p02-z1-r3-close\",\"sourceUpdatedAtIso\":\"2026-08-24T12:00:02.000Z\"},{\"payloadSha256\":\"d6c3cda913565c15f90c8d0777e93ccecf8926a593cb48ac6de9590f2aeff12c\",\"previousRevisionBlobSha256\":\"b90c20aad82c45f368dc2406c01e8a36efb8225efd24550401fe564fc7cd83b5\",\"previousRevisionId\":\"p02-z1-r2\",\"revisionBlobSha256\":\"2488648c6677b2d8f696fd656dcb3f50d2abd27b37db547e684c6afe200af659\",\"revisionId\":\"p02-z1-r4-delete\",\"sourceUpdatedAtIso\":\"2026-08-24T12:00:03.000Z\"}]}],\"schema\":\"h2o.studio.syncHeadsSnapshot.v2\",\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "a8d39a8fefb304bc00f675c2b08c958043ba8ed0cf5e1a39d97cc10cf349147c"
+    },
+    {
+      "id": "writer-state-pointer",
+      "kind": "writer-state",
+      "canonicalBytes": "{\"currentHeadsSnapshotSha256\":\"a8d39a8fefb304bc00f675c2b08c958043ba8ed0cf5e1a39d97cc10cf349147c\",\"schema\":\"h2o.studio.syncWriterState.v2\",\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "dde3ada324ef0abd2bb90523f74c1d12d5142c34681d277ffab0f46f7d1d67e7"
+    },
+    {
+      "id": "legacy-baseline-receipt",
+      "kind": "legacy-baseline-receipt",
+      "canonicalBytes": "{\"artifacts\":[{\"observation\":{\"status\":\"absent\"},\"path\":\"h2o-local-publication.v1.json\"},{\"observation\":{\"sha256\":\"76b01f1b17fad69cd811731248f012d7b32cc521666495c39b97e462a24849f0\",\"status\":\"sha256\"},\"path\":\"round2-item9-delivery.json\"}],\"schema\":\"h2o.studio.syncLegacyBaselineReceipt.v1\"}",
+      "sha256": "4ec9ac8bc7a26dd592f6ef5d86f31d92a2e827c890371312a73fe1bc08fb2f66"
+    },
+    {
+      "id": "library-info",
+      "kind": "library-info",
+      "canonicalBytes": "{\"formatVersion\":2,\"layoutEpoch\":1,\"legacyBaselineReceiptSha256\":\"4ec9ac8bc7a26dd592f6ef5d86f31d92a2e827c890371312a73fe1bc08fb2f66\",\"minimumCompatibleProtocolVersion\":2,\"schema\":\"h2o.studio.syncLibraryInfo.v1\"}",
+      "sha256": "e85c35731d102553853eda45eaac4427b7eb3803aa34000c9c6e1f04086fc377"
+    }
+  ],
+  "negative": [
+    {
+      "id": "unknown-key-present",
+      "kind": "revision",
+      "canonicalBytes": "{\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"payload\":{\"schema\":\"h2o.studio.syncPayload.test.v1\",\"value\":\"root\"},\"payloadSha256\":\"e4b52541eeb547a172c06b9ecb48828aa348c86ddb2ca0e39e95ca9a8f47926d\",\"previousRevisionBlobSha256\":null,\"previousRevisionId\":null,\"revisionId\":\"p02-z1-r1\",\"schema\":\"h2o.studio.syncRevision.v2\",\"unknownKey\":true,\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "427eaca7f7772ca6b4133c871ab88574574a9845dac3fac4e5fc2b43befcd6c3",
+      "expectedClass": "p02-z1-schema-invalid"
+    },
+    {
+      "id": "optional-absent-explicit-null",
+      "kind": "revision",
+      "canonicalBytes": "{\"closureType\":null,\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"payload\":{\"schema\":\"h2o.studio.syncPayload.test.v1\",\"value\":\"root\"},\"payloadSha256\":\"e4b52541eeb547a172c06b9ecb48828aa348c86ddb2ca0e39e95ca9a8f47926d\",\"previousRevisionBlobSha256\":null,\"previousRevisionId\":null,\"revisionId\":\"p02-z1-r1\",\"schema\":\"h2o.studio.syncRevision.v2\",\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "e94e8c5be73c0b86d8362990fd8c4019ff575ed757daa7f363cd94f6eafd1bc4",
+      "expectedClass": "p02-z1-schema-invalid"
+    },
+    {
+      "id": "required-nullable-parent-absent",
+      "kind": "revision",
+      "canonicalBytes": "{\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"payload\":{\"schema\":\"h2o.studio.syncPayload.test.v1\",\"value\":\"root\"},\"payloadSha256\":\"e4b52541eeb547a172c06b9ecb48828aa348c86ddb2ca0e39e95ca9a8f47926d\",\"previousRevisionId\":null,\"revisionId\":\"p02-z1-r1\",\"schema\":\"h2o.studio.syncRevision.v2\",\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "d37e5e14981b4e0eaf4bc499fd5305e709ae83eaf6112155a68c63467305cc6f",
+      "expectedClass": "p02-z1-schema-invalid"
+    },
+    {
+      "id": "head-required-nullable-parent-absent",
+      "kind": "head",
+      "canonicalBytes": "{\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"objectKey\":\"cc282d10ed0a56aa1f45fa401ae8bcc13d03a770828d7438078b7d04612ba4a9\",\"payloadSha256\":\"e4b52541eeb547a172c06b9ecb48828aa348c86ddb2ca0e39e95ca9a8f47926d\",\"previousRevisionId\":null,\"revisionBlobSha256\":\"3d50368cccc3ff31f804129a081754570dda3953173d3ca3f8488c1145daa9cd\",\"revisionId\":\"p02-z1-r1\",\"schema\":\"h2o.studio.syncHead.v2\",\"sourceUpdatedAtIso\":\"2026-08-24T12:00:00.000Z\",\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "25e7d00fe8623c92bf7b4a2cfc96f3bbbdfab7b96fbc6123fa759df09eb0c6f3",
+      "expectedClass": "p02-z1-schema-invalid"
+    },
+    {
+      "id": "heads-tip-required-nullable-parent-absent",
+      "kind": "heads-snapshot",
+      "canonicalBytes": "{\"objects\":[{\"headSchema\":\"h2o.studio.syncHead.v2\",\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"objectKey\":\"cc282d10ed0a56aa1f45fa401ae8bcc13d03a770828d7438078b7d04612ba4a9\",\"tips\":[{\"payloadSha256\":\"d6c3cda913565c15f90c8d0777e93ccecf8926a593cb48ac6de9590f2aeff12c\",\"previousRevisionBlobSha256\":\"b90c20aad82c45f368dc2406c01e8a36efb8225efd24550401fe564fc7cd83b5\",\"revisionBlobSha256\":\"3970c1bbf1eed1f69914adb4459f70ad072387971fcc1f9e83d7bc40cc708790\",\"revisionId\":\"p02-z1-r3-close\",\"sourceUpdatedAtIso\":\"2026-08-24T12:00:02.000Z\"},{\"payloadSha256\":\"d6c3cda913565c15f90c8d0777e93ccecf8926a593cb48ac6de9590f2aeff12c\",\"previousRevisionBlobSha256\":\"b90c20aad82c45f368dc2406c01e8a36efb8225efd24550401fe564fc7cd83b5\",\"previousRevisionId\":\"p02-z1-r2\",\"revisionBlobSha256\":\"2488648c6677b2d8f696fd656dcb3f50d2abd27b37db547e684c6afe200af659\",\"revisionId\":\"p02-z1-r4-delete\",\"sourceUpdatedAtIso\":\"2026-08-24T12:00:03.000Z\"}]}],\"schema\":\"h2o.studio.syncHeadsSnapshot.v2\",\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "6339440b40ae24b06d26afc686f3ff6475aaaac546ecf043ab55cb259d3c90c6",
+      "expectedClass": "p02-z1-schema-invalid"
+    },
+    {
+      "id": "mixed-parent-pair",
+      "kind": "revision",
+      "canonicalBytes": "{\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"payload\":{\"schema\":\"h2o.studio.syncPayload.test.v1\",\"value\":\"root\"},\"payloadSha256\":\"e4b52541eeb547a172c06b9ecb48828aa348c86ddb2ca0e39e95ca9a8f47926d\",\"previousRevisionBlobSha256\":null,\"previousRevisionId\":\"p02-z1-missing-parent\",\"revisionId\":\"p02-z1-r1\",\"schema\":\"h2o.studio.syncRevision.v2\",\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "89c06e1c5315cbe0f8bd00e0f75d9c1c7a55e91ec814f680d56c540b614e640e",
+      "expectedClass": "p02-z1-schema-invalid"
+    },
+    {
+      "id": "untyped-deleted-prohibited",
+      "kind": "revision",
+      "canonicalBytes": "{\"deleted\":true,\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"payload\":{\"schema\":\"h2o.studio.syncPayload.test.v1\",\"value\":\"root\"},\"payloadSha256\":\"e4b52541eeb547a172c06b9ecb48828aa348c86ddb2ca0e39e95ca9a8f47926d\",\"previousRevisionBlobSha256\":null,\"previousRevisionId\":null,\"revisionId\":\"p02-z1-r1\",\"schema\":\"h2o.studio.syncRevision.v2\",\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "84cd3f2f53eeb15fb47fec25ea623fda9c8444313aa8129f36b6c0d219d45073",
+      "expectedClass": "p02-z1-schema-invalid"
+    },
+    {
+      "id": "closure-must-name-exact-parent",
+      "kind": "revision",
+      "canonicalBytes": "{\"closureType\":\"object-deleted\",\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"payload\":{\"schema\":\"h2o.studio.syncClosurePayload.v1\"},\"payloadSha256\":\"d6c3cda913565c15f90c8d0777e93ccecf8926a593cb48ac6de9590f2aeff12c\",\"previousRevisionBlobSha256\":null,\"previousRevisionId\":null,\"revisionId\":\"p02-z1-r4-delete\",\"schema\":\"h2o.studio.syncRevision.v2\",\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "c8bba7df883b347926ecb6490259103cbc55b08c70c30d3f601655f327499079",
+      "expectedClass": "p02-z1-schema-invalid"
+    },
+    {
+      "id": "branch-closure-selected-reference-absent",
+      "kind": "revision",
+      "canonicalBytes": "{\"closureType\":\"branch-superseded\",\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"payload\":{\"schema\":\"h2o.studio.syncClosurePayload.v1\"},\"payloadSha256\":\"d6c3cda913565c15f90c8d0777e93ccecf8926a593cb48ac6de9590f2aeff12c\",\"previousRevisionBlobSha256\":\"b90c20aad82c45f368dc2406c01e8a36efb8225efd24550401fe564fc7cd83b5\",\"previousRevisionId\":\"p02-z1-r2\",\"revisionId\":\"p02-z1-r3-close\",\"schema\":\"h2o.studio.syncRevision.v2\",\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "43d5b4499b5286331d46db6ba38b90c62a5d005f2219952033ac409e6e622d39",
+      "expectedClass": "p02-z1-schema-invalid"
+    },
+    {
+      "id": "branch-closure-cannot-select-losing-leaf",
+      "kind": "revision",
+      "canonicalBytes": "{\"closureType\":\"branch-superseded\",\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"payload\":{\"schema\":\"h2o.studio.syncClosurePayload.v1\"},\"payloadSha256\":\"d6c3cda913565c15f90c8d0777e93ccecf8926a593cb48ac6de9590f2aeff12c\",\"previousRevisionBlobSha256\":\"b90c20aad82c45f368dc2406c01e8a36efb8225efd24550401fe564fc7cd83b5\",\"previousRevisionId\":\"p02-z1-r2\",\"revisionId\":\"p02-z1-r3-close\",\"schema\":\"h2o.studio.syncRevision.v2\",\"selectedRevision\":{\"revisionBlobSha256\":\"b90c20aad82c45f368dc2406c01e8a36efb8225efd24550401fe564fc7cd83b5\",\"revisionId\":\"p02-z1-r2\"},\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "9e251bc73a4ea4c40742ddfc95359b1ff3329773ff81d530592667398187a6ec",
+      "expectedClass": "p02-z1-schema-invalid"
+    },
+    {
+      "id": "object-deleted-selected-reference-prohibited",
+      "kind": "revision",
+      "canonicalBytes": "{\"closureType\":\"object-deleted\",\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"payload\":{\"schema\":\"h2o.studio.syncClosurePayload.v1\"},\"payloadSha256\":\"d6c3cda913565c15f90c8d0777e93ccecf8926a593cb48ac6de9590f2aeff12c\",\"previousRevisionBlobSha256\":\"b90c20aad82c45f368dc2406c01e8a36efb8225efd24550401fe564fc7cd83b5\",\"previousRevisionId\":\"p02-z1-r2\",\"revisionId\":\"p02-z1-r4-delete\",\"schema\":\"h2o.studio.syncRevision.v2\",\"selectedRevision\":{\"revisionBlobSha256\":\"3d50368cccc3ff31f804129a081754570dda3953173d3ca3f8488c1145daa9cd\",\"revisionId\":\"p02-z1-r1\"},\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "4e06742bd4f5fc14021f5b799110d43c01f008016f0087bbe93ba118750a8af6",
+      "expectedClass": "p02-z1-schema-invalid"
+    },
+    {
+      "id": "payload-hash-mismatch",
+      "kind": "revision",
+      "canonicalBytes": "{\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"payload\":{\"schema\":\"h2o.studio.syncPayload.test.v1\",\"value\":\"root\"},\"payloadSha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"previousRevisionBlobSha256\":null,\"previousRevisionId\":null,\"revisionId\":\"p02-z1-r1\",\"schema\":\"h2o.studio.syncRevision.v2\",\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "6dae7da5ae2c7bd8c6516881c44dbd4ec6f79a9e2fafd5b807c0b22b443a6025",
+      "expectedClass": "p02-z1-payload-hash-mismatch"
+    },
+    {
+      "id": "object-key-mismatch",
+      "kind": "head",
+      "canonicalBytes": "{\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"objectKey\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"payloadSha256\":\"e4b52541eeb547a172c06b9ecb48828aa348c86ddb2ca0e39e95ca9a8f47926d\",\"previousRevisionBlobSha256\":null,\"previousRevisionId\":null,\"revisionBlobSha256\":\"3d50368cccc3ff31f804129a081754570dda3953173d3ca3f8488c1145daa9cd\",\"revisionId\":\"p02-z1-r1\",\"schema\":\"h2o.studio.syncHead.v2\",\"sourceUpdatedAtIso\":\"2026-08-24T12:00:00.000Z\",\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "48e11b2b670a572346707a74a4e1e36b4933e835f1f747d864a38c71f04bcd9d",
+      "expectedClass": "p02-z1-object-key-mismatch"
+    },
+    {
+      "id": "blob-address-content-mismatch",
+      "kind": "revision",
+      "canonicalBytes": "{\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"payload\":{\"schema\":\"h2o.studio.syncPayload.test.v1\",\"value\":\"root\"},\"payloadSha256\":\"e4b52541eeb547a172c06b9ecb48828aa348c86ddb2ca0e39e95ca9a8f47926d\",\"previousRevisionBlobSha256\":null,\"previousRevisionId\":null,\"revisionId\":\"p02-z1-r1\",\"schema\":\"h2o.studio.syncRevision.v2\",\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"}",
+      "sha256": "3d50368cccc3ff31f804129a081754570dda3953173d3ca3f8488c1145daa9cd",
+      "expectedBlobSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "expectedClass": "p02-z1-blob-address-mismatch"
+    },
+    {
+      "id": "over-limit-revision",
+      "kind": "revision",
+      "generator": "over-limit-revision",
+      "sha256": "0dfe91c1523276cb57173a627b31502cba3d10d606ad32573494f6e134d8b1b0",
+      "expectedClass": "p02-z1-limit-exceeded"
+    },
+    {
+      "id": "noncanonical-revision-bytes",
+      "kind": "revision",
+      "canonicalBytes": "{\"objectDomain\":\"studio.chat.saved-state.v1\",\"objectId\":\"p02-z1-object-a\",\"payload\":{\"schema\":\"h2o.studio.syncPayload.test.v1\",\"value\":\"root\"},\"payloadSha256\":\"e4b52541eeb547a172c06b9ecb48828aa348c86ddb2ca0e39e95ca9a8f47926d\",\"previousRevisionBlobSha256\":null,\"previousRevisionId\":null,\"revisionId\":\"p02-z1-r1\",\"schema\":\"h2o.studio.syncRevision.v2\",\"writerSyncPeerId\":\"studio-desktop:tauri-desktop:sqlite:11111111-2222-4333-8444-555555555555\"} ",
+      "sha256": "cd671db4d22cb243d852722bb88feb93ebd6183cbb5d970c12e81bd1dfca229b",
+      "expectedClass": "p02-z1-canonical-bytes-mismatch"
+    },
+    {
+      "id": "malformed-library-info",
+      "kind": "library-info",
+      "canonicalBytes": "{\"formatVersion\":2,\"legacyBaselineReceiptSha256\":\"4ec9ac8bc7a26dd592f6ef5d86f31d92a2e827c890371312a73fe1bc08fb2f66\",\"minimumCompatibleProtocolVersion\":2,\"schema\":\"h2o.studio.syncLibraryInfo.v1\"}",
+      "sha256": "46e375536a9d3b9475e52c3e554e3a3560471c092c46063e0a09f1e7ecf05536",
+      "expectedClass": "p02-z1-schema-invalid"
+    },
+    {
+      "id": "unsupported-library-format",
+      "kind": "library-info",
+      "canonicalBytes": "{\"formatVersion\":3,\"layoutEpoch\":1,\"legacyBaselineReceiptSha256\":\"4ec9ac8bc7a26dd592f6ef5d86f31d92a2e827c890371312a73fe1bc08fb2f66\",\"minimumCompatibleProtocolVersion\":2,\"schema\":\"h2o.studio.syncLibraryInfo.v1\"}",
+      "sha256": "de7eda4025515fb50ac2e2ba6bf6df6565bc29254cc0710489c5d02bb930915e",
+      "expectedClass": "p02-z1-unsupported-format"
+    },
+    {
+      "id": "unsupported-library-protocol",
+      "kind": "library-info",
+      "canonicalBytes": "{\"formatVersion\":2,\"layoutEpoch\":1,\"legacyBaselineReceiptSha256\":\"4ec9ac8bc7a26dd592f6ef5d86f31d92a2e827c890371312a73fe1bc08fb2f66\",\"minimumCompatibleProtocolVersion\":3,\"schema\":\"h2o.studio.syncLibraryInfo.v1\"}",
+      "sha256": "cbea4e5ddba9826fb92cc1be16f627fd8ef50e956d34023a03022bb2637043c0",
+      "expectedClass": "p02-z1-unsupported-protocol"
+    },
+    {
+      "id": "unsupported-library-epoch",
+      "kind": "library-info",
+      "canonicalBytes": "{\"formatVersion\":2,\"layoutEpoch\":2,\"legacyBaselineReceiptSha256\":\"4ec9ac8bc7a26dd592f6ef5d86f31d92a2e827c890371312a73fe1bc08fb2f66\",\"minimumCompatibleProtocolVersion\":2,\"schema\":\"h2o.studio.syncLibraryInfo.v1\"}",
+      "sha256": "bfaeba1f4bad16d275c4785039c4cd17d0ee919ff7a5f0bedeaadc21fd28c2bf",
+      "expectedClass": "p02-z1-unsupported-epoch"
+    }
+  ]
+}

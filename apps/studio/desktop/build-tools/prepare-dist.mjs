@@ -312,8 +312,7 @@ if (renameMap.size > 0) {
  * instead of overwriting or shadowing the real file, so the entry must be
  * retired explicitly. Paths are enumerated, never discovered by scanning. */
 const DESKTOP_OPTIONAL_SCRIPT_COMPAT_ASSETS = Object.freeze([
-  'sync/browser-delivery-producer.tauri.js',
-  'sync/sync-object-runtime.tauri.js',
+  // Retired: sync/browser-delivery-producer.tauri.js and sync/sync-object-runtime.tauri.js are now real Sync modules.
 ]);
 
 /* One deterministic body shared by every emitted compatibility file. It is

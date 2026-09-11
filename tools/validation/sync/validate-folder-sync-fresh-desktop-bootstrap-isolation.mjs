@@ -14,6 +14,14 @@
  * Deterministic: folder-sync.tauri.js runs in a VM with a synthetic Tauri fs,
  * a synthetic chrome.storage.local, a controlled clock and controlled timers.
  * It never touches the real HOME and carries no user payload data.
+ *
+ * The synthetic Desktop also models the Host storage-authority seam the
+ * canonical folder-sync composition requires before it reads or writes its
+ * configuration: platform.whenStorageAuthorityReady() (canonical SQLite
+ * authority ready) and the one-key canonical raw-value / compare-and-set
+ * functions on chrome.storage.local. Without that seam the module fails
+ * closed by design; with it, every scenario below exercises the real
+ * canonical config path. The assertions themselves are unchanged.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -155,6 +163,13 @@ function createRuntime(persistedConfig) {
           },
         },
         sync: {},
+        /* Host storage-authority readiness seam (platform.tauri.js): the
+         * canonical SQLite authority is ready for this synthetic Desktop. */
+        platform: {
+          whenStorageAuthorityReady() {
+            return Promise.resolve(Object.freeze({ ready: true, backend: 'sqlite', status: 'ready' }));
+          },
+        },
       },
       LibraryIndex: {
         async refresh() { return { ok: true }; },
@@ -173,6 +188,17 @@ function createRuntime(persistedConfig) {
           set(items, callback) {
             for (const [key, value] of Object.entries(items || {})) storage.set(key, value);
             if (callback) callback();
+          },
+          /* Host canonical seam: the exact stored text of ONE key, and a
+           * one-key compare-and-set conditioned on that exact text. */
+          __h2oCanonicalRawValue(key) {
+            return Promise.resolve(storage.has(key) ? JSON.stringify(storage.get(key)) : null);
+          },
+          __h2oCanonicalCompareAndSet(key, expectedRaw, nextRaw) {
+            const currentRaw = storage.has(key) ? JSON.stringify(storage.get(key)) : null;
+            if (currentRaw !== expectedRaw) return Promise.resolve({ won: false, currentRaw });
+            storage.set(key, JSON.parse(nextRaw));
+            return Promise.resolve({ won: true, currentRaw: nextRaw });
           },
         },
       },

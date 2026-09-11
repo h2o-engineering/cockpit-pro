@@ -17,13 +17,13 @@ import {
   PROXY_PACK_URL as PATHS_PROXY_PACK_URL,
   extensionBuildDir,
 } from "../../../../paths.mjs";
+import { resolveChromeBuildStamp } from "./chrome-live-build-stamp.mjs";
 
 export function createChromeLiveBuildContext() {
   // paths.REPO_ROOT honors H2O_SRC_DIR identically to the previous inline
   // `process.env.H2O_SRC_DIR || SRC_DEFAULT` compute. Under standard
   // invocation (no env override), SRC === <repo>/ matches pre-Phase-0G-2.
   const SRC = REPO_ROOT;
-
   const DEV_VARIANT_RAW = String(process.env.H2O_EXT_DEV_VARIANT || "controls").trim().toLowerCase();
   const DEV_VARIANT = DEV_VARIANT_RAW === "lean"
     ? "lean"
@@ -42,6 +42,14 @@ export function createChromeLiveBuildContext() {
   // identity-surface web_accessible_resources entry.
   const STUDIO_ONLY = DEV_VARIANT === "studio-launcher";
   const MANIFEST_PROFILE = (DEV_VARIANT === "production" || STUDIO_ONLY) ? "production" : "development";
+  // Resolve every deterministic artifact identity field once. Production-
+  // profile artifacts publicly claim this exact commit at runtime, so source
+  // admission must prove tracked index/worktree bytes match HEAD before any
+  // source snapshot or output write can occur. Development variants retain
+  // their existing dirty-worktree workflow.
+  const CHROME_BUILD_IDENTITY = resolveChromeBuildStamp({
+    requireCommittedSource: MANIFEST_PROFILE === "production",
+  });
 
   // OUT_DIR fallback now resolves via paths.extensionBuildDir(<variant>),
   // which composes paths.BUILD_DIR (= REPO_ROOT/build, env-overridable via
@@ -108,6 +116,7 @@ export function createChromeLiveBuildContext() {
 
   return {
     SRC,
+    CHROME_BUILD_IDENTITY,
     OUT_DIR,
     PROXY_PACK_URL,
     CHAT_MATCH,

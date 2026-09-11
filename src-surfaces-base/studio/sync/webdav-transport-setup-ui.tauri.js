@@ -795,5 +795,51 @@
     return mountIntoHost(host);
   };
 
+  /* M2 read-only domain facts. This calls only the local descriptor-registry
+   * status command; it never probes or contacts WebDAV. Raw URLs, paths and
+   * credential fields are deliberately omitted from the returned snapshot. */
+  API.getReadinessFacts = async function () {
+    var invoke = getInvoke();
+    if (!invoke) {
+      return Object.freeze({
+        descriptorValid: false,
+        credentialsReady: false,
+        reachabilityReady: false,
+        reason: 'desktop-tauri-invoke-unavailable',
+        operation: Object.freeze({ state: 'blocked', reason: 'desktop-tauri-invoke-unavailable' })
+      });
+    }
+    try {
+      var result = await invoke('h2o_rt_webdav_setup_status');
+      state.lastStatus = result || null;
+      var descriptorValid = !!(result && result.writeGradeRegistryEligible === true &&
+        result.registryOwnerOk === true && result.registryPermissionOk === true &&
+        result.jsonParses === true && result.requiredPrivateFieldsPresent === true &&
+        result.endpointRefHash && result.remoteRootRefHash && result.credentialRefHash);
+      var credentialsReady = !!(result && result.credentialMaterialPresent === true);
+      var reachabilityReady = !!(result && result.realWebdavTransportAvailable === true &&
+        result.transportReady === true);
+      var blockers = result && Array.isArray(result.blockers) ? result.blockers : [];
+      return Object.freeze({
+        descriptorValid: descriptorValid,
+        credentialsReady: credentialsReady,
+        reachabilityReady: reachabilityReady,
+        reason: !descriptorValid
+          ? String(blockers[0] || (result && result.reason) || 'descriptor-not-ready')
+          : (!credentialsReady ? 'credentials-not-ready'
+            : (!reachabilityReady ? 'webdav-reachability-not-verified' : '')),
+        operation: Object.freeze({ state: 'idle', reason: '' })
+      });
+    } catch (_) {
+      return Object.freeze({
+        descriptorValid: false,
+        credentialsReady: false,
+        reachabilityReady: false,
+        reason: 'real-transport-webdav-setup-status-command-failed',
+        operation: Object.freeze({ state: 'error', reason: 'status-command-failed' })
+      });
+    }
+  };
+
   H2O.Studio.sync.__realTransportWebDavSetupUiInstalled = true;
 })(typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this));

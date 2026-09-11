@@ -2,10 +2,21 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildSync } from "esbuild";
+
+import { resolveChromeBuildStamp } from "./chrome-live-build-stamp.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const CATEGORY_CLASSIFIER_SOURCE_FILE = path.resolve(SCRIPT_DIR, "../../../../../packages/studio-core/src/categories/classifier.ts");
 const BILLING_PROVIDER_SOURCE_FILE = path.resolve(SCRIPT_DIR, "../../../billing/billing-provider-supabase.entry.mjs");
+const SYNC_BACKGROUND_RUNTIME_SOURCE_FILE = path.resolve(
+  SCRIPT_DIR,
+  "../../../../../packages/browser-adapters/chrome/sync-background-reconcile.mjs",
+);
+const SYNC_LINEAR_RECONCILE_CORE_SOURCE_FILE = path.resolve(
+  SCRIPT_DIR,
+  "../../../../../src-surfaces-base/studio/sync/sync-linear-reconcile-core.js",
+);
 
 function readCategoryClassifierRuntimeSource() {
   const source = fs.readFileSync(CATEGORY_CLASSIFIER_SOURCE_FILE, "utf8");
@@ -22,6 +33,29 @@ function readBillingProviderRuntimeSource() {
 
 const BILLING_PROVIDER_RUNTIME_SOURCE = readBillingProviderRuntimeSource();
 
+function buildSyncBackgroundRuntimeSource() {
+  const result = buildSync({
+    entryPoints: [SYNC_BACKGROUND_RUNTIME_SOURCE_FILE],
+    bundle: true,
+    format: "iife",
+    globalName: "H2OChromeBackgroundSyncBundle",
+    platform: "browser",
+    target: ["chrome120"],
+    write: false,
+    legalComments: "none",
+  });
+  const output = result.outputFiles && result.outputFiles[0];
+  if (!output || !output.text) {
+    throw new Error("Chrome background Sync bundle produced no JavaScript");
+  }
+  return output.text;
+}
+
+const SYNC_BACKGROUND_RUNTIME_SOURCE = buildSyncBackgroundRuntimeSource();
+const SYNC_LINEAR_RECONCILE_CORE_SOURCE = fs.readFileSync(
+  SYNC_LINEAR_RECONCILE_CORE_SOURCE_FILE,
+  "utf8",
+);
 function sanitizeIdentityProviderOAuthProviderForBackground(value) {
   return String(value || "").trim().toLowerCase() === "google" ? "google" : null;
 }
@@ -70,6 +104,7 @@ function sanitizeIdentityProviderPhaseNetworkForBackground(value) {
 }
 
 export function makeChromeLiveBackgroundJs({
+  H2O_BUILD_STAMP = resolveChromeBuildStamp().h2oBuildStamp,
   DEV_TAG,
   CHAT_MATCH,
   DEV_HAS_CONTROLS,
@@ -82,6 +117,10 @@ export function makeChromeLiveBackgroundJs({
   IDENTITY_PROVIDER_OAUTH_PROVIDER = null,
   STUDIO_AUTO_RESTORE_ENABLED = true,
 }) {
+  const H2O_BUILD_STAMP_SAFE = String(H2O_BUILD_STAMP || "").trim();
+  if (!/^h2o-runtime-v1:[0-9a-f]{40}$/.test(H2O_BUILD_STAMP_SAFE)) {
+    throw new Error(`invalid H2O_BUILD_STAMP for background: ${JSON.stringify(H2O_BUILD_STAMP_SAFE)}`);
+  }
   // Studio is hosted in chrome-ext-prod ONLY. Non-prod builds ship without
   // surfaces/studio/* (the build script calls removeArchiveWorkbenchFromOut)
   // AND disable every code path that would try to open / focus / restore
@@ -105,11 +144,49 @@ export function makeChromeLiveBackgroundJs({
     IDENTITY_PROVIDER_PHASE_NETWORK,
   );
   return `const TAG = ${JSON.stringify(DEV_TAG)};
+const H2O_BUILD_STAMP = ${JSON.stringify(H2O_BUILD_STAMP_SAFE)};
+${STUDIO_HOSTED_HERE ? SYNC_LINEAR_RECONCILE_CORE_SOURCE : ""}
+${STUDIO_HOSTED_HERE ? SYNC_BACKGROUND_RUNTIME_SOURCE : ""}
 const MSG_FETCH_TEXT = "h2o-ext-live:fetch-text";
 const MSG_HTTP = "h2o-ext-live:http";
 const MSG_PAGE_DISABLE_ONCE = "h2o-ext-live:page-disable-once";
 const MSG_PAGE_SET_LINK = "h2o-ext-live:page-set-link";
 const MSG_ARCHIVE = "h2o-ext-archive:v1";
+/* W-2b. A DEDICATED type for one operation: observe the governed P02
+ * repository, read-only. It is deliberately NOT part of the archive family -
+ * archive ops are reachable from page-world JavaScript through the content
+ * script relay, and this must not be. It carries no operation selector, so the
+ * type itself is the entire capability. */
+const MSG_P02_OBSERVE = "h2o-ext-p02-observe:v1";
+/* W-2c. Fixed-purpose trusted Studio request: exactly one bounded manual
+ * Receive/admission pass. The message carries no peer, repository, object or
+ * authority selector; those remain governed configuration/runtime concerns. */
+const MSG_P02_RECEIVE_ADMIT = "h2o-ext-p02-receive-admit:v1";
+const P02_W2C_RESULT_SCHEMA = "h2o.studio.syncW2cReceiveAdmissionResult.v1";
+/* W-3. Fixed-purpose trusted Human content Apply. Like Receive, provenance is
+ * the whole request; selection and every authority value stay worker-owned. */
+const MSG_P02_APPLY = "h2o-ext-p02-apply:v1";
+const P02_W3_RESULT_SCHEMA = "h2o.studio.syncW3ApplyResult.v1";
+/* Reverse P02. One fixed-purpose local publication request. The page supplies
+ * provenance only; the worker owns local identity, candidate, mint, parent,
+ * repository and destination. */
+const MSG_P02_PUBLISH_LOCAL = "h2o-ext-p02-publish-local:v1";
+const MSG_P02_RETIRE_FOREIGN_INTENT = "h2o-ext-p02-retire-foreign-intent:v1";
+const P02_PUBLISH_RESULT_SCHEMA =
+  "h2o.studio.syncChromePublicationResult.p02.v1";
+/* Fixed-purpose Human ceremony: retire Chrome-local P01 mutation authority.
+ * The request contains provenance only; the worker resolves every authority
+ * field and owns the only generation-key persistence route. */
+const MSG_P01_WRITER_STANDDOWN = "h2o-ext-p02-standdown-p01-writer:v1";
+const P01_WRITER_STANDDOWN_RESULT_SCHEMA =
+  "h2o.studio.syncP01WriterStanddownResult.v1";
+/* W-2b readiness has two alternative success signals: the existing Port ACK
+ * and one post-start worker announcement. They share the same base wire value;
+ * the Port alone carries the explicit ":port" transport suffix. */
+const P02_OBSERVE_READY_ANNOUNCE = "h2o-ext-p02-observe-ready:v1";
+const P02_OBSERVE_READY_PORT = "h2o-ext-p02-observe-ready:v1:port";
+/* The only document permitted to ask for it. */
+const P02_OBSERVE_STUDIO_PATHNAME = "/surfaces/studio/studio.html";
 const MSG_ARCHIVE_PORT = "h2o-ext-archive:v1:port";
 const MSG_FOLDERS = "h2o-ext-folders:v1";
 const MSG_STUDIO_BROADCAST = "h2o:library:studio-broadcast:v1";
@@ -3621,6 +3698,27 @@ async function openOrFocusStudio(routeRaw = "") {
 // A cooldown marker prevents repeat restores from multiple SW wake events.
 
 const STUDIO_PRESENCE_KEY = "h2o:studio:presence:v1";
+/* Accepted object-sync composition input: the background Sync runtime is
+ * handed this read-only Studio-context query as findActiveStudioContexts
+ * so a wake can defer to an open Studio surface instead of racing it. It
+ * queries extension contexts only; it never opens, focuses or remembers a
+ * tab. */
+async function findExistingStudioContexts() {
+  const studioBaseUrl = chrome.runtime.getURL("surfaces/studio/studio.html");
+  const getContexts = chrome.runtime && chrome.runtime.getContexts;
+  if (typeof getContexts !== "function") return null;
+  try {
+    const contexts = await chrome.runtime.getContexts({ contextTypes: ["TAB"] });
+    void chrome.runtime.lastError;
+    if (!Array.isArray(contexts)) return null;
+    return contexts.filter((context) =>
+      typeof context?.documentUrl === "string" &&
+      context.documentUrl.startsWith(studioBaseUrl));
+  } catch {
+    return null;
+  }
+}
+
 const STUDIO_LAST_AUTO_RESTORE_KEY = "h2o:studio:lastAutoRestoreAt";
 const STUDIO_PRESENCE_FRESHNESS_MS = 3 * 60 * 1000;       // 3 min: "alive recently"
 const STUDIO_AUTO_RESTORE_COOLDOWN_MS = 30 * 1000;        // 30 s: avoid duplicate restores
@@ -12497,8 +12595,615 @@ function asm_derivedFromRuntime(rt) { return identitySnapshot_derivedFromRuntime
 function asm_runtimeToSnapshot(rt) { return identitySnapshot_fromRuntime(rt); }
 function asm_snapshotToRuntime(snap, existingRt) { return identitySnapshot_toRuntime(snap, existingRt); }
 
+/*
+ * W-2b sender authorization.
+ *
+ * The repository observation is the one message op in this router that must
+ * know who is asking. chrome.runtime.onMessage fires for content scripts and
+ * extension pages alike, and the content script forwards page-world archive
+ * requests, so "an extension message arrived" is not evidence of a trusted
+ * caller. Only the extension's own Studio document may ask.
+ *
+ * Checked positively, not by exclusion: the sender must be this extension, the
+ * URL must parse, its scheme must be chrome-extension:, its host must be this
+ * extension id, and its pathname must be exactly the Studio document. Query and
+ * hash are ignored because Studio routes through the hash. A content script on
+ * https://chatgpt.com fails at the scheme, a foreign extension at the id, and
+ * any other extension-owned page at the pathname.
+ *
+ * A Studio document opened in an ordinary browser tab legitimately carries
+ * sender.tab. Tab presence is therefore neither authority nor a reason to
+ * reject: the exact own-extension document identity above is the authority.
+ * The reverse worker -> Studio startup announcement keeps its separate exact
+ * bg.js/no-tab predicate in the Studio panel.
+ */
+function isTrustedP02StudioSender(sender) {
+  if (!sender || sender.id !== chrome.runtime.id) return false;
+  const raw = typeof sender.url === "string" ? sender.url : "";
+  if (!raw) return false;
+  let parsed;
+  try { parsed = new URL(raw); } catch { return false; }
+  return parsed.protocol === "chrome-extension:"
+    && parsed.hostname === chrome.runtime.id
+    && parsed.pathname === P02_OBSERVE_STUDIO_PATHNAME;
+}
+
+const P02_W2C_RUNTIME_STATUSES = new Set([
+  "gate-inactive", "gate-fail-closed", "authority-non-mutating",
+  "dual-writer-excluded", "idle", "progressed",
+]);
+const P02_W2C_ERRORS = new Set([
+  "p02-w2c-request-invalid", "p02-w2c-sender-forbidden",
+  "p02-w2c-build-mismatch", "p02-w2c-busy",
+  "p02-w2c-runtime-unavailable", "p02-w2c-runtime-status-invalid",
+  "p02-w2c-drain-bound-exhausted", "p02-w2c-receive-admission-failed",
+  "p02-w2c-peer-roster-config-invalid", "p02-w2c-peer-roster-row-invalid",
+  "p02-w2c-peer-roster-self-target", "p02-w2c-peer-roster-duplicate",
+  "p02-w2c-peer-roster-ambiguous", "p02-w2c-peer-roster-writer-key-mismatch",
+  "p02-fsa-read-permission-blocked", "reauthorization-required",
+]);
+const P01_WRITER_STANDDOWN_OUTCOMES = new Set([
+  "stood-down", "already-stood-down", "p01-not-quiescent",
+  "configured-peer-authority-invalid", "generation-state-invalid", "busy",
+  "sender-forbidden", "build-mismatch", "serialization-unavailable",
+  "persistence-failed", "readback-mismatch", "request-invalid",
+  "runtime-unavailable",
+]);
+function p01WriterStanddownFixedResult(outcome, source = null) {
+  const safeOutcome = P01_WRITER_STANDDOWN_OUTCOMES.has(outcome)
+    ? outcome : "persistence-failed";
+  const success = safeOutcome === "stood-down" ||
+    safeOutcome === "already-stood-down";
+  const result = {
+    schema: P01_WRITER_STANDDOWN_RESULT_SCHEMA,
+    ok: success,
+    outcome: safeOutcome,
+    storageWrites: Number(source && source.storageWrites) === 1 ? 1 : 0,
+    verified: success && source && source.verified === true,
+  };
+  if (success && source && source.generation === "p02" &&
+      source.p01MayMutate === false) {
+    result.generation = "p02";
+    result.p01MayMutate = false;
+  }
+  return result;
+}
+function p02W2cOutcomeCounts(dispatched) {
+  const counts = {
+    progress: 0, noEffect: 0, blocked: 0,
+    indeterminate: 0, integrity: 0, transient: 0,
+  };
+  for (const row of Array.isArray(dispatched) ? dispatched : []) {
+    if (row && row.outcome === "progress") counts.progress += 1;
+    else if (row && row.outcome === "no-effect") counts.noEffect += 1;
+    else if (row && row.outcome === "blocked") counts.blocked += 1;
+    else if (row && row.outcome === "indeterminate") counts.indeterminate += 1;
+    else if (row && row.outcome === "integrity") counts.integrity += 1;
+    else if (row && row.outcome === "transient") counts.transient += 1;
+  }
+  return counts;
+}
+function p02W2cFixedResult(report, error = null, runPasses = report ? 1 : 0) {
+  const dispatched = Array.isArray(report && report.dispatched)
+    ? report.dispatched : [];
+  const runtimeStatus = P02_W2C_RUNTIME_STATUSES.has(report && report.status)
+    ? report.status : "gate-fail-closed";
+  const result = {
+    ok: error === null,
+    schema: P02_W2C_RESULT_SCHEMA,
+    verdict: "receive-admission-pass",
+    runPasses,
+    runtimeStatus,
+    exhausted: report && report.exhausted === true,
+    dispatchedCount: dispatched.length,
+    outcomes: p02W2cOutcomeCounts(dispatched),
+    applyEnabled: false,
+    publicationReachable: false,
+    repositoryByteWrites: 0,
+    webdavMutations: 0,
+  };
+  if (error !== null) result.error = P02_W2C_ERRORS.has(error)
+    ? error : "p02-w2c-receive-admission-failed";
+  return result;
+}
+
+const P02_W3_OUTCOMES = new Set([
+  "applied", "already-applied", "pending-recovered", "no-eligible-apply",
+  "multiple-eligible-apply", "pending-conflict", "anchor-mismatch",
+  "trusted-peer-authority-invalid", "branch-evidence-invalid",
+  "revision-integrity-failed", "archive-import-failed", "readback-mismatch",
+  "pending-unresolved", "busy", "sender-forbidden", "build-mismatch",
+  "request-invalid", "runtime-unavailable", "apply-failed",
+  "p01-active", "authority-invalid",
+]);
+function p02W3PublicOutcome(source, fallback = "apply-failed") {
+  const verdict = String(source && source.verdict || "");
+  if (P02_W3_OUTCOMES.has(verdict)) return verdict;
+  const reason = String(source && source.reason || "");
+  if (reason.includes("pending-unresolved")) return "pending-unresolved";
+  if (reason.includes("pending")) return "pending-conflict";
+  if (reason.includes("anchor") || reason.includes("precondition")) return "anchor-mismatch";
+  if (reason.includes("peer-authority") || reason.includes("peer-roster")) {
+    return "trusted-peer-authority-invalid";
+  }
+  if (reason.includes("branch-evidence") || reason.includes("candidate-ineligible")) {
+    return "branch-evidence-invalid";
+  }
+  if (reason.includes("blob") || reason.includes("integrity") || reason.includes("bytes")) {
+    return "revision-integrity-failed";
+  }
+  if (reason.includes("archive-import") || reason.includes("canonical-import")) {
+    return "archive-import-failed";
+  }
+  if (reason.includes("readback")) return "readback-mismatch";
+  return P02_W3_OUTCOMES.has(fallback) ? fallback : "apply-failed";
+}
+function p02W3FixedResult(report = null, fixedOutcome = null, runPasses = report ? 1 : 0) {
+  const source = report && report.manualApplyResult;
+  const runtimeRefusal = report && report.status === "dual-writer-excluded"
+    ? "p01-active"
+    : report && ["gate-inactive", "gate-fail-closed", "authority-non-mutating"].includes(report.status)
+      ? "authority-invalid"
+      : null;
+  const outcome = fixedOutcome || runtimeRefusal || p02W3PublicOutcome(
+    source, report && report.status === "idle" ? "no-eligible-apply" : "apply-failed");
+  const success = outcome === "applied" || outcome === "already-applied" ||
+    outcome === "pending-recovered";
+  return {
+    ok: success,
+    schema: P02_W3_RESULT_SCHEMA,
+    outcome,
+    runPasses,
+    runtimeStatus: P02_W2C_RUNTIME_STATUSES.has(report && report.status)
+      ? report.status : "gate-fail-closed",
+    applied: source && source.applied === true,
+    canonicalMutated: source && source.canonicalMutated === true,
+    publicationReachable: false,
+    repositoryByteWrites: 0,
+    webdavMutations: 0,
+  };
+}
+
+/* W-2b cold-start ownership. The observer route is registered here, near the
+ * top of the worker, but the Sync runtime is composed much further down. A
+ * message that arrives while the worker is still starting must therefore never
+ * read that binding directly: the route waits on this promise instead, and the
+ * composition settles it exactly once on every path - with the runtime, or with
+ * null when there is none. One click still yields one eventual response; no
+ * retry, no queue, no scheduler. */
+let __h2oBackgroundSyncRuntimeReadySettle = null;
+let __h2oW2cReceiveAdmissionInFlight = false;
+let __h2oW3ManualApplyInFlight = false;
+let __h2oP02PublicationInFlight = false;
+let __h2oManualP02StageInFlight = null;
+let __h2oP01WriterStanddownInFlight = false;
+let __h2oW2cManualStageCapability = null;
+const __h2oBackgroundSyncRuntimeReady = new Promise((resolve) => {
+  __h2oBackgroundSyncRuntimeReadySettle = resolve;
+});
+function whenBackgroundSyncRuntimeReady() {
+  return __h2oBackgroundSyncRuntimeReady;
+}
+
+/* One syntactic runPass site for both trusted manual stages. The capability is
+ * already installed by the owning route and is removed in that route's
+ * finally. maxSteps=1 binds one Human activation to one object attempt. */
+function runTrustedManualP02Stage(runtime, stage) {
+  return runtime.p02.runPass(stage === "manual-apply"
+    ? { maxSteps: 1, singlePass: true }
+    : { singlePass: true });
+}
+
+/* Bounded first result. Reports only what the operator needs to see: which row
+ * matched, the exact state transition, the exact identity, and explicit zeros
+ * for publication, repository mutation and deletion. */
+function p02ForeignIntentFixedResult(result, errorCode) {
+  if (!result) {
+    return {
+      schema: "h2o.studio.syncP02ForeignIntentRetirementResult.v1",
+      ok: false,
+      matched: false,
+      errorCode: errorCode || "foreign-intent-retirement-failed",
+      repositoryMutated: false,
+      published: false,
+      rowsDeleted: 0
+    };
+  }
+  return {
+    schema: "h2o.studio.syncP02ForeignIntentRetirementResult.v1",
+    ok: result.ok === true,
+    matched: result.matched === true,
+    objectId: result.objectId,
+    objectKey: result.objectKey,
+    revisionId: result.revisionId,
+    priorState: result.priorState,
+    retiredState: result.retiredState,
+    stagedAt: result.stagedAt,
+    retiredAt: result.retiredAt,
+    stagedBytes: result.stagedBytes,
+    evidenceRetained: result.evidenceRetained === true,
+    repositoryMutated: false,
+    published: false,
+    rowsDeleted: 0,
+    errorCode: null
+  };
+}
+
+function p02PublishFixedResult(source = null, outcome = null) {
+  const selected = String(outcome || source?.outcome || "publication-failed");
+  const ok = selected === "published" || selected === "recovered" ||
+    selected === "no-eligible-local-change";
+  return {
+    ok,
+    schema: P02_PUBLISH_RESULT_SCHEMA,
+    outcome: selected,
+    published: selected === "published",
+    recovered: selected === "recovered",
+    repositoryMutated: source?.repositoryMutated === true,
+    eligibleCount: Number.isSafeInteger(source?.eligibleCount)
+      ? source.eligibleCount : 0,
+    revisionId: typeof source?.mintedRevisionId === "string"
+      ? source.mintedRevisionId : null,
+    publicationOwner: "chrome-p02-publication-owner",
+    webdavReachable: false,
+  };
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg.type !== "string") return;
+
+  /*
+   * W-2b: observe the governed P02 repository, read-only. One operation, no
+   * parameters - nothing in the message beyond its type selects behaviour, so
+   * there is no dispatch surface to widen. The accessor it calls is the
+   * verified zero-store-touch one; a fail-closed observation (handle-absent,
+   * permission-absent, malformed format, a generation or legacy block) is a
+   * SUCCESSFUL observation carrying its own typed state, and is returned as
+   * such rather than flattened into an error.
+   */
+  if (msg.type === MSG_P02_OBSERVE) {
+    /* The port is claimed by the synchronous return true below, so from here on
+     * every outcome owes the caller exactly one answer. respondOnce is what
+     * makes that true even if a later throw would otherwise leave the port
+     * claimed and silent, which is how the first live invocation failed. A
+     * sendResponse that throws means the caller is already gone; there is
+     * nobody left to tell. */
+    let p02ObserveAnswered = false;
+    const respondOnceToP02Observe = (value) => {
+      if (p02ObserveAnswered) return;
+      p02ObserveAnswered = true;
+      try { sendResponse(value); } catch (_) { /* caller gone */ }
+    };
+    (async () => {
+      try {
+        if (!isTrustedP02StudioSender(sender)) {
+          respondOnceToP02Observe({ ok: false, error: "p02-observe-sender-forbidden" });
+          return;
+        }
+        const runtime = await whenBackgroundSyncRuntimeReady();
+        if (!runtime || !runtime.p02 ||
+            typeof runtime.p02.observeRepository !== "function") {
+          respondOnceToP02Observe({ ok: false, error: "p02-observe-runtime-unavailable" });
+          return;
+        }
+        respondOnceToP02Observe({
+          ok: true, observation: await runtime.p02.observeRepository() });
+      } catch (_) {
+        /* Stable code only: a rejection must not describe the repository. */
+        respondOnceToP02Observe({ ok: false, error: "p02-observe-failed" });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === MSG_P02_RECEIVE_ADMIT) {
+    let p02W2cAnswered = false;
+    const respondOnceToP02W2c = (value) => {
+      if (p02W2cAnswered) return;
+      p02W2cAnswered = true;
+      try { sendResponse(value); } catch (_) { /* caller gone */ }
+    };
+    (async () => {
+      let capability = null;
+      let ownsInFlight = false;
+      let runPassStarted = false;
+      try {
+        if (Object.keys(msg).sort().join(",") !== "build,type") {
+          respondOnceToP02W2c(p02W2cFixedResult(null, "p02-w2c-request-invalid"));
+          return;
+        }
+        if (!isTrustedP02StudioSender(sender)) {
+          respondOnceToP02W2c(p02W2cFixedResult(null, "p02-w2c-sender-forbidden"));
+          return;
+        }
+        if (msg.build !== H2O_BUILD_STAMP) {
+          respondOnceToP02W2c(p02W2cFixedResult(null, "p02-w2c-build-mismatch"));
+          return;
+        }
+        if (__h2oManualP02StageInFlight !== null ||
+            __h2oP02PublicationInFlight ||
+            __h2oW2cReceiveAdmissionInFlight) {
+          respondOnceToP02W2c(p02W2cFixedResult(null, "p02-w2c-busy"));
+          return;
+        }
+        __h2oW2cReceiveAdmissionInFlight = true;
+        __h2oManualP02StageInFlight = "receive-admit";
+        ownsInFlight = true;
+        const runtime = await whenBackgroundSyncRuntimeReady();
+        if (!runtime || !runtime.p02 || typeof runtime.p02.runPass !== "function") {
+          respondOnceToP02W2c(p02W2cFixedResult(null, "p02-w2c-runtime-unavailable"));
+          return;
+        }
+        capability = Object.freeze({
+          schema: "h2o.studio.syncW2cManualReceiveCapability.v1",
+          stage: "receive-admission",
+        });
+        __h2oW2cManualStageCapability = capability;
+        runPassStarted = true;
+        const report = await runTrustedManualP02Stage(runtime, "receive-admission");
+        if (!P02_W2C_RUNTIME_STATUSES.has(report && report.status)) {
+          respondOnceToP02W2c(p02W2cFixedResult(report, "p02-w2c-runtime-status-invalid"));
+          return;
+        }
+        if (report && report.exhausted === true) {
+          respondOnceToP02W2c(p02W2cFixedResult(report, "p02-w2c-drain-bound-exhausted"));
+          return;
+        }
+        respondOnceToP02W2c(p02W2cFixedResult(report));
+      } catch (error) {
+        const typedError = P02_W2C_ERRORS.has(error && error.code)
+          ? error.code : "p02-w2c-receive-admission-failed";
+        respondOnceToP02W2c(p02W2cFixedResult(
+          null, typedError, runPassStarted ? 1 : 0));
+      } finally {
+        if (ownsInFlight && __h2oW2cManualStageCapability === capability) {
+          __h2oW2cManualStageCapability = null;
+        }
+        if (ownsInFlight) {
+          __h2oW2cReceiveAdmissionInFlight = false;
+          if (__h2oManualP02StageInFlight === "receive-admit") {
+            __h2oManualP02StageInFlight = null;
+          }
+        }
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === MSG_P02_APPLY) {
+    let answered = false;
+    const respondOnce = (value) => {
+      if (answered) return;
+      answered = true;
+      try { sendResponse(value); } catch (_) { /* caller gone */ }
+    };
+    (async () => {
+      let capability = null;
+      let ownsInFlight = false;
+      let runPassStarted = false;
+      try {
+        if (Object.keys(msg).sort().join(",") !== "build,type") {
+          respondOnce(p02W3FixedResult(null, "request-invalid"));
+          return;
+        }
+        if (!isTrustedP02StudioSender(sender)) {
+          respondOnce(p02W3FixedResult(null, "sender-forbidden"));
+          return;
+        }
+        if (msg.build !== H2O_BUILD_STAMP) {
+          respondOnce(p02W3FixedResult(null, "build-mismatch"));
+          return;
+        }
+        if (__h2oManualP02StageInFlight !== null ||
+            __h2oP02PublicationInFlight || __h2oW3ManualApplyInFlight) {
+          respondOnce(p02W3FixedResult(null, "busy"));
+          return;
+        }
+        __h2oW3ManualApplyInFlight = true;
+        __h2oManualP02StageInFlight = "manual-apply";
+        ownsInFlight = true;
+        const runtime = await whenBackgroundSyncRuntimeReady();
+        if (!runtime || !runtime.p02 || typeof runtime.p02.runPass !== "function") {
+          respondOnce(p02W3FixedResult(null, "runtime-unavailable"));
+          return;
+        }
+        capability = Object.freeze({
+          schema: "h2o.studio.syncW3ManualApplyCapability.v1",
+          stage: "manual-apply",
+        });
+        __h2oW2cManualStageCapability = capability;
+        runPassStarted = true;
+        const report = await runTrustedManualP02Stage(runtime, "manual-apply");
+        respondOnce(p02W3FixedResult(report));
+      } catch (error) {
+        respondOnce(p02W3FixedResult(
+          null,
+          p02W3PublicOutcome({ reason: String(error && (error.code || error.message) || "") }),
+          runPassStarted ? 1 : 0));
+      } finally {
+        if (ownsInFlight && __h2oW2cManualStageCapability === capability) {
+          __h2oW2cManualStageCapability = null;
+        }
+        if (ownsInFlight) {
+          __h2oW3ManualApplyInFlight = false;
+          if (__h2oManualP02StageInFlight === "manual-apply") {
+            __h2oManualP02StageInFlight = null;
+          }
+        }
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === MSG_P02_PUBLISH_LOCAL) {
+    let answered = false;
+    const respondOnce = (value) => {
+      if (answered) return;
+      answered = true;
+      try { sendResponse(value); } catch (_) { /* caller gone */ }
+    };
+    (async () => {
+      let ownsInFlight = false;
+      try {
+        if (Object.keys(msg).sort().join(",") !== "build,type") {
+          respondOnce(p02PublishFixedResult(null, "request-invalid"));
+          return;
+        }
+        if (!isTrustedP02StudioSender(sender)) {
+          respondOnce(p02PublishFixedResult(null, "sender-forbidden"));
+          return;
+        }
+        if (msg.build !== H2O_BUILD_STAMP) {
+          respondOnce(p02PublishFixedResult(null, "build-mismatch"));
+          return;
+        }
+        if (__h2oP02PublicationInFlight ||
+            __h2oManualP02StageInFlight !== null ||
+            __h2oW2cReceiveAdmissionInFlight ||
+            __h2oW3ManualApplyInFlight ||
+            __h2oP01WriterStanddownInFlight) {
+          respondOnce(p02PublishFixedResult(null, "busy"));
+          return;
+        }
+        __h2oP02PublicationInFlight = true;
+        ownsInFlight = true;
+        const runtime = await whenBackgroundSyncRuntimeReady();
+        if (!runtime || typeof runtime.publishLocalP02Revision !== "function") {
+          respondOnce(p02PublishFixedResult(null, "runtime-unavailable"));
+          return;
+        }
+        respondOnce(p02PublishFixedResult(
+          await runtime.publishLocalP02Revision()));
+      } catch (error) {
+        respondOnce(p02PublishFixedResult(null,
+          String(error && (error.code || error.message) || "publication-failed")));
+      } finally {
+        if (ownsInFlight) __h2oP02PublicationInFlight = false;
+      }
+    })();
+    return true;
+  }
+
+  /*
+   * Governed retirement of ONE foreign-lane publication intent.
+   *
+   * Same sender, build and busy guards as the P02 publication operation, and the
+   * same exact-request discipline: the message must carry precisely the three
+   * binding values plus build and type, and they are passed straight through to
+   * the ledger owner, which checks each one against the stored row. There is no
+   * object discovery, no wildcard, and nothing here can delete a row.
+   */
+  if (msg.type === MSG_P02_RETIRE_FOREIGN_INTENT) {
+    let answered = false;
+    const respondOnce = (value) => {
+      if (answered) return;
+      answered = true;
+      try { sendResponse(value); } catch (_) { /* caller gone */ }
+    };
+    (async () => {
+      let ownsInFlight = false;
+      try {
+        if (Object.keys(msg).sort().join(",") !==
+            "build,expectedStagedAt,objectKey,revisionId,type") {
+          respondOnce(p02ForeignIntentFixedResult(null, "request-invalid"));
+          return;
+        }
+        if (!isTrustedP02StudioSender(sender)) {
+          respondOnce(p02ForeignIntentFixedResult(null, "sender-forbidden"));
+          return;
+        }
+        if (msg.build !== H2O_BUILD_STAMP) {
+          respondOnce(p02ForeignIntentFixedResult(null, "build-mismatch"));
+          return;
+        }
+        if (typeof msg.objectKey !== "string" ||
+            !/^[0-9a-f]{64}$/.test(msg.objectKey) ||
+            typeof msg.revisionId !== "string" || msg.revisionId.trim() === "" ||
+            typeof msg.expectedStagedAt !== "string" ||
+            msg.expectedStagedAt.trim() === "") {
+          respondOnce(p02ForeignIntentFixedResult(null, "request-invalid"));
+          return;
+        }
+        if (__h2oP02PublicationInFlight ||
+            __h2oManualP02StageInFlight !== null ||
+            __h2oW2cReceiveAdmissionInFlight ||
+            __h2oW3ManualApplyInFlight ||
+            __h2oP01WriterStanddownInFlight) {
+          respondOnce(p02ForeignIntentFixedResult(null, "busy"));
+          return;
+        }
+        __h2oP02PublicationInFlight = true;
+        ownsInFlight = true;
+        const runtime = await whenBackgroundSyncRuntimeReady();
+        if (!runtime ||
+            typeof runtime.retireLocalPublicationForeignIntent !== "function") {
+          respondOnce(p02ForeignIntentFixedResult(null, "runtime-unavailable"));
+          return;
+        }
+        respondOnce(p02ForeignIntentFixedResult(
+          await runtime.retireLocalPublicationForeignIntent(
+            msg.objectKey,
+            msg.revisionId,
+            msg.expectedStagedAt
+          )));
+      } catch (error) {
+        respondOnce(p02ForeignIntentFixedResult(null,
+          String(error && (error.code || error.message) ||
+            "foreign-intent-retirement-failed")));
+      } finally {
+        if (ownsInFlight) __h2oP02PublicationInFlight = false;
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === MSG_P01_WRITER_STANDDOWN) {
+    let answered = false;
+    const respondOnce = (value) => {
+      if (answered) return;
+      answered = true;
+      try { sendResponse(value); } catch (_) { /* caller gone */ }
+    };
+    (async () => {
+      let ownsInFlight = false;
+      try {
+        if (Object.keys(msg).sort().join(",") !== "build,type") {
+          respondOnce(p01WriterStanddownFixedResult("request-invalid"));
+          return;
+        }
+        if (!isTrustedP02StudioSender(sender)) {
+          respondOnce(p01WriterStanddownFixedResult("sender-forbidden"));
+          return;
+        }
+        if (msg.build !== H2O_BUILD_STAMP) {
+          respondOnce(p01WriterStanddownFixedResult("build-mismatch"));
+          return;
+        }
+        if (__h2oP01WriterStanddownInFlight ||
+            __h2oP02PublicationInFlight ||
+            __h2oManualP02StageInFlight !== null ||
+            __h2oW2cReceiveAdmissionInFlight ||
+            __h2oW3ManualApplyInFlight) {
+          respondOnce(p01WriterStanddownFixedResult("busy"));
+          return;
+        }
+        __h2oP01WriterStanddownInFlight = true;
+        ownsInFlight = true;
+        const runtime = await whenBackgroundSyncRuntimeReady();
+        if (!runtime || typeof runtime.standDownP01Writer !== "function") {
+          respondOnce(p01WriterStanddownFixedResult("runtime-unavailable"));
+          return;
+        }
+        const result = await runtime.standDownP01Writer();
+        respondOnce(p01WriterStanddownFixedResult(result && result.outcome, result));
+      } catch (_) {
+        respondOnce(p01WriterStanddownFixedResult("persistence-failed"));
+      } finally {
+        if (ownsInFlight) __h2oP01WriterStanddownInFlight = false;
+      }
+    })();
+    return true;
+  }
 
   if (msg.type === MSG_PAGE_DISABLE_ONCE) {
     (async () => {
@@ -12847,6 +13552,45 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })();
     return true;
   }
+});
+
+/* W-2b readiness Port. Its whole job is to answer one question - is this worker
+ * up and far enough along that the observer route can answer - and then get out
+ * of the way. It reads no repository, opens no database or handle, composes
+ * nothing and stores nothing; it is strictly less capable than the observation
+ * it precedes.
+ *
+ * Registered synchronously at top level, so a connection arriving against a
+ * dormant worker is delivered once this script has evaluated rather than racing
+ * it. Every path answers exactly once and then disconnects, so the caller always
+ * gets either an acknowledgement or a disconnect and can never hang - which is
+ * what lets the Studio panel bound this gesture without owning a timer.
+ *
+ * Deliberately its own listener: no MSG_ARCHIVE coupling, and no keepalive - the
+ * Port closes the moment it has answered. */
+chrome.runtime.onConnect.addListener((port) => {
+  if (!port || port.name !== P02_OBSERVE_READY_PORT) return;
+  let answered = false;
+  const finishReadiness = (payload) => {
+    if (answered) return;
+    answered = true;
+    try { port.postMessage({ ...payload, build: H2O_BUILD_STAMP }); } catch (_) { /* caller gone */ }
+    try { port.disconnect(); } catch (_) { /* already closed */ }
+  };
+  (async () => {
+    try {
+      if (!isTrustedP02StudioSender(port.sender)) {
+        finishReadiness({ ok: false, error: "p02-observe-ready-sender-forbidden" });
+        return;
+      }
+      /* The same readiness the observer itself waits on, awaited and discarded:
+       * this Port never touches the runtime it is waiting for. */
+      await whenBackgroundSyncRuntimeReady();
+      finishReadiness({ ok: true, readiness: "p02-observe-ready" });
+    } catch (_) {
+      finishReadiness({ ok: false, error: "p02-observe-ready-failed" });
+    }
+  })();
 });
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -13222,6 +13966,78 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   }
 });
 
-console.log(TAG, "background ready");
+/* Default-deny terminal for Ports. Every onConnect listener above ignores a
+ * name it does not serve by returning, so a port whose name matches none of them
+ * would sit open with no message and no disconnect - and a caller that waits for
+ * "an acknowledgement or a disconnect" would wait forever. Version skew between
+ * a Studio panel and this worker is exactly how that happens. Registered last,
+ * so it only ever sees what nothing else claimed: anything unrecognised is
+ * disconnected, which is what makes the caller-side wait bounded without a
+ * timer. */
+chrome.runtime.onConnect.addListener((port) => {
+  if (!port) return;
+  if (port.name === P02_OBSERVE_READY_PORT || port.name === MSG_ARCHIVE_PORT) return;
+  try { port.disconnect(); } catch (_) { /* already gone */ }
+});
+
+/* W-2b post-start liveness announcement. setTimeout(0) puts this in one new
+ * worker task after the initial synchronous evaluation/listener-registration
+ * task. It runs once per worker startup, carries no authority or state, and a
+ * missing Studio listener is the expected rejected-Promise path: swallowed,
+ * never retried or rescheduled. */
+setTimeout(() => {
+  chrome.runtime.sendMessage({
+    type: P02_OBSERVE_READY_ANNOUNCE,
+    ready: true,
+    build: H2O_BUILD_STAMP,
+  }).then(() => {}, () => {});
+}, 0);
+
+/* P01 T07 — direct service-worker object-protocol reconciliation. The bundle
+ * composes the same durable admission, Apply, projection and publication
+ * modules as Studio. The worker supplies only its existing canonical archive
+ * authority and lifecycle/context seams. */
+let __h2oBackgroundSyncRuntime = null;
+if (ARCHIVE_WORKBENCH_ENABLED &&
+    typeof H2OChromeBackgroundSyncBundle !== "undefined" &&
+    H2OChromeBackgroundSyncBundle &&
+    typeof H2OChromeBackgroundSyncBundle.createChromeBackgroundSyncRuntime === "function") {
+  try {
+    __h2oBackgroundSyncRuntime =
+      H2OChromeBackgroundSyncBundle.createChromeBackgroundSyncRuntime({
+        chromeApi: chrome,
+        indexedDBFactory: indexedDB,
+        cryptoImplementation: crypto,
+        manualReceiveAuthority: () =>
+          __h2oW2cManualStageCapability?.stage === "receive-admission",
+        manualApplyAuthority: () =>
+          __h2oW2cManualStageCapability?.stage === "manual-apply",
+        reconcileCore: globalThis.H2OSyncLinearReconcileCore,
+        findActiveStudioContexts: findExistingStudioContexts,
+        archiveAuthority: Object.freeze({
+          listWorkbenchRows: () => listWorkbenchRows(),
+          listSnapshots: (chatId) => listSnapshots(chatId),
+          loadSnapshot: async (snapshotId) => {
+            const loaded = await loadSnapshotById(snapshotId);
+            if (!loaded) return null;
+            return buildLoadedSnapshotResponse(
+              loaded,
+              await readCategoryCatalog(DEFAULT_NS_DISK),
+            );
+          },
+          importFullBundle: ({ bundle, mode = "merge" } = {}) =>
+            importFullBundle(bundle, mode),
+        }),
+      });
+    __h2oBackgroundSyncRuntime.install();
+  } catch (error) {
+    console.warn(TAG, "background Sync unavailable", String(error && (error.code || error.message || error)));
+  }
+}
+/* Unconditional, and after both the composed and the not-composed paths: a
+ * waiter that is never settled is the same silent port close by another route. */
+__h2oBackgroundSyncRuntimeReadySettle(__h2oBackgroundSyncRuntime);
+
+console.log(TAG, "background ready", H2O_BUILD_STAMP);
 `;
 }

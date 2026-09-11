@@ -1,12 +1,13 @@
 /* H2O Studio Sync - Desktop latest-bundle auto-export (R2A-2)
  *
- * Desktop/Tauri-only opt-in layer over the R2A-1 manual exporter. When
- * enabled, it listens to SQLite-backed Studio store changes and debounces a
+ * Desktop/Tauri-only opt-in layer over the R2A-1 manual exporter. When the
+ * authoritative folder-sync configuration is in auto mode, it listens to
+ * SQLite-backed Studio store changes and debounces a
  * write of ~/H2O Studio Sync/latest.json through
  * H2O.Studio.ingestion.exportLatestSyncBundle().
  *
  * Safety invariants:
- *   - disabled by default
+ *   - automatic operation disabled until valid authoritative auto mode loads
  *   - no Chrome/MV3/web/mobile behavior
  *   - no Chrome auto-import
  *   - no bundle shape changes
@@ -41,13 +42,25 @@
     loaded: false,
     loadPromise: null,
     enabled: false,
-    folderMutationAutoSyncEnabled: true,
+    folderMutationAutoSyncEnabled: false,
+    automaticModeAuthorityLoaded: false,
+    automaticModeAuthorityValid: false,
+    automaticMode: 'off',
+    /* Item 11 runtime-authority fix — redacted storage-readiness state, so
+     * diagnostics distinguish "storage authority never became ready" from
+     * "authority was read but is missing/malformed". Both stay disabled. */
+    storageAuthorityReady: false,
+    storageAuthorityBackend: '',
+    storageAuthorityStatus: 'unresolved',
+    automaticGeneration: 0,
+    authorityUnsubscribe: null,
     pending: false,
     debounceMs: DEBOUNCE_MS,
     timer: null,
     flushInFlight: false,
     rescheduleAfterFlush: false,
     rescheduleReason: '',
+    rescheduleGeneration: -1,
     subscribersWired: false,
     wiredStores: [],
     missingStores: [],
@@ -137,8 +150,128 @@
     return cleanString(reason).indexOf(FOLDER_METADATA_REASON_PREFIX) === 0;
   }
 
-  function canRunForReason(reason) {
+  function automaticModeEnabled() {
+    return state.automaticModeAuthorityLoaded === true &&
+      state.automaticModeAuthorityValid === true && state.automaticMode === 'auto' &&
+      state.folderMutationAutoSyncEnabled === true;
+  }
+
+  function canRunAutomaticReason(reason) {
+    if (!automaticModeEnabled()) return false;
     return !!state.enabled || (!!state.folderMutationAutoSyncEnabled && isFolderMutationReason(reason));
+  }
+
+  /* Item 11 runtime-authority fix: the Desktop chrome.storage.local backend is
+   * swapped from a temporary localStorage shim to SQLite asynchronously. The
+   * first authority refresh must not run against the shim. The platform owns
+   * the memoized promise; this module retains only derived display fields. */
+
+  function ensureStorageAuthority() {
+    var platform = H2O.Studio && H2O.Studio.platform;
+    var api = platform && typeof platform.whenStorageAuthorityReady === 'function'
+      ? platform.whenStorageAuthorityReady : null;
+    var fallback = { ready: false, backend: 'localstorage', status: 'unavailable' };
+    return (api
+      ? Promise.resolve().then(function () { return api(); }).catch(function () { return fallback; })
+      : Promise.resolve(fallback)
+    ).then(function (value) {
+      var v = value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+      var backend = v && typeof v.backend === 'string' ? v.backend : 'localstorage';
+      var ready = !!v && v.ready === true && (backend === 'sqlite' || backend === 'chrome');
+      state.storageAuthorityReady = ready;
+      state.storageAuthorityBackend = ready ? backend : 'localstorage';
+      state.storageAuthorityStatus = ready
+        ? 'ready'
+        : (v && v.status === 'failed' ? 'failed' : 'unavailable');
+      return Object.freeze({
+        ready: ready,
+        backend: state.storageAuthorityBackend,
+        status: state.storageAuthorityStatus,
+      });
+    });
+  }
+
+  function automaticModeApi() {
+    var sync = H2O.Studio && H2O.Studio.sync;
+    if (sync && typeof sync.getAutomaticModeAuthority === 'function') return sync;
+    var folder = sync && sync.folder;
+    if (folder && typeof folder.getAutomaticModeAuthority === 'function') return folder;
+    return null;
+  }
+
+  function normalizeAutomaticModeAuthority(value) {
+    var authority = value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+    var mode = authority && typeof authority.mode === 'string' ? authority.mode : 'off';
+    var valid = !!authority && authority.loaded === true && authority.valid === true &&
+      (mode === 'off' || mode === 'manual' || mode === 'notify' || mode === 'auto');
+    return {
+      loaded: !!authority && authority.loaded === true,
+      valid: valid,
+      mode: valid ? mode : 'off',
+      automaticExportEnabled: valid && mode === 'auto' &&
+        authority.automaticExportEnabled === true,
+    };
+  }
+
+  function invalidateAutomaticWork() {
+    state.automaticGeneration += 1;
+    clearPendingTimer();
+    state.pending = false;
+    state.rescheduleAfterFlush = false;
+    state.rescheduleReason = '';
+    state.rescheduleGeneration = -1;
+  }
+
+  function applyAutomaticModeAuthority(value) {
+    var authority = normalizeAutomaticModeAuthority(value);
+    var wasEnabled = automaticModeEnabled();
+    var changed = state.automaticModeAuthorityLoaded !== authority.loaded ||
+      state.automaticModeAuthorityValid !== authority.valid ||
+      state.automaticMode !== authority.mode;
+    state.automaticModeAuthorityLoaded = authority.loaded;
+    state.automaticModeAuthorityValid = authority.valid;
+    state.automaticMode = authority.mode;
+    state.folderMutationAutoSyncEnabled = authority.automaticExportEnabled;
+    var isEnabled = automaticModeEnabled();
+    if (!isEnabled) {
+      if (changed || wasEnabled || state.timer || state.pending || state.rescheduleAfterFlush) {
+        invalidateAutomaticWork();
+      }
+      unwireStoreSubscriptions();
+    } else if (state.enabled) {
+      wireStoreSubscriptions();
+    }
+    return isEnabled;
+  }
+
+  async function refreshAutomaticModeAuthority() {
+    /* Never read the authority before the Desktop storage backend is the
+     * authoritative one — that is the b8c54511 startup-readiness failure. */
+    var storageAuthority = await ensureStorageAuthority();
+    if (!storageAuthority.ready) return applyAutomaticModeAuthority(null);
+    var api = automaticModeApi();
+    if (!api) return applyAutomaticModeAuthority(null);
+    try {
+      return applyAutomaticModeAuthority(await api.getAutomaticModeAuthority());
+    } catch (error) {
+      pushError('load-automatic-mode-authority', error);
+      return applyAutomaticModeAuthority(null);
+    }
+  }
+
+  function subscribeAutomaticModeAuthority() {
+    var api = automaticModeApi();
+    if (!api || typeof api.subscribeAutomaticModeAuthority !== 'function') return false;
+    try {
+      state.authorityUnsubscribe = api.subscribeAutomaticModeAuthority(function (authority) {
+        applyAutomaticModeAuthority(authority);
+      });
+      return true;
+    } catch (error) {
+      pushError('subscribe-automatic-mode-authority', error);
+      applyAutomaticModeAuthority(null);
+      return false;
+    }
   }
 
   function lastExportAtIso() {
@@ -151,7 +284,12 @@
   async function loadSetting() {
     if (state.loaded) return state.enabled;
     if (state.loadPromise) return state.loadPromise;
-    state.loadPromise = readKv(SETTINGS_KEY).then(function (raw) {
+    state.loadPromise = ensureStorageAuthority().then(function (authority) {
+      if (!authority.ready || authority.backend !== 'sqlite') {
+        throw new Error('sync-storage-authority-unavailable');
+      }
+      return readKv(SETTINGS_KEY);
+    }).then(function (raw) {
       state.enabled = normalizeEnabledSetting(raw);
       state.loaded = true;
       state.loadPromise = null;
@@ -167,6 +305,10 @@
   }
 
   async function persistEnabled(enabled) {
+    var authority = await ensureStorageAuthority();
+    if (!authority.ready || authority.backend !== 'sqlite') {
+      throw new Error('sync-storage-authority-unavailable');
+    }
     var payload = {
       schemaVersion: 1,
       enabled: !!enabled,
@@ -197,6 +339,14 @@
   }
 
   function wireStoreSubscriptions() {
+    if (!automaticModeEnabled() || !state.enabled) {
+      return {
+        ok: false,
+        status: 'auto-export-subscriptions-disabled',
+        wiredStores: state.wiredStores.slice(),
+        missingStores: state.missingStores.slice(),
+      };
+    }
     if (state.subscribersWired && state.missingStores.length === 0) {
       return {
         ok: true,
@@ -244,6 +394,16 @@
     };
   }
 
+  function unwireStoreSubscriptions() {
+    state.unsubscribeFns.splice(0).forEach(function (unsubscribe) {
+      try { unsubscribe(); }
+      catch (error) { pushError('unsubscribe-store', error); }
+    });
+    state.subscribersWired = false;
+    state.wiredStores = [];
+    state.missingStores = [];
+  }
+
   function clearPendingTimer() {
     if (!state.timer) return;
     try { global.clearTimeout(state.timer); }
@@ -276,7 +436,13 @@
         error: cleanString(result.error || result.reason),
       } : null,
     };
-    try { await writeKv(DIAGNOSTICS_KEY, payload); }
+    try {
+      var authority = await ensureStorageAuthority();
+      if (!authority.ready || authority.backend !== 'sqlite') {
+        throw new Error('sync-storage-authority-unavailable');
+      }
+      await writeKv(DIAGNOSTICS_KEY, payload);
+    }
     catch (error) { pushError('persist-diagnostics', error); }
   }
 
@@ -286,9 +452,15 @@
 
   async function enable() {
     await loadSetting();
-    state.enabled = true;
     await persistEnabled(true);
-    var wiring = wireStoreSubscriptions();
+    state.enabled = true;
+    await refreshAutomaticModeAuthority();
+    var wiring = automaticModeEnabled() ? wireStoreSubscriptions() : {
+      ok: false,
+      status: 'auto-export-subscriptions-disabled',
+      wiredStores: [],
+      missingStores: [],
+    };
     return {
       ok: true,
       phase: 'R2A-2',
@@ -296,7 +468,7 @@
       enabled: true,
       debounceMs: state.debounceMs,
       autoRunOnBoot: false,
-      autoRunOnDataChange: true,
+      autoRunOnDataChange: automaticModeEnabled(),
       chromeAutoImport: false,
       wiring: wiring,
       status: 'auto-export-enabled',
@@ -305,10 +477,14 @@
 
   async function disable() {
     await loadSetting();
+    await persistEnabled(false);
     clearPendingTimer();
     state.pending = false;
     state.enabled = false;
-    await persistEnabled(false);
+    state.rescheduleAfterFlush = false;
+    state.rescheduleReason = '';
+    state.rescheduleGeneration = -1;
+    unwireStoreSubscriptions();
     return {
       ok: true,
       phase: 'R2A-2',
@@ -328,7 +504,7 @@
 
   function schedule(reason) {
     var cleanReason = cleanString(reason) || 'library-data-change';
-    if (!canRunForReason(cleanReason)) {
+    if (!canRunAutomaticReason(cleanReason)) {
       return {
         ok: false,
         phase: 'R2A-2',
@@ -343,6 +519,7 @@
     if (state.enabled) wireStoreSubscriptions();
     clearPendingTimer();
     state.pending = true;
+    var scheduledGeneration = state.automaticGeneration;
     if (isFolderMutationReason(cleanReason)) {
       state.lastChange = {
         at: Date.now(),
@@ -356,7 +533,9 @@
     state.lastScheduledReason = cleanReason;
     state.timer = global.setTimeout(function () {
       state.timer = null;
-      flushNow(cleanReason).catch(function (error) { pushError('debounced-flush', error); });
+      return flushAutomatic(cleanReason, scheduledGeneration).catch(function (error) {
+        pushError('debounced-flush', error);
+      });
     }, state.debounceMs);
     return {
       ok: true,
@@ -372,19 +551,45 @@
     };
   }
 
+  function automaticDisabledResult(reason) {
+    return {
+      ok: false,
+      phase: 'R2A-2',
+      mode: 'desktop-latest-sync-bundle-auto-export',
+      enabled: false,
+      folderMutationAutoSyncEnabled: !!state.folderMutationAutoSyncEnabled,
+      recordsWritten: 0,
+      reason: cleanString(reason),
+      status: 'auto-export-disabled',
+    };
+  }
+
+  async function flushAutomatic(reason, scheduledGeneration) {
+    var cleanReason = cleanString(reason) || 'automatic-flush';
+    if (scheduledGeneration !== state.automaticGeneration ||
+        !canRunAutomaticReason(cleanReason)) {
+      state.pending = false;
+      return automaticDisabledResult(cleanReason);
+    }
+    await refreshAutomaticModeAuthority();
+    if (scheduledGeneration !== state.automaticGeneration ||
+        !canRunAutomaticReason(cleanReason)) {
+      state.pending = false;
+      return automaticDisabledResult(cleanReason);
+    }
+    return runExport(cleanReason, true, scheduledGeneration);
+  }
+
   async function flushNow(reason) {
-    var cleanReason = cleanString(reason) || state.lastScheduledReason || 'manual-flush';
-    if (!canRunForReason(cleanReason)) {
-      return {
-        ok: false,
-        phase: 'R2A-2',
-        mode: 'desktop-latest-sync-bundle-auto-export',
-        enabled: false,
-        folderMutationAutoSyncEnabled: !!state.folderMutationAutoSyncEnabled,
-        recordsWritten: 0,
-        reason: cleanReason,
-        status: 'auto-export-disabled',
-      };
+    var cleanReason = cleanString(reason) || 'manual-flush';
+    return runExport(cleanReason, false, -1);
+  }
+
+  async function runExport(cleanReason, automatic, scheduledGeneration) {
+    if (automatic && (scheduledGeneration !== state.automaticGeneration ||
+        !canRunAutomaticReason(cleanReason))) {
+      state.pending = false;
+      return automaticDisabledResult(cleanReason);
     }
     var exporter = exportFunction();
     if (typeof exporter !== 'function') {
@@ -402,9 +607,12 @@
       return missing;
     }
     if (state.flushInFlight) {
-      state.pending = true;
-      state.rescheduleAfterFlush = true;
-      state.rescheduleReason = cleanReason;
+      if (automatic) {
+        state.pending = true;
+        state.rescheduleAfterFlush = true;
+        state.rescheduleReason = cleanReason;
+        state.rescheduleGeneration = scheduledGeneration;
+      }
       return {
         ok: false,
         phase: 'R2A-2',
@@ -424,7 +632,7 @@
     try {
       var result = await exporter({
         reason: cleanReason,
-        autoExport: true,
+        autoExport: !!automatic,
         autoExportPhase: 'R2A-2',
       });
       state.lastExportAt = Date.now();
@@ -458,21 +666,51 @@
       state.flushInFlight = false;
       if (state.rescheduleAfterFlush) {
         var rescheduleReason = cleanString(state.rescheduleReason) || 'post-in-flight-store-change';
+        var rescheduleGeneration = state.rescheduleGeneration;
         state.rescheduleAfterFlush = false;
         state.rescheduleReason = '';
-        schedule(rescheduleReason);
+        state.rescheduleGeneration = -1;
+        if (rescheduleGeneration === state.automaticGeneration &&
+            canRunAutomaticReason(rescheduleReason)) schedule(rescheduleReason);
       }
     }
   }
 
   function diagnose() {
+    var configured = !!state.enabled;
+    var prerequisitesSatisfied = state.storageAuthorityReady === true &&
+      state.automaticModeAuthorityLoaded === true &&
+      state.automaticModeAuthorityValid === true &&
+      state.automaticMode === 'auto' && typeof exportFunction() === 'function';
+    var schedulerActive = state.subscribersWired === true;
+    var effective = configured && prerequisitesSatisfied && schedulerActive;
+    var ineffectiveReason = '';
+    if (!configured) ineffectiveReason = 'not-configured';
+    else if (!state.storageAuthorityReady) ineffectiveReason = 'backend-not-ready';
+    else if (!state.automaticModeAuthorityLoaded || !state.automaticModeAuthorityValid) {
+      ineffectiveReason = 'authority-not-ready';
+    } else if (state.automaticMode !== 'auto') ineffectiveReason = 'manual-mode';
+    else if (typeof exportFunction() !== 'function') ineffectiveReason = 'exporter-unavailable';
+    else if (!schedulerActive) ineffectiveReason = 'scheduler-not-running';
     return {
       installed: true,
       phase: 'R2A-2',
       surface: 'desktop-tauri',
       mode: 'desktop-latest-sync-bundle-auto-export',
       enabled: !!state.enabled,
+      configured: configured,
+      effective: effective,
+      prerequisitesSatisfied: prerequisitesSatisfied,
+      schedulerActive: schedulerActive,
+      ineffectiveReason: ineffectiveReason,
       folderMutationAutoSyncEnabled: !!state.folderMutationAutoSyncEnabled,
+      automaticModeAuthorityLoaded: !!state.automaticModeAuthorityLoaded,
+      automaticModeAuthorityValid: !!state.automaticModeAuthorityValid,
+      automaticMode: state.automaticMode,
+      automaticGeneration: state.automaticGeneration,
+      storageAuthorityReady: !!state.storageAuthorityReady,
+      storageAuthorityBackend: state.storageAuthorityBackend,
+      storageAuthorityStatus: state.storageAuthorityStatus,
       loaded: !!state.loaded,
       pending: !!state.pending,
       debounceMs: state.debounceMs,
@@ -495,12 +733,14 @@
       flushInFlight: !!state.flushInFlight,
       manualExportAvailable: typeof exportFunction() === 'function',
       autoRunOnBoot: false,
-      autoRunOnDataChange: !!state.enabled,
-      autoRunOnFolderMutation: !!state.folderMutationAutoSyncEnabled,
+      autoRunOnDataChange: automaticModeEnabled() && !!state.enabled,
+      autoRunOnFolderMutation: automaticModeEnabled() && !!state.folderMutationAutoSyncEnabled,
       desktopToChrome: {
-        autoExportEnabled: !!state.enabled || !!state.folderMutationAutoSyncEnabled,
-        storeDataChangeAutoExportEnabled: !!state.enabled,
-        folderMutationAutoExportEnabled: !!state.folderMutationAutoSyncEnabled,
+        autoExportEnabled: automaticModeEnabled() &&
+          (!!state.enabled || !!state.folderMutationAutoSyncEnabled),
+        storeDataChangeAutoExportEnabled: automaticModeEnabled() && !!state.enabled,
+        folderMutationAutoExportEnabled: automaticModeEnabled() &&
+          !!state.folderMutationAutoSyncEnabled,
         pending: !!state.pending,
         flushInFlight: !!state.flushInFlight,
         lastExportStatus: state.lastExportStatus,
@@ -531,9 +771,11 @@
     autoExport: api,
   });
 
-  loadSetting().then(function (enabled) {
-    if (enabled) wireStoreSubscriptions();
+  subscribeAutomaticModeAuthority();
+  Promise.all([loadSetting(), refreshAutomaticModeAuthority()]).then(function (values) {
+    if (values[0] && values[1]) wireStoreSubscriptions();
   }).catch(function (error) {
     pushError('boot-load-setting', error);
+    applyAutomaticModeAuthority(null);
   });
 })(typeof globalThis !== 'undefined' ? globalThis : window);

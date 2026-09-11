@@ -1487,6 +1487,12 @@
        Registers H2O.Studio.sync with manual scanFolderOnce + importFromFile
        APIs that wrap the existing M2b-1/2 ingestion importer. No watcher
        yet — that lands in M2d-1b. -->
+  <!-- Accepted object-sync (T02 forward-port): readiness capability model,
+       native writer-generation gate and P01 mutation admission. Load BEFORE
+       folder-sync so its config owner finds them registered. -->
+  <script src="./sync/readiness-capabilities.js"></script>
+  <script src="./sync/writer-generation-gate.js"></script>
+  <script src="./sync/p01-mutation-admission.mv3.js"></script>
   <script src="./sync/folder-sync.tauri.js"></script>
   <!-- Desktop-only: opt-in latest-bundle auto-export (R2A-2). Disabled by
        default; when enabled, debounces SQLite store changes into the existing
@@ -1504,6 +1510,9 @@
        connect a read-only folder handle and manually import latest.json via the
        existing full-bundle merge importer. No polling or folder writes. -->
   <script src="./sync/folder-import.mv3.js"></script>
+  <!-- Accepted object-sync (T02 forward-port): Chrome/MV3 browser-delivery
+       intake, loaded AFTER folder-import so it can reuse the folder handle. -->
+  <script src="./sync/browser-delivery.mv3.js"></script>
   <!-- Chrome/MV3-only: opt-in sync-folder export (R2D Gate R3 phase 1).
        Registers H2O.Studio.sync.autoImport.{exportNow, isEnabled, enable,
        disable, status, diagnose}. Reuses the directory handle persisted by
@@ -1564,6 +1573,16 @@
        transport, no R-phase behavior change. Loads BEFORE the multi-peer
        diagnostics so future consumers find H2O.Studio.identity available. -->
   <script src="./sync/peer-identity.js"></script>
+  <!-- Accepted object-sync (T02 forward-port): local publication, linear
+       reconcile core, object auto-reconcile coordinator, then the two ESM
+       Desktop runtimes. The module tags establish document/admission order;
+       native ESM defer semantics apply and no synchronous ordering before the
+       later classic scripts is claimed. -->
+  <script src="./sync/local-publication.mv3.js"></script>
+  <script src="./sync/sync-linear-reconcile-core.js"></script>
+  <script src="./sync/sync-object-auto-reconcile.js"></script>
+  <script type="module" src="./sync/sync-object-runtime-v2.desktop.mjs"></script>
+  <script type="module" src="./sync/sync-reverse-desktop-v2.tauri.mjs"></script>
   <!-- F3: outbound export log. Mints exportId / sequenceNumber and tracks
        previousExportId on every disk-writing export (only mutated by
        H2O.Studio.ingestion.exportLatestSyncBundle). Single persistent key

@@ -73,6 +73,8 @@ export function makeChromeLiveManifest({
     ? ["storage", "tabs", "contextMenus"]
     : ["storage", "contextMenus"];
   if (oauthGoogleEnabled) permissions.push("identity");
+  // Accepted object-sync: the alarm-driven background reconcile owner is a production-profile capability only.
+  if (manifestProfile === "production") permissions.push("alarms");
   if (TITLE_DIAGNOSTIC_ENABLED === true) permissions.push("webNavigation", "scripting");
   const manifest = {
     manifest_version: 3,

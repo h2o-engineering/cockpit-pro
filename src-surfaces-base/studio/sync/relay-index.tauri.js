@@ -133,6 +133,24 @@
     };
   }
 
+  /* M3 Activity & Audit needs a normal-user domain label, not raw envelope
+   * payload. Derive one enum while the existing relay index already has the
+   * validated envelope in memory, then discard the payload as before. */
+  function activityFamily(envelope) {
+    if (!envelope || cleanString(envelope.kind) !== 'applyEvent') return '';
+    var operation = cleanString(envelope.operation).toLowerCase();
+    var subjectType = cleanString(envelope.subjectType).toLowerCase();
+    var signal = operation + ' ' + subjectType;
+    if (/snapshot|archive|restore|receipt/.test(signal)) return 'snapshot-archive-receipt';
+    if (/binding/.test(signal)) return 'convergence-binding';
+    if (/delete|tombstone/.test(signal)) return 'delete';
+    if (/move/.test(signal)) return 'move';
+    if (/rename/.test(signal)) return 'rename';
+    if (/color|metadata|folder/.test(signal)) return 'folder-metadata-color';
+    if (/remote|preview/.test(signal)) return 'remote-apply-preview';
+    return 'other-apply';
+  }
+
   function expiredByEnvelope(envelope, nowMs) {
     if (!envelope || !validIso(envelope.expiresAt)) return false;
     return Date.parse(envelope.expiresAt) <= nowMs;
@@ -181,6 +199,7 @@
       eventDigest: cleanString(row.eventDigest),
       dedupeKey: cleanString(row.dedupeKey),
       kind: cleanString(row.kind),
+      activityFamily: activityFamily(envelope),
       relayStatus: cleanString(row.relayStatus),
       uploadTimestamp: cleanString(row.uploadedAtIso),
       downloadTimestamp: '',
@@ -210,6 +229,7 @@
       eventDigest: cleanString(row.eventDigest),
       dedupeKey: cleanString(row.dedupeKey),
       kind: cleanString(row.kind),
+      activityFamily: activityFamily(envelope),
       relayStatus: cleanString(row.relayStatus),
       uploadTimestamp: '',
       downloadTimestamp: cleanString(row.receivedAtIso),

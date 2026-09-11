@@ -2805,6 +2805,65 @@
   }
 
   /* ── exportNow — the only write entry point ───────────────────────── */
+  /*
+   * O1-T19. Consulted before the flag gate, because a manual user gesture is
+   * exactly the path that must NOT bypass generation authority: after the
+   * standdown P01 no longer owns the data, and a button press does not change
+   * who owns it.
+   */
+  async function generationPermitsP01Mutation() {
+    var root = (typeof globalThis !== 'undefined' ? globalThis : this);
+    var gate = root.H2O && root.H2O.Studio && root.H2O.Studio.sync &&
+      root.H2O.Studio.sync.writerGeneration;
+    if (!gate || typeof gate.p01MayMutate !== 'function') {
+      /*
+       * No gate surface at all: a pre-T19 runtime, and the compatibility
+       * position is that P01 behaves exactly as it did before. This is a
+       * statement about the BUILD, not the store - once a gate is installed
+       * its observation governs, and an unreadable STORE still refuses.
+       */
+      return { permitted: true, reason: null };
+    }
+    try { return await gate.p01MayMutate(); }
+    catch (_) { return { permitted: false, reason: 'generation-unobserved' }; }
+  }
+
+  function p01MutationAdmissionSurface() {
+    var root = (typeof globalThis !== 'undefined' ? globalThis : this);
+    var admission = root.H2O && root.H2O.Studio && root.H2O.Studio.sync &&
+      root.H2O.Studio.sync.p01MutationAdmission;
+    return admission && typeof admission.run === 'function'
+      ? admission
+      : null;
+  }
+
+  async function exportNowWithP01Admission(options) {
+    var admission = p01MutationAdmissionSurface();
+    if (!admission) {
+      return {
+        ok: false,
+        skipped: true,
+        reason: 'p01-mutation-admission-serialization-unavailable',
+        generation: null
+      };
+    }
+    try {
+      return await admission.run({
+        label: 'chrome-export-auto-import',
+        generationCheck: generationPermitsP01Mutation,
+        operation: function () { return exportNow(options); }
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        skipped: true,
+        reason: String(error?.code || error?.message ||
+          'p01-mutation-admission-serialization-unavailable'),
+        generation: null
+      };
+    }
+  }
+
   async function exportNow(options) {
     var opts = (options && typeof options === 'object') ? options : {};
     var reason = String(opts.reason || 'manual');
@@ -3346,7 +3405,7 @@
       state.eventTriggerTimer = null;
       /* Folder-connected gate runs inside exportNow via the IDB handle
        * lookup; no need to short-circuit here. */
-      exportNow({ reason: 'event:' + eventName }).catch(function (e) {
+      exportNowWithP01Admission({ reason: 'event:' + eventName }).catch(function (e) {
         pushError('event-triggered-export', e);
       });
     }, EVENT_TRIGGER_DEBOUNCE_MS);
@@ -3406,6 +3465,23 @@
     catch (e) { pushError('status.loadHandle', e); }
     var folderName = handleRow && handleRow.handle && handleRow.handle.name ? handleRow.handle.name : '';
     var writeGate = diagnoseChromeExportWriteGate();
+    var permission = handleRow && handleRow.handle
+      ? await queryReadWritePermission(handleRow.handle)
+      : 'not-checked';
+    if (permission === 'unknown') permission = 'unavailable';
+    var configured = (writeGate.flagEnabled === true || writeGate.smokeChromeExportOptIn === true) &&
+      eventTriggerFlagEnabled() === true;
+    var writeGateReady = writeGate.effectiveFlagEnabled === true;
+    var prerequisitesSatisfied = writeGateReady &&
+      !!(handleRow && handleRow.handle) && permission === 'granted';
+    var schedulerActive = state.listenersBound === true;
+    var effective = configured && prerequisitesSatisfied && schedulerActive;
+    var ineffectiveReason = !configured ? 'not-configured'
+      : (!writeGateReady ? String(writeGate.blockers && writeGate.blockers[0] || 'write-gate-blocked')
+        : (!(handleRow && handleRow.handle) ? 'folder-not-connected'
+        : (permission !== 'granted' ? (permission === 'prompt'
+          ? 'permission-required' : 'permission-' + permission)
+          : (!schedulerActive ? 'scheduler-not-running' : ''))));
     return {
       phase: PHASE,
       flagKey: FLAG_KEY,
@@ -3430,6 +3506,13 @@
       lastEventTriggerReconcileReason: state.lastEventTriggerReconcileReason || '',
       folderConnected: !!(handleRow && handleRow.handle),
       folderName: folderName,
+      permission: permission,
+      permissionSource: handleRow && handleRow.handle ? 'live-query' : 'not-checked',
+      configured: configured,
+      effective: effective,
+      prerequisitesSatisfied: prerequisitesSatisfied,
+      schedulerActive: schedulerActive,
+      ineffectiveReason: ineffectiveReason,
       lastExportAt: state.lastExportAt,
       lastExportStatus: state.lastExportStatus,
       lastExportFile: state.lastExportFile,
@@ -3482,7 +3565,7 @@
   var api = {
     __installed: true,
     __version: '0.1.0',
-    exportNow: exportNow,
+    exportNow: exportNowWithP01Admission,
     isEnabled: isEnabled,
     enableChromeExport: enableChromeExport,
     disableChromeExport: disableChromeExport,
@@ -3491,6 +3574,7 @@
     trigger: trigger,
     status: status,
     diagnose: diagnose,
+    getAutomationSnapshot: status,
     diagnoseSnapshotPayloadCoverage: diagnoseSnapshotPayloadCoverage,
     diagnoseChromeExportWriteGate: diagnoseChromeExportWriteGate,
   };

@@ -85,6 +85,7 @@ const IDENTITY_PROVIDER_OAUTH_GOOGLE = "google";
 
 const {
   SRC,
+  CHROME_BUILD_IDENTITY,
   OUT_DIR,
   PROXY_PACK_URL,
   CHAT_MATCH,
@@ -556,6 +557,7 @@ async function main() {
 
   const backgroundFile = path.join(OUT_DIR, "bg.js");
   const backgroundSource = makeChromeLiveBackgroundJs({
+    H2O_BUILD_STAMP: CHROME_BUILD_IDENTITY.h2oBuildStamp,
     DEV_TAG,
     CHAT_MATCH,
     DEV_HAS_CONTROLS,
@@ -656,7 +658,9 @@ async function main() {
   // listener, openWorkbench, and presence-restore (see ARCHIVE_WORKBENCH_ENABLED
   // in chrome-live-background.mjs — gated on MANIFEST_PROFILE === "production").
   if (MANIFEST_PROFILE === "production") {
-    syncArchiveWorkbenchToOut(SRC, OUT_DIR);
+    syncArchiveWorkbenchToOut(SRC, OUT_DIR, {
+      h2oBuildStamp: CHROME_BUILD_IDENTITY.h2oBuildStamp,
+    });
   } else {
     // removeArchiveWorkbenchFromOut only deletes files it knows about
     // (ARCHIVE_WORKBENCH_OUT_FILES). That leaves stale files from previous

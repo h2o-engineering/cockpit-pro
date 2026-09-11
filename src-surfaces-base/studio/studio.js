@@ -1745,6 +1745,28 @@ async function callArchive(op, payload = {}, nsDisk){
   return res.result;
 }
 
+// Accepted object-sync (T02 forward-port): the narrow archive surfaces the
+// local-publication projection and explicit Sync Apply need, routed through
+// callArchive — the established Studio↔SW archive path — so Studio never
+// becomes a second archive truth. Only the Shell-authorized façades are
+// exposed; callArchive itself is deliberately not exported.
+W.H2O = W.H2O || {};
+W.H2O.Studio = W.H2O.Studio || {};
+W.H2O.Studio.archiveAuthority = Object.freeze({
+  listWorkbenchRows() { return callArchive("listWorkbenchRows", {}); },
+  listSnapshots(chatId) { return callArchive("listSnapshots", { chatId: String(chatId || "").trim() }); },
+  loadSnapshot(snapshotId) { return callArchive("loadSnapshot", { snapshotId: String(snapshotId || "").trim() }); },
+});
+
+// Explicit Sync Apply gets only the existing canonical mutation and readback
+// operations, kept separate from the read-only projection surface above.
+W.H2O.Studio.syncApplyArchiveAuthority = Object.freeze({
+  loadSnapshot(snapshotId) { return callArchive("loadSnapshot", { snapshotId: String(snapshotId || "").trim() }); },
+  importFullBundle({ bundle, mode = "merge" } = {}) {
+    return callArchive("importFullBundle", { bundle, mode: String(mode || "merge") });
+  },
+});
+
 async function tryArchiveOp(op, payload = {}, nsDisk){
   try {
     return {

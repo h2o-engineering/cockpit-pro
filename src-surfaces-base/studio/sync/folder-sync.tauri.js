@@ -12,7 +12,7 @@
  *
  * Storage:
  *   Config:  chrome.storage.local['h2o:studio:sync:config:v1']
- *            { schemaVersion, mode, folderPath, updatedAt }
+ *            { schemaVersion, mode, folderPath, configuredPeers, updatedAt }
  *   Ledger:  chrome.storage.local['h2o:studio:sync:ledger:v1']
  *            { schemaVersion, updatedAt, entries: [{fingerprint, …}] }
  *   (Both are SQLite-backed on Desktop via the kv_store shim.)
@@ -95,6 +95,7 @@
     /^chrome-latest\.json$/i,
   ];
   var CHROME_LATEST_FILE = 'chrome-latest.json';
+  var LOCAL_PUBLICATION_FILE = 'h2o-local-publication.v1.json';
   var CHROME_DESKTOP_SUPPORTED_FIELDS = [
     'saved-chat-records',
     'linked-chat-records',
@@ -142,6 +143,11 @@
   var MAX_INTERVAL_MS = 60000;
   var FILE_STABLE_MIN_MS = 1500;
   var MAX_LISTENERS = 64;
+  var automaticModeAuthorityListeners = new Set();
+  /* One Desktop realm owns the canonical SQLite-backed Sync config. Every
+   * read/decision/write/read-back mutation is queued here, including the
+   * fixed-purpose configured-Chrome-peer transition. */
+  var canonicalConfigMutationTail = Promise.resolve();
 
   /* Diagnostic-only sample cap for orphan-folder-binding visibility
    * (Phase D). Visibility only — never affects import behavior. */
@@ -201,10 +207,18 @@
     errors:         [],
     errMax:         20,
     lastError:      null,
+    localPublicationFingerprint: '',
     /* Cached config snapshot — updated by reconcileWatcherFromConfig + the
      * boot-time auto-start. Used so getWatcherState() can be synchronous. */
     folderPath:     '',
     mode:           'off',
+    /* Item 11 runtime-authority fix — redacted storage-authority state so
+     * diagnostics distinguish "readiness unresolved", "readiness failed",
+     * "authority missing/invalid", "valid manual" and "valid auto" instead of
+     * collapsing them into a default mode. */
+    authorityValid:   false,
+    authorityBackend: '',
+    authorityStatus:  'unresolved',
   };
   function pushErr(op, e) {
     try {
@@ -291,6 +305,7 @@
       schemaVersion: 1,
       mode: 'off',
       folderPath: '',
+      configuredPeers: [],
       phase3AutoSyncConfigVersion: PHASE3_AUTO_IMPORT_CONFIG_VERSION,
       updatedAt: ''
     };
@@ -299,8 +314,64 @@
     return { schemaVersion: 1, updatedAt: '', entries: [] };
   }
 
+  /* ── Item 11 storage-authority readiness ──────────────────────────────
+   * Desktop swaps chrome.storage.local from a temporary localStorage shim to
+   * the SQLite-backed implementation asynchronously. Reading the persisted
+   * configuration before that swap yields null and previously fell back to an
+   * automatic default. Every authoritative read now awaits this contract
+   * first. Memoized: one shared promise, resolved once, never rejects. */
+  var UNRESOLVED_STORAGE_AUTHORITY = Object.freeze({
+    ready: false, backend: 'unavailable', status: 'unresolved',
+  });
+  var UNAVAILABLE_STORAGE_AUTHORITY = Object.freeze({
+    ready: false, backend: 'localstorage', status: 'unavailable',
+  });
+  /* M2: derived compatibility cache only. The platform promise/snapshot is the
+   * sole F3 authority; this value is never independently writable by callers. */
+  var derivedStorageAuthority = UNRESOLVED_STORAGE_AUTHORITY;
+
+  function normalizeStorageAuthority(value) {
+    var v = value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+    var backend = v && typeof v.backend === 'string' ? v.backend : 'localstorage';
+    var ready = !!v && v.ready === true && (backend === 'sqlite' || backend === 'chrome');
+    var status = v && typeof v.status === 'string' ? v.status : 'unavailable';
+    return Object.freeze({
+      ready: ready,
+      backend: ready ? backend : 'localstorage',
+      status: ready ? 'ready' : (status === 'failed' ? 'failed' : 'unavailable'),
+    });
+  }
+
+  function ensureStorageAuthority() {
+    var platform = global.H2O && global.H2O.Studio && global.H2O.Studio.platform;
+    var api = platform && typeof platform.whenStorageAuthorityReady === 'function'
+      ? platform.whenStorageAuthorityReady : null;
+    if (!api) {
+      /* No readiness contract on this surface: fail closed. */
+      derivedStorageAuthority = UNAVAILABLE_STORAGE_AUTHORITY;
+      watcherState.authorityBackend = derivedStorageAuthority.backend;
+      watcherState.authorityStatus = derivedStorageAuthority.status;
+      return Promise.resolve(derivedStorageAuthority);
+    }
+    /* whenStorageAuthorityReady() is already memoized by platform. Calling it
+     * here preserves one owner and prevents a contradictory module promise. */
+    return Promise.resolve()
+      .then(function () { return api(); })
+      .then(function (value) { return normalizeStorageAuthority(value); },
+        function () { return UNAVAILABLE_STORAGE_AUTHORITY; })
+      .then(function (result) {
+        derivedStorageAuthority = result;
+        watcherState.authorityBackend = result.backend;
+        watcherState.authorityStatus = result.status;
+        return result;
+      });
+  }
+
+
   /* ── Config API ───────────────────────────────────────────────────── */
   async function getConfig() {
+    var storageAuthority = await ensureStorageAuthority();
+    if (!storageAuthority.ready) return defaultConfig();
     var raw = await readKv(CONFIG_KEY);
     var base = defaultConfig();
     if (!raw || typeof raw !== 'object') {
@@ -326,9 +397,141 @@
     state.lastAutoImportConfigMigration = String(merged.autoImportMigration || '');
     return merged;
   }
-  async function setConfig(patch) {
-    var current = await getConfig();
+
+  /* Item 11 runtime-authority fix: `loaded` reports whether an authoritative
+   * backend was actually consulted — it is NOT hardcoded true. Callers pass
+   * loaded=false when storage authority never became ready, so consumers can
+   * distinguish "storage readiness unresolved/failed" from "authority read but
+   * missing or malformed". Both remain ineligible for automatic behavior. */
+  function automaticModeAuthorityFromRaw(raw, loaded) {
+    var record = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : null;
+    var mode = record && typeof record.mode === 'string' ? record.mode : '';
+    var isLoaded = loaded === true;
+    var valid = isLoaded && !!record && record.schemaVersion === 1 &&
+      VALID_MODES.indexOf(mode) >= 0;
+    return Object.freeze({
+      loaded: isLoaded,
+      valid: valid,
+      mode: valid ? mode : 'off',
+      automaticExportEnabled: valid && mode === 'auto',
+    });
+  }
+
+  /*
+   * O1-T19. An authority that permits automatic mutation is only meaningful
+   * while P01 owns the data. After the standdown the mode may still say "auto"
+   * and still be irrelevant, so the generation is consulted first and an
+   * unreadable gate reports not-ready rather than authorized.
+   */
+  async function generationPermitsP01Mutation() {
+    var gate = global.H2O && global.H2O.Studio && global.H2O.Studio.sync &&
+      global.H2O.Studio.sync.writerGeneration;
+    /* No gate surface at all: a pre-T19 runtime, so behave as before. An
+     * unreadable STORE is a different fact and still refuses, below. */
+    if (!gate) return true;
+    /* O1-B2.1. A gate that is PRESENT but does not answer this name is broken,
+     * not absent. Permitting on a missing method would be a silent fail-open. */
+    if (typeof gate.p01MayMutateBoolean !== 'function') return false;
+    return await gate.p01MayMutateBoolean();
+  }
+
+  async function getAutomaticModeAuthority() {
+    if (!await generationPermitsP01Mutation()) {
+      return automaticModeAuthorityFromRaw(null, false);
+    }
+    var authority = await ensureStorageAuthority();
+    if (!authority.ready) return automaticModeAuthorityFromRaw(null, false);
+    var raw = await readKv(CONFIG_KEY);
+    return automaticModeAuthorityFromRaw(raw, true);
+  }
+
+  function emitAutomaticModeAuthority(authority) {
+    automaticModeAuthorityListeners.forEach(function (listener) {
+      try { listener(authority); }
+      catch (e) { pushErr('automatic-mode-authority-subscriber', e); }
+    });
+  }
+
+  function subscribeAutomaticModeAuthority(listener) {
+    if (typeof listener !== 'function') return function () { /* noop */ };
+    if (automaticModeAuthorityListeners.size >= MAX_LISTENERS) {
+      pushErr('automatic-mode-authority-subscribe', 'listener cap reached');
+      return function () { /* noop */ };
+    }
+    automaticModeAuthorityListeners.add(listener);
+    return function () { automaticModeAuthorityListeners.delete(listener); };
+  }
+
+  function installAutomaticModeAuthorityStorageListener() {
+    var onChanged = global.chrome && global.chrome.storage && global.chrome.storage.onChanged;
+    if (!onChanged || typeof onChanged.addListener !== 'function') return false;
+    onChanged.addListener(function (changes, areaName) {
+      if (areaName !== 'local' || !changes ||
+          !Object.prototype.hasOwnProperty.call(changes, CONFIG_KEY)) return;
+      var change = changes[CONFIG_KEY];
+      /* A change event means an authoritative backend responded, so the
+       * authority counts as loaded even when the new value is absent or
+       * malformed — validity, not loadedness, is what gates behavior. */
+      emitAutomaticModeAuthority(automaticModeAuthorityFromRaw(
+        change && Object.prototype.hasOwnProperty.call(change, 'newValue')
+          ? change.newValue
+          : null,
+        true
+      ));
+    });
+    return true;
+  }
+
+  function withCanonicalConfigMutation(operation) {
+    if (typeof operation !== 'function') {
+      return Promise.reject(Object.assign(
+        new Error('canonical-sync-config-mutation-invalid'),
+        { code: 'canonical-sync-config-mutation-invalid' }
+      ));
+    }
+    var run = canonicalConfigMutationTail.then(operation, operation);
+    canonicalConfigMutationTail = run.then(function () {}, function () {});
+    return run;
+  }
+
+  /* The exact stored TEXT, not a parsed-then-reserialized echo of it. The CAS
+   * guard compares bytes, so this is the only value that may be handed to it. */
+  function canonicalConfigRawValue() {
+    var local = global.chrome && global.chrome.storage && global.chrome.storage.local;
+    if (!local || typeof local.__h2oCanonicalRawValue !== 'function') {
+      return Promise.resolve(undefined);
+    }
+    return local.__h2oCanonicalRawValue(CONFIG_KEY);
+  }
+
+  function canonicalConfigCompareAndSet(expectedRaw, nextRaw) {
+    var local = global.chrome && global.chrome.storage && global.chrome.storage.local;
+    if (!local || typeof local.__h2oCanonicalCompareAndSet !== 'function') {
+      return Promise.reject(Object.assign(
+        new Error('canonical-sync-config-cas-unavailable'),
+        { code: 'canonical-sync-config-cas-unavailable' }
+      ));
+    }
+    return local.__h2oCanonicalCompareAndSet(CONFIG_KEY, expectedRaw, nextRaw);
+  }
+
+  function normalizeConfigPatch(current, patch) {
     var next = Object.assign({}, current, (patch && typeof patch === 'object') ? patch : {});
+    if (!Array.isArray(next.configuredPeers) || next.configuredPeers.some(function (row) {
+      return !row || typeof row !== 'object' || Array.isArray(row) ||
+        Object.keys(row).sort().join(',') !== 'syncPeerId,writerKey' ||
+        typeof row.syncPeerId !== 'string' || row.syncPeerId.length === 0 ||
+        row.syncPeerId.length > 512 || row.syncPeerId.trim() !== row.syncPeerId ||
+        /[\u0000-\u001f\u007f]/.test(row.syncPeerId) ||
+        typeof row.writerKey !== 'string' || !/^[0-9a-f]{64}$/.test(row.writerKey);
+    })) {
+      var peerError = new Error('sync-configured-peers-invalid');
+      peerError.code = 'sync-configured-peers-invalid';
+      throw peerError;
+    }
+    next.configuredPeers = next.configuredPeers.map(function (row) {
+      return { syncPeerId: row.syncPeerId, writerKey: row.writerKey };
+    });
     if (VALID_MODES.indexOf(next.mode) < 0) next.mode = 'off';
     next.folderPath = String(next.folderPath || '').trim();
     if (next.mode === 'auto' && !next.folderPath) next.folderPath = SYNC_FOLDER_NAME;
@@ -336,13 +539,88 @@
     next.phase3AutoSyncConfigVersion = PHASE3_AUTO_IMPORT_CONFIG_VERSION;
     delete next.autoImportMigration;
     next.updatedAt = new Date().toISOString();
-    try { await writeKv(CONFIG_KEY, next); }
-    catch (e) { pushErr('setConfig', e); throw e; }
-    /* M2d-1b: auto-manage watcher based on mode + folderPath. In auto
-     * mode the watcher imports stable chrome-latest.json candidates. */
-    try { reconcileWatcherFromConfig(next, current); }
-    catch (e) { pushWatcherErr('setConfig.reconcile', e); }
     return next;
+  }
+
+  function announceCanonicalConfig(next, current, reconcile) {
+    if (reconcile !== false) {
+      watcherState.authorityValid = true;
+      emitAutomaticModeAuthority(automaticModeAuthorityFromRaw(next, true));
+      try { reconcileWatcherFromConfig(next, current); }
+      catch (e) { pushWatcherErr('setConfig.reconcile', e); }
+    }
+    return next;
+  }
+
+
+  var CANONICAL_CONFIG_CAS_ATTEMPTS = 3;
+
+  /* One canonical mutation.
+   *
+   * The promise tail below is an optimisation only - it keeps this realm's own
+   * callers in order and saves them from losing races to each other. It is NOT
+   * the authority. Production runs several Desktop processes against one SQLite
+   * file, each with its own realm and its own tail, so the only thing that can
+   * order them is the conditional UPDATE itself.
+   *
+   * Each attempt reads BOTH the exact raw text and the parsed record, lets the
+   * caller decide against the parsed snapshot, then commits with a CAS
+   * conditioned on those exact bytes. Losing means someone else's authority
+   * landed in between, so the decision is re-run against the fresh state rather
+   * than replayed against the stale one - that re-decision is what turns a lost
+   * race into a typed conflict instead of a lost update. Bounded to three
+   * attempts, then a typed transient result: no unsafe fallback, no timer, no
+   * write that ignores the guard. */
+  async function mutateCanonicalConfig(decide) {
+    return withCanonicalConfigMutation(async function () {
+      var storageAuthority = await ensureStorageAuthority();
+      if (!storageAuthority.ready || storageAuthority.backend !== 'sqlite') {
+        var authorityError = new Error('sync-storage-authority-unavailable');
+        authorityError.code = 'sync-storage-authority-unavailable';
+        pushErr('setConfig.storage-authority', authorityError);
+        throw authorityError;
+      }
+      var attempt = 0;
+      while (attempt < CANONICAL_CONFIG_CAS_ATTEMPTS) {
+        attempt += 1;
+        var expectedRaw = await canonicalConfigRawValue();
+        var current = await getConfig();
+        var decision = await decide(Object.assign({}, current, {
+          configuredPeers: (current.configuredPeers || []).map(function (row) {
+            return { syncPeerId: row.syncPeerId, writerKey: row.writerKey };
+          })
+        }));
+        if (!decision || typeof decision !== 'object' || Array.isArray(decision)) {
+          var decisionError = new Error('canonical-sync-config-mutation-decision-invalid');
+          decisionError.code = 'canonical-sync-config-mutation-decision-invalid';
+          throw decisionError;
+        }
+        if (decision.write !== true) {
+          return Object.freeze({ written: false, outcome: String(decision.outcome || 'no-effect') });
+        }
+        var next = normalizeConfigPatch(current, decision.patch);
+        var nextRaw = JSON.stringify(next);
+        var cas = await canonicalConfigCompareAndSet(
+          expectedRaw === undefined ? null : expectedRaw, nextRaw);
+        if (cas && cas.won === true) {
+          announceCanonicalConfig(next, current, decision.reconcile);
+          return Object.freeze({ written: true,
+            outcome: String(decision.outcome || 'configured'), next: next });
+        }
+        /* Lost: authority moved under us. Loop re-reads and re-decides. */
+      }
+      return Object.freeze({ written: false, outcome: 'authority-contended' });
+    });
+  }
+
+  async function setConfig(patch) {
+    /* M2: the mutation boundary defends itself. No caller ordering can read or
+     * write through the temporary Desktop localStorage shim. Folder Sync is a
+     * Desktop module, so only the canonical SQLite backend is accepted here. */
+    var result = await mutateCanonicalConfig(function () {
+      return { write: true, patch: patch };
+    });
+    return result.next;
   }
 
   /* ── Ledger API ───────────────────────────────────────────────────── */
@@ -523,6 +801,36 @@
       return { ok: false, error: 'read-dir-failed', detail: String((e && e.message) || e), folderPath: folderPath };
     }
 
+    /* Object-protocol intake remains the sole authority for parsing,
+     * admission and Apply. The existing folder watcher only fingerprints the
+     * final atomic-publication leaf so it can wake that authority when the
+     * leaf first appears or its bytes change. Temporary staging leaves are
+     * deliberately outside this exact-name observation. */
+    var localPublication = null;
+    var publicationEntry = (Array.isArray(entries) ? entries : []).find(function (entry) {
+      return entry && typeof entry === 'object' && entry.isDirectory !== true &&
+        String(entry.name || '').toLowerCase() === LOCAL_PUBLICATION_FILE;
+    });
+    if (publicationEntry) {
+      var publicationPath = joinPath(folderPath, publicationEntry.name);
+      try {
+        var publicationText = await fsReadTextFile(publicationPath);
+        localPublication = {
+          filename: LOCAL_PUBLICATION_FILE,
+          path: publicationPath,
+          sizeBytes: typeof publicationText === 'string' ? publicationText.length : 0,
+          fingerprint: await sha256Hex(publicationText),
+        };
+      } catch (e) {
+        pushWatcherErr('localPublication.observe', e);
+        localPublication = {
+          filename: LOCAL_PUBLICATION_FILE,
+          path: publicationPath,
+          skipped: 'read-or-fingerprint-failed',
+        };
+      }
+    }
+
     var files = (Array.isArray(entries) ? entries : [])
       .filter(function (e) {
         /* tauri-plugin-fs returns { name, isDirectory, isFile, isSymlink, … }.
@@ -613,6 +921,7 @@
       ok: true,
       folderPath: folderPath,
       candidates: candidates,
+      localPublication: localPublication,
       scannedFiles: files.length,
       ts: state.lastScanAt,
     };
@@ -4700,6 +5009,18 @@
         emitWatcherEvent({ kind: 'error', at: watcherState.lastScanAt, op: 'scan', error: String(scanErr) });
         return;
       }
+      var localPublication = scan.localPublication;
+      if (!localPublication) {
+        watcherState.localPublicationFingerprint = '';
+      } else if (!localPublication.skipped && localPublication.fingerprint &&
+                 localPublication.fingerprint !== watcherState.localPublicationFingerprint) {
+        watcherState.localPublicationFingerprint = localPublication.fingerprint;
+        emitWatcherEvent({
+          kind: 'object-local-publication-available',
+          at: watcherState.lastScanAt,
+          publication: localPublication,
+        });
+      }
       var candidates = Array.isArray(scan.candidates) ? scan.candidates : [];
       var pendingFingerprints = Object.create(null);
       watcherState.pending.forEach(function (p) {
@@ -4749,7 +5070,16 @@
         if (c.fingerprint && pendingFingerprints[c.fingerprint]) {
           continue;  /* already queued */
         }
-        if (watcherState.mode === 'auto' && String(c.filename || '').toLowerCase() === CHROME_LATEST_FILE) {
+        /* P01 object-protocol auto reconciliation is the sole automatic
+         * canonical mutation owner when installed. Keep detecting the legacy
+         * candidate for compatibility/diagnostics, but do not let its LWW
+         * importer race the revision/lineage Apply path. */
+        var objectProtocolOwnsAutomaticMutation = !!(
+          H2O.Studio?.sync?.objectAutoReconcile
+        );
+        if (!objectProtocolOwnsAutomaticMutation &&
+            watcherState.mode === 'auto' &&
+            String(c.filename || '').toLowerCase() === CHROME_LATEST_FILE) {
           var autoImportedAt = new Date().toISOString();
           var autoResult = await runDesktopAutoImport(c.path, 'watcher:auto:' + c.filename);
           delete watcherState.sizeMap[c.path];
@@ -4807,6 +5137,7 @@
     watcherState.intervalMs = intervalMs;
     watcherState.running = true;
     watcherState.sizeMap = Object.create(null);  /* fresh stability state */
+    watcherState.localPublicationFingerprint = '';
     watcherState.scanInFlight = false;
     var scanOnStart = optsObj.scanOnStart !== false;
     if (scanOnStart) {
@@ -4828,6 +5159,7 @@
     }
     watcherState.running = false;
     watcherState.sizeMap = Object.create(null);
+    watcherState.localPublicationFingerprint = '';
     watcherState.scanInFlight = false;
     return { ok: true, stopped: true };
   }
@@ -4847,7 +5179,136 @@
       sizeMapTracking: Object.keys(watcherState.sizeMap).length,
       errorsCount:    watcherState.errors.length,
       lastError:      watcherState.lastError,
+      /* Item 11 runtime-authority fix — redacted authority state. Carries no
+       * raw folder path; folderPath above is the pre-existing field. */
+      /* Legacy compatibility alias, strictly derived from canonical F3. */
+      authorityLoaded:  derivedStorageAuthority.ready === true,
+      authorityValid:   watcherState.authorityValid,
+      authorityBackend: watcherState.authorityBackend,
+      authorityStatus:  watcherState.authorityStatus,
     };
+  }
+
+  async function canonicalIdentitySnapshot() {
+    var platform = H2O.Studio && H2O.Studio.platform;
+    if (!platform) return { required: true, ready: false, canonical: false, status: 'unavailable' };
+    try {
+      var value = typeof platform.__desktopIdentityReady === 'function'
+        ? await platform.__desktopIdentityReady()
+        : (typeof platform.__desktopIdentityStatus === 'function'
+          ? platform.__desktopIdentityStatus()
+          : null);
+      var authority = value && typeof value === 'object' ? value : {};
+      return {
+        required: true,
+        ready: authority.ready === true,
+        canonical: authority.canonical === true,
+        status: String(authority.status || 'unavailable'),
+      };
+    } catch (_) {
+      return { required: true, ready: false, canonical: false, status: 'unavailable' };
+    }
+  }
+
+  function destinationAuthorizationSnapshot() {
+    try {
+      var delivery = H2O.Desktop && H2O.Desktop.SyncObjectDelivery;
+      var diag = delivery && typeof delivery.diagnose === 'function' ? delivery.diagnose() : null;
+      var authorization = diag && diag.destinationAuthorization;
+      if (authorization && typeof authorization === 'object') return authorization;
+    } catch (_) { /* fail closed */ }
+    return { valid: false, status: 'not-checked' };
+  }
+
+  async function webdavReadinessFacts() {
+    try {
+      var api = H2O.Studio.sync && H2O.Studio.sync.realTransportWebDavSetupUi;
+      if (api && typeof api.getReadinessFacts === 'function') return await api.getReadinessFacts();
+    } catch (_) { /* domain-local failure */ }
+    return {
+      descriptorValid: false,
+      credentialsReady: false,
+      reachabilityReady: false,
+      reason: 'webdav-status-unavailable',
+    };
+  }
+
+  /* M2 read-only snapshot for Settings and future M3 panels. Existing modules
+   * supply facts; sync/readiness-capabilities.js only derives and freezes them.
+   * No call below performs transport or persists capability state. */
+  async function getReadinessSnapshot(options) {
+    var opts = options && typeof options === 'object' ? options : {};
+    var readinessApi = H2O.Studio.sync && H2O.Studio.sync.readiness;
+    if (!readinessApi || typeof readinessApi.deriveSnapshot !== 'function') {
+      throw new Error('sync-readiness-derivation-unavailable');
+    }
+    var storage = await ensureStorageAuthority();
+    var identity = await canonicalIdentitySnapshot();
+    var config = storage.ready ? await getConfig() : defaultConfig();
+    var configAuthority = storage.ready
+      ? await getAutomaticModeAuthority()
+      : automaticModeAuthorityFromRaw(null, false);
+    var configValid = configAuthority.valid === true &&
+      VALID_MODES.indexOf(config.mode) >= 0 && !!String(config.folderPath || '').trim();
+    var authorization = destinationAuthorizationSnapshot();
+    var autoExport = H2O.Studio.sync && H2O.Studio.sync.autoExport;
+    var autoDiag = autoExport && typeof autoExport.diagnose === 'function'
+      ? autoExport.diagnose() : {};
+    var webdavFacts = await webdavReadinessFacts();
+    var watcherConfigured = config.mode === 'auto' || config.mode === 'notify';
+    return readinessApi.deriveSnapshot({
+      foundation: {
+        uiMounted: opts.uiMounted === true,
+        runtimeLoaded: true,
+        storage: storage,
+        identity: identity,
+      },
+      localFolder: {
+        configValid: configValid,
+        authorizationValid: authorization.valid === true,
+        authorizationStatus: String(authorization.status || 'not-checked'),
+        operation: {
+          state: watcherState.scanInFlight ? 'in-flight' : (watcherState.lastError ? 'error' : 'idle'),
+          reason: watcherState.lastError || '',
+          lastActivity: watcherState.lastEventAt || watcherState.lastScanAt || null,
+        },
+      },
+      browserDelivery: {
+        handlePresent: authorization.valid === true,
+        permission: authorization.valid === true ? 'granted' : 'not-checked',
+        livePermission: false,
+        deliveryAvailable: authorization.valid === true,
+        reason: authorization.status || 'authorization-not-checked',
+      },
+      webdav: webdavFacts,
+      automation: {
+        desktopAutoExport: {
+          configured: autoDiag.configured === true || autoDiag.enabled === true,
+          prerequisitesSatisfied: autoDiag.prerequisitesSatisfied === true,
+          schedulerActive: autoDiag.schedulerActive === true,
+          reason: autoDiag.ineffectiveReason || '',
+          lastActivity: autoDiag.lastExportedAt || autoDiag.lastScheduledAt || null,
+          operation: { state: autoDiag.flushInFlight ? 'in-flight' : 'idle' },
+        },
+        desktopWatcher: {
+          configured: watcherConfigured,
+          prerequisitesSatisfied: storage.ready === true && configValid,
+          schedulerActive: watcherState.running === true,
+          reason: !storage.ready ? 'backend-not-ready'
+            : (!configValid ? 'folder-not-configured'
+              : (!watcherConfigured ? 'manual-mode' : 'scheduler-not-running')),
+          lastActivity: watcherState.lastEventAt || watcherState.lastScanAt || null,
+          operation: { state: watcherState.scanInFlight ? 'in-flight' : 'idle' },
+        },
+      },
+      archiveRecovery: {
+        /* M2 provides the domain slot without claiming that the generic Studio
+         * store proves archive/backup capability. M3 may bind a real owner. */
+        available: false,
+        ready: false,
+        reason: 'not-assessed-m2',
+      },
+    });
   }
 
   function subscribe(fn) {
@@ -5419,6 +5880,9 @@
     /* M2d-1a manual API */
     getConfig:       getConfig,
     setConfig:       setConfig,
+    mutateCanonicalConfig: mutateCanonicalConfig,
+    getAutomaticModeAuthority: getAutomaticModeAuthority,
+    subscribeAutomaticModeAuthority: subscribeAutomaticModeAuthority,
     getLedger:       getLedger,
     clearLedger:     clearLedger,
     scanFolderOnce:  scanFolderOnce,
@@ -5435,6 +5899,7 @@
     startWatcher:         startWatcher,
     stopWatcher:          stopWatcher,
     getWatcherState:      getWatcherState,
+    getReadinessSnapshot: getReadinessSnapshot,
     subscribe:            subscribe,
     getPendingCandidates: getPendingCandidates,
     dismissPending:       dismissPending,
@@ -5452,6 +5917,10 @@
     desktopToChromeTransport: 'latest.json',
     getConfig: getConfig,
     setConfig: setConfig,
+    mutateCanonicalConfig: mutateCanonicalConfig,
+    getAutomaticModeAuthority: getAutomaticModeAuthority,
+    getReadinessSnapshot: getReadinessSnapshot,
+    subscribeAutomaticModeAuthority: subscribeAutomaticModeAuthority,
     getLedger: getLedger,
     clearLedger: clearLedger,
     scanFolderOnce: scanFolderOnce,
@@ -6257,23 +6726,64 @@
     },
   });
 
-  /* Boot-time auto-start: if persisted/effective config has mode ∈
-   * {notify, auto} AND folderPath set, kick the watcher after the
-   * platform/stores have a chance to initialize. */
-  global.setTimeout(function () {
-    getConfig().then(function (cfg) {
+  installAutomaticModeAuthorityStorageListener();
+
+  /* Boot-time auto-start — Item 11 runtime-authority fix.
+   *
+   * This previously ran on setTimeout(..., 0), which does NOT wait for the
+   * Desktop chrome.storage.local backend to be swapped from the temporary
+   * localStorage shim to SQLite. The read returned null, merged over a
+   * default whose mode was `auto`, and started a watcher even though the
+   * persisted authority said `manual`.
+   *
+   * The boot read now awaits the storage-authority readiness contract. If
+   * authority never becomes available the watcher stays stopped, no folder is
+   * read, and diagnostics report the reason honestly. */
+  ensureStorageAuthority().then(function (authority) {
+    if (!authority.ready) {
+      watcherState.authorityValid = false;
+      watcherState.folderPath = '';
+      watcherState.mode = 'off';
+      return null;
+    }
+    return getAutomaticModeAuthority().then(function (normalized) {
+      watcherState.authorityValid = normalized.valid === true;
+      return getConfig();
+    }).then(function (cfg) {
       watcherState.folderPath = cfg.folderPath || '';
       watcherState.mode = cfg.mode || 'off';
       if (cfg.autoImportMigration) {
-        var persisted = Object.assign({}, cfg, {
-          updatedAt: new Date().toISOString(),
-        });
-        delete persisted.autoImportMigration;
-        writeKv(CONFIG_KEY, persisted).catch(function (e) { pushWatcherErr('boot.config-migration', e); });
+        /* Boot migration is a canonical mutation like any other, so it goes
+         * through the CAS owner. It used to write the whole record blindly,
+         * which let a process starting late overwrite authority a running one
+         * had just committed. Normalisation drops autoImportMigration, so an
+         * empty patch is the whole migration; losing the CAS simply means
+         * another process already did it. */
+        withCanonicalConfigMutation(async function () {
+          var expectedRaw = await canonicalConfigRawValue();
+          var current = await getConfig();
+          if (!current.autoImportMigration) return null;
+          var persisted = Object.assign({}, current, {
+            updatedAt: new Date().toISOString(),
+          });
+          delete persisted.autoImportMigration;
+          /* Same record this always wrote - deliberately NOT re-normalised,
+           * because a malformed authority must stay malformed rather than be
+           * quietly promoted to a valid one by a boot path. What changes is
+           * only that the write is now conditional on the bytes just read, so
+           * a late-starting process cannot clobber newer authority. Losing
+           * means another process already migrated; nothing to do. */
+          return canonicalConfigCompareAndSet(
+            expectedRaw === undefined ? null : expectedRaw, JSON.stringify(persisted));
+        }).catch(function (e) { pushWatcherErr('boot.config-migration', e); });
       }
-      if ((cfg.mode === 'notify' || cfg.mode === 'auto') && cfg.folderPath) {
+      /* Automatic behavior only from an authoritative record that explicitly
+       * resolves to `auto` (or the separately supported `notify`). */
+      if (watcherState.authorityValid &&
+          (cfg.mode === 'notify' || cfg.mode === 'auto') && cfg.folderPath) {
         startWatcher();
       }
-    }).catch(function (e) { pushWatcherErr('boot', e); });
-  }, 0);
+      return null;
+    });
+  }).catch(function (e) { pushWatcherErr('boot', e); });
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -10,6 +10,126 @@ import { SURFACES_BASE_REL } from "../../paths.mjs";
 // literal "surfaces/studio" so chrome.runtime.getURL strings inside bundled
 // bg.js / Studio mirrors continue to resolve.
 export const ARCHIVE_WORKBENCH_SOURCE_REL = path.join(SURFACES_BASE_REL, "studio");
+export const ITEM9_BROWSER_ADAPTER_SOURCE_REL = path.join(
+  "packages",
+  "browser-adapters",
+  "chrome",
+);
+export const ITEM9_BROWSER_ADAPTER_OUT_REL = path.join(
+  "surfaces",
+  "studio",
+  "sync",
+  "item9-adapters",
+);
+export const ITEM9_BROWSER_ADAPTER_SOURCE_FILES = Object.freeze([
+  "sync-object-store.mjs",
+  "sync-revision-admission.mjs",
+  "sync-delivery-runtime.mjs",
+  "sync-revision-apply.mjs",
+]);
+/*
+ * P02 Wave 1 / Z7. The packed Item 9 adapters are copied VERBATIM, so a
+ * relative import in the source must resolve identically in the packed tree.
+ * sync-revision-admission.mjs imports "../../core/..." which is
+ * packages/core/ in the repo; mirroring that as surfaces/studio/core/ keeps
+ * the copied module loadable without rewriting any import.
+ */
+export const P02_CORE_SOURCE_REL = path.join("packages", "core");
+export const P02_CORE_OUT_REL = path.join("surfaces", "studio", "core");
+/*
+ * P02 V8-D. The v2 revision producers and writer transport are copied VERBATIM
+ * for the same reason as the core modules: sync-revision-domain-chat-v2.mjs
+ * imports "../../core/sync-object-projection.mjs", so mirroring
+ * packages/browser-adapters/chrome as surfaces/studio/browser-adapters/chrome
+ * keeps every relative import resolving without rewriting a single specifier.
+ */
+export const P02_CHROME_ADAPTER_SOURCE_REL = path.join(
+  "packages", "browser-adapters", "chrome",
+);
+export const P02_CHROME_ADAPTER_OUT_REL = path.join(
+  "surfaces", "studio", "browser-adapters", "chrome",
+);
+export const P02_CHROME_ADAPTER_SOURCE_FILES = Object.freeze([
+  "sync-contract-v2.mjs",
+  "sync-revision-production-v2.mjs",
+  "sync-revision-domain-chat-v2.mjs",
+  "sync-reader-transport-v2.mjs",
+  "sync-writer-transport-v2.mjs",
+  // O1-T11: Chrome v2 admission beside the v1 path, and the read-only FSA
+  // port. Both load ../../core/ from the packed surfaces tree.
+  "sync-branch-admission-v2.mjs",
+  "sync-fsa-read-transport-v2.mjs",
+  // O1-T07 (corrected): durable Y-2 store port over chrome.storage.local.
+  "sync-p02-tip-memo-chrome-v2.mjs",
+  "sync-writer-generation-chrome-v2.mjs",
+  "sync-p01-mutation-admission-chrome.mjs",
+  // O1-T14: Chrome v2 Apply, beside the accepted v1 engine.
+  "sync-revision-apply-v2.mjs",
+]);
+export const P02_CORE_SOURCE_FILES = Object.freeze([
+  // O1-T05: the amended anchor contract. sync-branch-evidence-v2.mjs and
+  // sync-object-classifier-v2.mjs both import it, so it must ship with them.
+  "sync-p02-anchor-set-v2.mjs",
+  // O1-T05b: engine-minted envelope identity, imported by the chat domain
+  // adapter and the Desktop first-publication adapter.
+  "sync-p02-revision-mint-v2.mjs",
+  // O1 A5: evidence, discovery and admission foundation cores.
+  "sync-p02-verified-tip-memo-v2.mjs",
+  // O1-T15/T16: heads-merge planning and descendant/onboarding/recovery.
+  "sync-p02-heads-merge-v2.mjs",
+  "sync-p02-descendant-publication-v2.mjs",
+  // O1-B1: generic receive composition and the v2 Apply core.
+  "sync-object-reconcile-v2.mjs",
+  "sync-object-apply-v2.mjs",
+  // O1-T18: steady publication composition and its dormant driver skeleton.
+  "sync-steady-publication-v2.mjs",
+  "sync-steady-driver-v2.mjs",
+  // O1-B2: the explicitly authorized bounded activation seam. Shipped so the
+  // governed rehearsal can reach it; it has no caller, so shipping it starts
+  // nothing.
+  "sync-steady-activation-v2.mjs",
+  // O1-T19: the writer-generation contract both platforms observe.
+  "sync-writer-generation-v2.mjs",
+  "sync-p02-peer-roster-v2.mjs",
+  "sync-p02-legacy-baseline-observer-v2.mjs",
+  "sync-branch-evidence-v2.mjs",
+  "sync-object-classifier-v2.mjs",
+  "sync-object-scheduler-v2.mjs",
+  "sync-evidence-capacity-v2.mjs",
+  "sync-format-gate-v2.mjs",
+  "sync-object-runtime-v2.mjs",
+  // V7 prerequisite: the repository-root contract and activation document
+  // shapes the Desktop ceremony writer and Chrome verification share.
+  "sync-repository-root-v2.mjs",
+  // P02 V8-D: the first-writer publication chain. sync-object-projection.mjs
+  // is packed here as well as under local-publication-adapters/ because the
+  // V8 chrome adapters import it as "../../core/", which must resolve from
+  // surfaces/studio/browser-adapters/chrome/ in the packed tree.
+  "sync-object-projection.mjs",
+  "sync-first-publication-candidates-v2.mjs",
+  "sync-first-publication-composition-v2.mjs",
+]);
+
+export const ITEM9_BROWSER_ADAPTER_OUT_FILES = Object.freeze([
+  "sync-object-store.mjs",
+  "sync-revision-admission.mjs",
+  "sync-delivery-runtime.mjs",
+  "sync-revision-apply.mjs",
+]);
+export const LOCAL_PUBLICATION_MODULE_MAPPINGS = Object.freeze([
+  Object.freeze({
+    sourceRel: path.join("packages", "core", "sync-object-projection.mjs"),
+    outRel: path.join("surfaces", "studio", "sync", "local-publication-adapters", "core", "sync-object-projection.mjs"),
+  }),
+  Object.freeze({
+    sourceRel: path.join("packages", "browser-adapters", "chrome", "local-publication-projection.mjs"),
+    outRel: path.join("surfaces", "studio", "sync", "local-publication-adapters", "browser-adapters", "chrome", "local-publication-projection.mjs"),
+  }),
+  Object.freeze({
+    sourceRel: path.join("packages", "browser-adapters", "chrome", "local-publication-writer.mjs"),
+    outRel: path.join("surfaces", "studio", "sync", "local-publication-adapters", "browser-adapters", "chrome", "local-publication-writer.mjs"),
+  }),
+]);
 export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   "studio.html",
   "studio.css",
@@ -811,6 +931,9 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   // operator visibility panel. No dispatch, Native, F5, relay, settlement,
   // publication, watermark, consumed-operation, or domain mutation controls.
   "sync/execute/execute-lane-ui.tauri.js",
+  "sync/readiness-capabilities.js",
+  "sync/writer-generation-gate.js",
+  "sync/p01-mutation-admission.mv3.js",
   // Desktop-only: manual folder sync (M2d-1a). Wraps the M2b ingestion
   // importer with file-system scan + fingerprint dedupe + sync ledger.
   // No watcher yet — that lands in M2d-1b.
@@ -828,6 +951,7 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   // Chrome/MV3-only: manual sync-folder import (R2B). Reads latest.json from
   // a user-picked directory handle and calls the existing merge importer.
   "sync/folder-import.mv3.js",
+  "sync/browser-delivery.mv3.js",
   // Chrome/MV3-only: opt-in sync-folder export (R3 Phase 1). Writes
   // chrome-latest.json (staged via chrome-latest.json.tmp) from a
   // user-gesture extension page, behind feature flag sync.chromeAutoImport
@@ -876,6 +1000,19 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   // chrome.storage.local (Tauri kv shim on Desktop). Loads BEFORE the
   // multi-peer diagnostics so consumers find H2O.Studio.identity available.
   "sync/peer-identity.js",
+  "sync/local-publication.mv3.js",
+  "sync/sync-linear-reconcile-core.js",
+  "sync/sync-object-auto-reconcile.js",
+  "sync/sync-object-runtime-v2.desktop.mjs",
+  "sync/sync-writer-storage-desktop-v2.tauri.mjs",
+  "sync/sync-branch-evidence-desktop-v2.tauri.mjs",
+  "sync/sync-p02-tip-memo-desktop-v2.tauri.mjs",
+  "sync/sync-object-enumerator-v2.tauri.mjs",
+  "sync/sync-first-publication-desktop-v2.tauri.mjs",
+  "sync/sync-writer-generation-desktop-v2.tauri.mjs",
+  "sync/sync-steady-activation-desktop-v2.tauri.mjs",
+  "sync/sync-p02-revision-proof.tauri.mjs",
+  "sync/sync-reverse-desktop-v2.tauri.mjs",
   // F3: outbound export log. Mints exportId / sequenceNumber on every
   // disk-writing export and tracks previousExportId. Single persistent
   // key 'h2o:sync:export-log:v1'. Only mutated by exportLatestSyncBundle.
@@ -956,6 +1093,10 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   // durable outbox/inbox stores only. No writes, transport, convergence,
   // apply, or automatic sync.
   "sync/relay-index.tauri.js",
+  "sync/sync-object-projection.tauri.js",
+  "sync/sync-object-local-source.tauri.js",
+  "sync/sync-object-runtime.tauri.js",
+  "sync/browser-delivery-producer.tauri.js",
   // F10.8.5: Desktop/Tauri-only manual sync UI. Counts-first operator
   // surface over existing relay APIs. No automatic sync, convergence, merge,
   // or apply.
@@ -1533,10 +1674,14 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   "sync/library/library-folder-binding-bridge-diagnostic.tauri.js",
   "sync/library/library-folder-binding-migration-shadow.tauri.js",
   "sync/execute/execute-lane-ui.tauri.js",
+  "sync/readiness-capabilities.js",
+  "sync/writer-generation-gate.js",
+  "sync/p01-mutation-admission.mv3.js",
   "sync/folder-sync.tauri.js",
   "sync/auto-export.tauri.js",
   "sync/focus-import.tauri.js",
   "sync/folder-import.mv3.js",
+  "sync/browser-delivery.mv3.js",
   "sync/auto-import.mv3.js",
   "sync/bundle-envelope-preview.mv3.js",
   "sync/capture-evidence-preview.mv3.js",
@@ -1545,6 +1690,19 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   "sync/folder-sync-proposal-preview.mv3.js",
   "sync/folder-sync-conflict-report.js",
   "sync/peer-identity.js",
+  "sync/local-publication.mv3.js",
+  "sync/sync-linear-reconcile-core.js",
+  "sync/sync-object-auto-reconcile.js",
+  "sync/sync-object-runtime-v2.desktop.mjs",
+  "sync/sync-writer-storage-desktop-v2.tauri.mjs",
+  "sync/sync-branch-evidence-desktop-v2.tauri.mjs",
+  "sync/sync-p02-tip-memo-desktop-v2.tauri.mjs",
+  "sync/sync-object-enumerator-v2.tauri.mjs",
+  "sync/sync-first-publication-desktop-v2.tauri.mjs",
+  "sync/sync-writer-generation-desktop-v2.tauri.mjs",
+  "sync/sync-steady-activation-desktop-v2.tauri.mjs",
+  "sync/sync-p02-revision-proof.tauri.mjs",
+  "sync/sync-reverse-desktop-v2.tauri.mjs",
   "sync/export-log.js",
   "sync/peer-transport.js",
   "sync/webdav-transport-gates.js",
@@ -1573,6 +1731,10 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   "sync/relay-inbox.tauri.js",
   "sync/webdav-relay.tauri.js",
   "sync/relay-index.tauri.js",
+  "sync/sync-object-projection.tauri.js",
+  "sync/sync-object-local-source.tauri.js",
+  "sync/sync-object-runtime.tauri.js",
+  "sync/browser-delivery-producer.tauri.js",
   "settings/settings-routes.studio.js",
   "settings/domain-panel-runtime.studio.js",
   "settings/build-identity.panel.js",
@@ -1757,6 +1919,27 @@ function assertArchiveWorkbenchPacklistParity() {
   }
 }
 
+function assertItem9BrowserAdapterPacklistParity() {
+  if (ITEM9_BROWSER_ADAPTER_SOURCE_FILES.length !==
+      ITEM9_BROWSER_ADAPTER_OUT_FILES.length) {
+    throw new Error(
+      `Item 9 browser adapter packlist mismatch: source=${ITEM9_BROWSER_ADAPTER_SOURCE_FILES.length} out=${ITEM9_BROWSER_ADAPTER_OUT_FILES.length}`,
+    );
+  }
+  for (let index = 0;
+    index < ITEM9_BROWSER_ADAPTER_SOURCE_FILES.length;
+    index += 1) {
+    const sourceName = ITEM9_BROWSER_ADAPTER_SOURCE_FILES[index];
+    const outName = ITEM9_BROWSER_ADAPTER_OUT_FILES[index];
+    if (!sourceName || typeof sourceName !== "string" ||
+        !outName || typeof outName !== "string") {
+      throw new Error(
+        `Item 9 browser adapter packlist invalid at index ${index}: source=${sourceName} out=${outName}`,
+      );
+    }
+  }
+}
+
 function removeFileIfPresent(filePath) {
   try {
     fs.unlinkSync(filePath);
@@ -1843,13 +2026,210 @@ export function archiveWorkbenchOutDir(outDir) {
   return path.join(String(outDir || ""), "surfaces", "studio");
 }
 
+export function item9BrowserAdapterSourceDir(srcRoot) {
+  return path.join(String(srcRoot || ""), ITEM9_BROWSER_ADAPTER_SOURCE_REL);
+}
+
+export function item9BrowserAdapterOutDir(outDir) {
+  return path.join(String(outDir || ""), ITEM9_BROWSER_ADAPTER_OUT_REL);
+}
+
+export function compareItem9BrowserAdaptersToSource(srcRoot, outDir) {
+  assertItem9BrowserAdapterPacklistParity();
+  const sourceDir = item9BrowserAdapterSourceDir(srcRoot);
+  const outAdapterDir = item9BrowserAdapterOutDir(outDir);
+  const files = ITEM9_BROWSER_ADAPTER_SOURCE_FILES.map((sourceName, index) => {
+    const outName = ITEM9_BROWSER_ADAPTER_OUT_FILES[index];
+    const sourcePath = path.join(sourceDir, sourceName);
+    const outPath = path.join(outAdapterDir, outName);
+    const sourceExists = fileExists(sourcePath);
+    const outExists = fileExists(outPath);
+    const equal = sourceExists && outExists
+      ? fs.readFileSync(sourcePath).equals(fs.readFileSync(outPath))
+      : false;
+    return {
+      name: outName,
+      sourceName,
+      outName,
+      sourcePath,
+      outPath,
+      sourceExists,
+      outExists,
+      equal,
+    };
+  });
+  return {
+    sourceDir,
+    outAdapterDir,
+    files,
+    matches: files.every((item) =>
+      item.sourceExists && item.outExists && item.equal),
+  };
+}
+
+export function syncItem9BrowserAdaptersToOut(srcRoot, outDir) {
+  assertItem9BrowserAdapterPacklistParity();
+  const sourceDir = item9BrowserAdapterSourceDir(srcRoot);
+  const outAdapterDir = item9BrowserAdapterOutDir(outDir);
+  const missingSource = ITEM9_BROWSER_ADAPTER_SOURCE_FILES.filter(
+    (name) => !fileExists(path.join(sourceDir, name)),
+  );
+  if (missingSource.length) {
+    throw new Error(
+      `Item 9 browser adapter source missing: ${missingSource.join(", ")}`,
+    );
+  }
+  ensureDir(outAdapterDir);
+  for (let index = 0;
+    index < ITEM9_BROWSER_ADAPTER_SOURCE_FILES.length;
+    index += 1) {
+    fs.copyFileSync(
+      path.join(sourceDir, ITEM9_BROWSER_ADAPTER_SOURCE_FILES[index]),
+      path.join(outAdapterDir, ITEM9_BROWSER_ADAPTER_OUT_FILES[index]),
+    );
+  }
+  return {
+    sourceDir,
+    outAdapterDir,
+    files: ITEM9_BROWSER_ADAPTER_OUT_FILES.slice(),
+  };
+}
+
+export function p02CoreSourceDir(srcRoot) {
+  return path.join(String(srcRoot || ""), P02_CORE_SOURCE_REL);
+}
+
+export function p02CoreOutDir(outDir) {
+  return path.join(String(outDir || ""), P02_CORE_OUT_REL);
+}
+
+export function p02ChromeAdapterSourceDir(srcRoot) {
+  return path.join(String(srcRoot || ""), P02_CHROME_ADAPTER_SOURCE_REL);
+}
+
+export function p02ChromeAdapterOutDir(outDir) {
+  return path.join(String(outDir || ""), P02_CHROME_ADAPTER_OUT_REL);
+}
+
+export function syncP02ChromeAdaptersToOut(srcRoot, outDir) {
+  const sourceDir = p02ChromeAdapterSourceDir(srcRoot);
+  const outAdapterDir = p02ChromeAdapterOutDir(outDir);
+  const missingSource = P02_CHROME_ADAPTER_SOURCE_FILES.filter(
+    (name) => !fileExists(path.join(sourceDir, name)),
+  );
+  if (missingSource.length) {
+    throw new Error(
+      `P02 chrome adapter source missing: ${missingSource.join(", ")}`,
+    );
+  }
+  ensureDir(outAdapterDir);
+  for (const name of P02_CHROME_ADAPTER_SOURCE_FILES) {
+    fs.copyFileSync(path.join(sourceDir, name), path.join(outAdapterDir, name));
+  }
+  return { sourceDir, outAdapterDir, files: P02_CHROME_ADAPTER_SOURCE_FILES.slice() };
+}
+
+export function syncP02CoreModulesToOut(srcRoot, outDir) {
+  const sourceDir = p02CoreSourceDir(srcRoot);
+  const outCoreDir = p02CoreOutDir(outDir);
+  const missingSource = P02_CORE_SOURCE_FILES.filter(
+    (name) => !fileExists(path.join(sourceDir, name)),
+  );
+  if (missingSource.length) {
+    throw new Error(
+      `P02 core module source missing: ${missingSource.join(", ")}`,
+    );
+  }
+  ensureDir(outCoreDir);
+  for (const name of P02_CORE_SOURCE_FILES) {
+    fs.copyFileSync(path.join(sourceDir, name), path.join(outCoreDir, name));
+  }
+  return { sourceDir, outCoreDir, files: P02_CORE_SOURCE_FILES.slice() };
+}
+
+export function compareP02CoreModulesToSource(srcRoot, outDir) {
+  const sourceDir = p02CoreSourceDir(srcRoot);
+  const outCoreDir = p02CoreOutDir(outDir);
+  const files = P02_CORE_SOURCE_FILES.map((name) => {
+    const sourcePath = path.join(sourceDir, name);
+    const outPath = path.join(outCoreDir, name);
+    const sourceExists = fileExists(sourcePath);
+    const outExists = fileExists(outPath);
+    return {
+      name,
+      sourceExists,
+      outExists,
+      equal: sourceExists && outExists &&
+        fs.readFileSync(sourcePath).equals(fs.readFileSync(outPath)),
+    };
+  });
+  return {
+    files,
+    matches: files.every((item) => item.sourceExists && item.outExists && item.equal),
+  };
+}
+
+export function compareLocalPublicationModulesToSource(srcRoot, outDir) {
+  const files = LOCAL_PUBLICATION_MODULE_MAPPINGS.map(({ sourceRel, outRel }) => {
+    const sourcePath = path.join(String(srcRoot || ""), sourceRel);
+    const outPath = path.join(String(outDir || ""), outRel);
+    const sourceExists = fileExists(sourcePath);
+    const outExists = fileExists(outPath);
+    return {
+      sourceRel,
+      outRel,
+      sourcePath,
+      outPath,
+      sourceExists,
+      outExists,
+      equal: sourceExists && outExists
+        ? fs.readFileSync(sourcePath).equals(fs.readFileSync(outPath))
+        : false,
+    };
+  });
+  return {
+    files,
+    matches: files.every((item) => item.sourceExists && item.outExists && item.equal),
+  };
+}
+
+export function syncLocalPublicationModulesToOut(srcRoot, outDir) {
+  for (const { sourceRel, outRel } of LOCAL_PUBLICATION_MODULE_MAPPINGS) {
+    const sourcePath = path.join(String(srcRoot || ""), sourceRel);
+    if (!fileExists(sourcePath)) {
+      throw new Error(`local publication module source missing: ${sourceRel}`);
+    }
+    const outPath = path.join(String(outDir || ""), outRel);
+    ensureDir(path.dirname(outPath));
+    fs.copyFileSync(sourcePath, outPath);
+  }
+  return { files: LOCAL_PUBLICATION_MODULE_MAPPINGS.map(({ outRel }) => outRel) };
+}
+
 export function getArchiveWorkbenchPresence(outDir) {
   assertArchiveWorkbenchPacklistParity();
   const dir = archiveWorkbenchOutDir(outDir);
   return ARCHIVE_WORKBENCH_OUT_FILES.filter((name) => fileExists(path.join(dir, name)));
 }
 
-export function compareArchiveWorkbenchToSource(srcRoot, outDir) {
+const H2O_BUILD_STAMP_PANEL_SOURCE = path.join("settings", "local-folder-sync.panel.js");
+const H2O_BUILD_STAMP_SENTINEL = "__H2O_RUNTIME_BUILD_STAMP_FROM_CANONICAL_BUILD__";
+const H2O_BUILD_STAMP_VALUE = /^h2o-runtime-v1:[0-9a-f]{40}$/;
+
+function injectH2OBuildStamp(sourceName, sourceText, h2oBuildStamp) {
+  if (sourceName !== H2O_BUILD_STAMP_PANEL_SOURCE || h2oBuildStamp == null) return sourceText;
+  const stamp = String(h2oBuildStamp).trim();
+  if (!H2O_BUILD_STAMP_VALUE.test(stamp)) {
+    throw new Error(`invalid H2O_BUILD_STAMP for Studio pack: ${JSON.stringify(stamp)}`);
+  }
+  const occurrences = sourceText.split(H2O_BUILD_STAMP_SENTINEL).length - 1;
+  if (occurrences !== 1) {
+    throw new Error(`Studio H2O_BUILD_STAMP sentinel count=${occurrences}; expected 1`);
+  }
+  return sourceText.replace(H2O_BUILD_STAMP_SENTINEL, stamp);
+}
+
+export function compareArchiveWorkbenchToSource(srcRoot, outDir, { h2oBuildStamp = null } = {}) {
   assertArchiveWorkbenchPacklistParity();
   const sourceDir = archiveWorkbenchSourceDir(srcRoot);
   const outWorkbenchDir = archiveWorkbenchOutDir(outDir);
@@ -1859,7 +2239,17 @@ export function compareArchiveWorkbenchToSource(srcRoot, outDir) {
     const outPath = path.join(outWorkbenchDir, outName);
     const sourceExists = fileExists(sourcePath);
     const outExists = fileExists(outPath);
-    const equal = sourceExists && outExists ? readText(sourcePath) === readText(outPath) : false;
+    const outputText = outExists ? readText(outPath) : "";
+    let comparisonStamp = h2oBuildStamp;
+    if (comparisonStamp == null && sourceName === H2O_BUILD_STAMP_PANEL_SOURCE) {
+      comparisonStamp = outputText.match(
+        /const H2O_BUILD_STAMP = "(h2o-runtime-v1:[0-9a-f]{40})";/,
+      )?.[1] ?? null;
+    }
+    const expectedText = sourceExists
+      ? injectH2OBuildStamp(sourceName, readText(sourcePath), comparisonStamp)
+      : "";
+    const equal = sourceExists && outExists ? expectedText === outputText : false;
     return {
       name: outName,
       sourceName,
@@ -1880,7 +2270,7 @@ export function compareArchiveWorkbenchToSource(srcRoot, outDir) {
   };
 }
 
-export function syncArchiveWorkbenchToOut(srcRoot, outDir) {
+export function syncArchiveWorkbenchToOut(srcRoot, outDir, { h2oBuildStamp = null } = {}) {
   assertArchiveWorkbenchPacklistParity();
   const sourceDir = archiveWorkbenchSourceDir(srcRoot);
   const outWorkbenchDir = archiveWorkbenchOutDir(outDir);
@@ -1898,13 +2288,29 @@ export function syncArchiveWorkbenchToOut(srcRoot, outDir) {
     // for the Studio platform adapter). Ensure each parent dir exists before
     // copy so nested files don't fail with ENOENT.
     ensureDir(path.dirname(outPath));
-    fs.copyFileSync(path.join(sourceDir, sourceName), outPath);
+    const sourcePath = path.join(sourceDir, sourceName);
+    if (sourceName === H2O_BUILD_STAMP_PANEL_SOURCE && h2oBuildStamp != null) {
+      fs.writeFileSync(outPath,
+        injectH2OBuildStamp(sourceName, readText(sourcePath), h2oBuildStamp), "utf8");
+    } else {
+      fs.copyFileSync(sourcePath, outPath);
+    }
   }
+  const item9BrowserAdapters = syncItem9BrowserAdaptersToOut(srcRoot, outDir);
+  // P02 Wave 1 / Z7: packed alongside so the adapters' "../../core/"
+  // imports resolve in the packed tree exactly as they do in source.
+  const p02CoreModules = syncP02CoreModulesToOut(srcRoot, outDir);
+  const p02ChromeAdapters = syncP02ChromeAdaptersToOut(srcRoot, outDir);
+  const localPublicationModules = syncLocalPublicationModulesToOut(srcRoot, outDir);
 
   return {
     sourceDir,
     outWorkbenchDir,
     files: ARCHIVE_WORKBENCH_OUT_FILES.slice(),
+    item9BrowserAdapters,
+    p02CoreModules,
+    p02ChromeAdapters,
+    localPublicationModules,
   };
 }
 
@@ -1915,10 +2321,33 @@ export function removeArchiveWorkbenchFromOut(outDir) {
   for (const name of ARCHIVE_WORKBENCH_OUT_FILES) {
     if (removeFileIfPresent(path.join(outWorkbenchDir, name))) removed.push(name);
   }
+  const item9AdapterDir = item9BrowserAdapterOutDir(outDir);
+  const removedItem9BrowserAdapters = [];
+  for (const name of ITEM9_BROWSER_ADAPTER_OUT_FILES) {
+    if (removeFileIfPresent(path.join(item9AdapterDir, name))) {
+      removedItem9BrowserAdapters.push(name);
+    }
+  }
+  tryRemoveEmptyDir(item9AdapterDir);
+  const removedLocalPublicationModules = [];
+  for (const { outRel } of LOCAL_PUBLICATION_MODULE_MAPPINGS) {
+    if (removeFileIfPresent(path.join(String(outDir || ""), outRel))) {
+      removedLocalPublicationModules.push(outRel);
+    }
+  }
+  const localPublicationRoot = path.join(
+    String(outDir || ""), "surfaces", "studio", "sync", "local-publication-adapters",
+  );
+  tryRemoveEmptyDir(path.join(localPublicationRoot, "browser-adapters", "chrome"));
+  tryRemoveEmptyDir(path.join(localPublicationRoot, "browser-adapters"));
+  tryRemoveEmptyDir(path.join(localPublicationRoot, "core"));
+  tryRemoveEmptyDir(localPublicationRoot);
   tryRemoveEmptyDir(outWorkbenchDir);
   tryRemoveEmptyDir(path.dirname(outWorkbenchDir));
   return {
     outWorkbenchDir,
     removed,
+    removedItem9BrowserAdapters,
+    removedLocalPublicationModules,
   };
 }

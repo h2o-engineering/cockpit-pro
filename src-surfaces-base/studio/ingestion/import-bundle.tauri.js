@@ -657,9 +657,20 @@
     var out = {};
     var keep = ['createTime', 'userCreateTime', 'assistantCreateTime',
                 'userMessageId', 'assistantMessageId', 'messageTimes'];
+    /* The genuine P02 payload nests per-turn metadata under richTurns[i].meta,
+     * and that nested object is exactly what the reverse runtime's convergence
+     * proof compares against (payloadTurns reads matched.meta). Reading only
+     * the flat rt.<key> form persisted meta_json '{}' for such payloads, so a
+     * correct import could never converge. Older bundles carry the same keys
+     * flat on the turn, so the nested form is preferred and the flat one
+     * remains the fallback. The keep-list is unchanged: no unrelated key can
+     * enter from either representation. */
+    var nested = (rt && typeof rt.meta === 'object' && rt.meta !== null &&
+      !Array.isArray(rt.meta)) ? rt.meta : null;
     for (var i = 0; i < keep.length; i += 1) {
       var k = keep[i];
-      if (rt[k] !== undefined) out[k] = rt[k];
+      if (nested && nested[k] !== undefined) out[k] = nested[k];
+      else if (rt[k] !== undefined) out[k] = rt[k];
     }
     return out;
   }
@@ -681,10 +692,43 @@
     return count;
   }
 
+  function canonicalTurnMetaJson(value) {
+    var meta = (value && typeof value === 'object' && !Array.isArray(value)) ? value : {};
+    var keys = Object.keys(meta).sort();
+    var ordered = {};
+    for (var i = 0; i < keys.length; i += 1) ordered[keys[i]] = meta[keys[i]];
+    try { return JSON.stringify(ordered); } catch (_) { return ''; }
+  }
+
+  /* Metadata drift on an otherwise complete snapshot. A canonical content-only
+   * apply that was interrupted after its import can have written every turn
+   * with the right text and markup but the wrong metadata - which is exactly
+   * what reading only the flat rt.<key> form produced. The turn COUNT then
+   * matches, so the count test alone reports nothing to repair and a replay
+   * silently leaves the stale metadata in place, which no later convergence
+   * can accept. The payload is authoritative for this content, so a declared
+   * per-turn metadata that is not what is persisted is a repair. */
+  function existingTurnMetaDiffers(existing, incomingTurns) {
+    var turns = Array.isArray(existing && existing.turns) ? existing.turns : [];
+    if (turns.length !== incomingTurns.length) return false;
+    var byIndex = {};
+    for (var i = 0; i < turns.length; i += 1) {
+      byIndex[String(turns[i] && turns[i].turnIdx)] = turns[i];
+    }
+    for (var j = 0; j < incomingTurns.length; j += 1) {
+      var incoming = incomingTurns[j] || {};
+      var persisted = byIndex[String(incoming.turnIdx)];
+      if (!persisted) return false;
+      if (canonicalTurnMetaJson(persisted.meta) !== canonicalTurnMetaJson(incoming.meta)) return true;
+    }
+    return false;
+  }
+
   function shouldRepairExistingSnapshotPayload(existing, incomingTurns) {
     var incomingCount = Array.isArray(incomingTurns) ? incomingTurns.length : 0;
     if (incomingCount <= 0) return false;
-    return snapshotCombinedPayloadTurnCount(existing) < incomingCount;
+    if (snapshotCombinedPayloadTurnCount(existing) < incomingCount) return true;
+    return existingTurnMetaDiffers(existing, incomingTurns);
   }
 
   /* Derive the chats-table patch from a bundle chat + its (sorted-desc)
