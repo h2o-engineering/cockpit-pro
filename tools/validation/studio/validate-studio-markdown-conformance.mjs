@@ -303,5 +303,71 @@ check('validateLink is set open and documented as load-bearing', () => {
   assert.equal(href[1], 'javascript:alert(1)', 'destination must reach the IR unfiltered');
 });
 
+
+/* ------------------------------------------------------------------ *
+ * Mobile: the ACTUAL bridge drives the same shared semantic path (T4).
+ *
+ * apps/studio/mobile/src/renderer/semantic-markdown.ts is loaded from source
+ * (Node strips its type annotations; it contains no other TypeScript syntax)
+ * with a require() that resolves exactly what Metro resolves: the shared
+ * Renderer sources in place and the pinned markdown-it. Every corpus case must
+ * project identically. This is what keeps Mobile from silently growing a
+ * second authoritative parser again.
+ * ------------------------------------------------------------------ */
+const MOBILE_BRIDGE_REL = 'apps/studio/mobile/src/renderer/semantic-markdown.ts';
+
+async function loadMobileBridge() {
+  const { stripTypeScriptTypes, createRequire } = await import('node:module');
+  const bridgePath = path.join(REPO_ROOT, MOBILE_BRIDGE_REL);
+  const source = fs.readFileSync(bridgePath, 'utf8');
+  /* The bridge is authored as an ES module (Metro/Babel handle the interop with
+   * the CommonJS shared sources). A vm Script cannot take `export`, so the
+   * export keyword is dropped and the public function re-exported explicitly. */
+  let exportsSeen = 0;
+  const js = stripTypeScriptTypes(source, { mode: 'strip' })
+    .replace(/^export\s+(function|const|let)\s/mg, () => { exportsSeen += 1; return '$1 '.replace('$1', RegExp.$1); })
+    + '\nmodule.exports.parseMarkdownToRenderBlocks = parseMarkdownToRenderBlocks;\n';
+  if (exportsSeen === 0) throw new Error('bridge exposes no exported function');
+  const localRequire = createRequire(bridgePath);
+  const sandbox = vm.createContext({ console, atob, btoa, require: localRequire, module: { exports: {} }, exports: {} });
+  sandbox.globalThis = sandbox;
+  sandbox.module.exports = sandbox.exports;
+  vm.runInContext(js, sandbox, { filename: MOBILE_BRIDGE_REL });
+  return { api: sandbox.module.exports, source };
+}
+
+const mobile = await (async () => {
+  try { return await loadMobileBridge(); }
+  catch (e) { return { unavailable: e.code || e.message }; }
+})();
+
+check('the actual Mobile bridge consumes the shared sources, not a copy or a parser of its own', () => {
+  assert.ok(!mobile.unavailable, `Mobile bridge could not load: ${mobile.unavailable}`);
+  const src = mobile.source;
+  assert.match(src, /require\('\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/src-surfaces-base\/studio\/renderer\/markdown\/markdown-engine\.v1\.js'\)/,
+    'bridge must require the shared engine source in place');
+  assert.match(src, /require\('\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/src-surfaces-base\/studio\/renderer\/markdown\/markdown-ir-adapter\.v1\.js'\)/,
+    'bridge must require the shared adapter source in place');
+  assert.match(src, /formalBaseEngine\(\)/, 'Mobile must use formal-base semantics');
+  assert.doesNotMatch(src, /providerProfileEngine|chatgpt-web-dated/, 'no dated provider profile may be the Mobile default');
+  assert.doesNotMatch(src, /markdownit\s*\(|new\s+MarkdownIt|require\(['"]markdown-it['"]\)/, 'the bridge must not construct its own engine');
+  assert.equal(typeof mobile.api.parseMarkdownToRenderBlocks, 'function');
+});
+
+check('the actual Mobile bridge projects every corpus case identically (cross-surface parity)', () => {
+  assert.ok(!mobile.unavailable, `Mobile bridge could not load: ${mobile.unavailable}`);
+  const diffs = [];
+  for (const c of corpus.cases) {
+    const result = mobile.api.parseMarkdownToRenderBlocks(c.source);
+    if (result.fallback !== false) { diffs.push(`${c.id} (fallback)`); continue; }
+    try { assert.deepEqual(projectBlocks(result.blocks), normaliseExpected(c.expect.blocks)); }
+    catch { diffs.push(c.id); }
+  }
+  assert.deepEqual(diffs, [], `Mobile bridge diverged on: ${diffs.join(', ')}`);
+  /* Non-vacuity: a broken engine must surface as fallback, not as silent blocks. */
+  const broken = mobile.api.parseMarkdownToRenderBlocks(undefined);
+  assert.equal(typeof broken.fallback, 'boolean');
+});
+
 console.log(failures.length ? `FAIL ${failures.length} (passed ${checks.length})` : `PASS ${checks.length}`);
 process.exit(failures.length ? 1 : 0);

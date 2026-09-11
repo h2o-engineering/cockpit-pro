@@ -1,10 +1,9 @@
 #!/usr/bin/env node
-// M03 P2 S2A T4 S0/S1 — legacy Markdown parser freeze + engine containment.
+// M03 P2 S2A T4 — bespoke Markdown parser retirement + engine containment.
 //
-// T4 has started, so neither bespoke Markdown implementation may gain new
-// behaviour during the bounded dual-path window. This pins a digest PER PARSER
-// FUNCTION rather than a whole-file SHA, so unrelated edits elsewhere in those
-// files stay possible while a semantic edit to the parsers is detected.
+// Both bespoke Markdown implementations are now RETIRED: Web in T5, Mobile in
+// the T4 Mobile cutover. What remains to guard is that neither returns and that
+// both surfaces consume the one shared semantic path.
 //
 // It also checks the shape of the engine-agnostic conformance corpus, so the
 // corpus cannot silently rot or acquire engine-specific token forms.
@@ -24,14 +23,17 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(__filename), '..', '..', '..');
 const WEB_REL = 'src-surfaces-base/studio/renderer/chat-renderer.studio.js';
-const MOBILE_REL = 'apps/studio/mobile/src/renderer/parse.ts';
+const MOBILE_PARSE_REL = 'apps/studio/mobile/src/renderer/parse.ts';
+const MOBILE_RENDERER_REL = 'apps/studio/mobile/src/renderer/ChatMarkdownRenderer.tsx';
+const MOBILE_INDEX_REL = 'apps/studio/mobile/src/renderer/index.ts';
+const MOBILE_BRIDGE_REL = 'apps/studio/mobile/src/renderer/semantic-markdown.ts';
+const MOBILE_PACKAGE_REL = 'apps/studio/mobile/package.json';
 const CORPUS_REL = 'tools/validation/fixtures/studio-renderer-markdown/markdown-conformance.v1.json';
 const CONTRACT_REL = 'src-surfaces-base/studio/renderer/markdown/README.md';
 
 /* T5 retired the Web bespoke parser: the canonical Markdown body now renders
  * through the markdown engine, the Render IR contract and the typed
- * ContentRenderer. These names must therefore be ABSENT, not merely frozen.
- * The Mobile parser below stays frozen - its cutover is separate work. */
+ * ContentRenderer. These names must therefore be ABSENT, not merely frozen. */
 const WEB_RETIRED = Object.freeze([
   'renderInlineMarkdown',
   'countMarkdownIndent',
@@ -43,10 +45,6 @@ const WEB_RETIRED = Object.freeze([
   'renderMarkdownTable',
   'renderTextAsChatGPTBlocks',
 ]);
-
-const MOBILE_FROZEN = Object.freeze({
-  parseMarkdown: 'fa891b8cd15c1766cbbd736967c32311c8ed461d4c9152e14ce6865874b2b6e5',
-});
 
 const CATEGORIES = Object.freeze(['FORMAL_COMMONMARK', 'FORMAL_GFM', 'H2O_POLICY', 'CURRENT_BEHAVIOR_MIGRATION']);
 
@@ -70,7 +68,6 @@ function extractFunction(source, name, prefix = 'function') {
 }
 
 const webSource = repo(WEB_REL);
-const mobileSource = repo(MOBILE_REL);
 const corpus = JSON.parse(repo(CORPUS_REL));
 const contract = repo(CONTRACT_REL);
 
@@ -107,19 +104,47 @@ check('the retirement check is non-vacuous', () => {
   assert.doesNotMatch('// markdown rendering notes', /\bfunction\s+renderInlineMarkdown\s*\(/);
 });
 
-check('Mobile bespoke Markdown parser is unchanged during the T4 freeze', () => {
-  for (const [name, expected] of Object.entries(MOBILE_FROZEN)) {
-    const actual = sha256(extractFunction(mobileSource, name, 'export function'));
-    assert.equal(actual, expected, `${name} changed during the T4 freeze window`);
+check('the Mobile bespoke Markdown parser is retired, not merely frozen', () => {
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, MOBILE_PARSE_REL)), false,
+    `${MOBILE_PARSE_REL} must be deleted, not left frozen-but-unused`);
+  const renderer = repo(MOBILE_RENDERER_REL);
+  assert.doesNotMatch(renderer, /from\s+['"]\.\/parse['"]/, 'ChatMarkdownRenderer must not import ./parse');
+  assert.doesNotMatch(renderer, /\bparseMarkdown\b(?!ToRenderBlocks)/, 'ChatMarkdownRenderer must not call the retired parser');
+  assert.doesNotMatch(renderer, /\bBlockToken\b|\bInlineToken\b/, 'the legacy token vocabulary must be gone');
+  const index = repo(MOBILE_INDEX_REL);
+  assert.doesNotMatch(index, /from\s+['"]\.\/parse['"]/, 'the Mobile index must not re-export ./parse');
+  assert.doesNotMatch(index, /\bparseMarkdown\b(?!ToRenderBlocks)|\bBlockToken\b|\bInlineToken\b/,
+    'the Mobile index must not export the retired parser or its token types');
+});
+
+check('Mobile consumes the shared engine and adapter through one thin bridge', () => {
+  const bridge = repo(MOBILE_BRIDGE_REL);
+  assert.match(bridge, /src-surfaces-base\/studio\/renderer\/markdown\/markdown-engine\.v1\.js/, 'bridge must reference the shared engine source');
+  assert.match(bridge, /src-surfaces-base\/studio\/renderer\/markdown\/markdown-ir-adapter\.v1\.js/, 'bridge must reference the shared adapter source');
+  assert.match(bridge, /formalBaseEngine\(\)/, 'Mobile must default to formal-base semantics');
+  assert.match(repo(MOBILE_RENDERER_REL), /from\s+['"]\.\/semantic-markdown['"]/, 'the Mobile renderer must consume the bridge');
+  /* No copy of the shared sources may live in the Mobile tree. */
+  const mobileRenderer = path.join(REPO_ROOT, 'apps/studio/mobile/src/renderer');
+  assert.deepEqual(fs.readdirSync(mobileRenderer).sort(),
+    ['ChatMarkdownRenderer.tsx', 'index.ts', 'semantic-markdown.ts', 'skin.ts'],
+    'the Mobile renderer directory must hold exactly the presentation files and the bridge');
+});
+
+check('Mobile depends on exactly markdown-it 15.0.1 and no competing engine', () => {
+  const pkg = JSON.parse(repo(MOBILE_PACKAGE_REL));
+  assert.equal(pkg.dependencies['markdown-it'], '15.0.1', 'Mobile must pin markdown-it exactly');
+  for (const field of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
+    for (const engine of ['micromark', 'remark', 'marked', 'commonmark', 'markdown-it-py', 'showdown']) {
+      assert.equal(Object.prototype.hasOwnProperty.call(pkg[field] || {}, engine), false,
+        `${engine} must not be a Mobile dependency - one engine is admitted`);
+    }
   }
 });
 
-check('the Mobile freeze detects a semantic edit rather than passing vacuously', () => {
-  const original = extractFunction(mobileSource, 'parseMarkdown', 'export function');
-  const mutated = `${original} /* edited */`;
-  assert.notEqual(mutated, original, 'control mutation did not apply');
-  assert.notEqual(sha256(mutated), MOBILE_FROZEN.parseMarkdown,
-    'a changed parser body must produce a different digest');
+check('the retirement checks are non-vacuous', () => {
+  assert.match("import { parseMarkdown } from './parse';", /from\s+['"]\.\/parse['"]/, 'detector would miss a re-introduced ./parse import');
+  assert.match('const blocks = parseMarkdown(text);', /\bparseMarkdown\b(?!ToRenderBlocks)/, 'detector would miss a re-introduced parseMarkdown call');
+  assert.doesNotMatch('parseMarkdownToRenderBlocks(text)', /\bparseMarkdown\b(?!ToRenderBlocks)/, 'the bridge function must not trip the detector');
 });
 
 check('conformance corpus declares the frozen T4 target and scope', () => {
@@ -174,9 +199,16 @@ check('the T4 contract records the frozen decisions and the admitted engine', ()
   assert.match(contract, /EXPLICITLY_OUT_OF_SCOPE_FEATURE/);
   assert.doesNotMatch(contract, /vocabularyVersion/,
     'the removed vocabulary-version axis must not reappear in the contract');
-  /* S1: the admitted engine is recorded, and recorded as still unwired. */
+  /* Final T4 state: one admitted engine, wired on both surfaces, both bespoke
+   * parsers retired. The contract must say so and must not still describe the
+   * S1 "unwired" interlude or a pending selection. */
   assert.match(contract, /markdown-it 15\.0\.1/, 'contract must record the admitted engine');
-  assert.match(contract, /unwired/i, 'contract must record that the engine is not yet wired');
+  assert.match(contract, /single CommonMark\/GFM semantic\s+path\s+for every surface/i,
+    'contract must record the single cross-surface semantic path');
+  assert.match(contract, /Both bespoke Markdown parsers are retired/, 'contract must record both parser retirements');
+  assert.match(contract, /Hermes 0\.14\.1/, 'contract must record the measured Mobile runtime atob result');
+  assert.doesNotMatch(contract, /\bunwired\b/i, 'the engine is wired on both surfaces - the contract must not say unwired');
+  assert.doesNotMatch(contract, /UNMEASURED/, 'the Mobile atob result is measured - the contract must not say otherwise');
   assert.doesNotMatch(contract, /pending governed admission/,
     'engine selection is no longer pending - the contract must not still say so');
   /* The engines that were NOT chosen must still not be named as accepted. */
@@ -213,16 +245,22 @@ check('the admitted engine is contained in exactly its authorized locations', ()
   }
 });
 
-check('the Mobile bespoke parser stays free of the Web engine', () => {
-  /* Mobile cutover is separate work: the Web engine must not leak into the
-   * Mobile parser while its freeze still stands. The Stage-A packlists,
-   * studio.html, the publisher and the activator all legitimately NAME these
-   * files - delivery and load admission are exactly what those files do - so
-   * they are deliberately not asserted here. Their real invariant is order
-   * agreement, checked below. */
-  assert.doesNotMatch(mobileSource,
-    /markdown-it|markdown-engine\.v1|markdown-ir-adapter\.v1|h2o-gfm\.v1|content-renderer\.v1/,
-    `${MOBILE_REL} must not reference the Web markdown engine`);
+check('the Mobile presentation layer holds no engine of its own', () => {
+  /* Semantics enter Mobile only through the bridge. The presentation component
+   * must not construct an engine, require the shared sources directly, or
+   * carry a tokenizer. The Stage-A packlists, studio.html, the publisher and
+   * the activator all legitimately NAME the shared files - delivery and load
+   * admission are exactly what those files do - so they are deliberately not
+   * asserted here; their real invariant is order agreement, checked below. */
+  /* Code-only view: the component's own prose legitimately names the shared
+   * pipeline, so comments must not satisfy or trip this assertion. */
+  const rendererCode = repo(MOBILE_RENDERER_REL)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/mg, '');
+  assert.doesNotMatch(rendererCode, /require\(|markdown-it|markdown-engine\.v1|markdown-ir-adapter\.v1|h2o-gfm\.v1/,
+    'the Mobile presentation layer must consume only the bridge');
+  /* Non-vacuity: the same predicate must catch a real code reference. */
+  assert.match("const e = require('../../../../../src-surfaces-base/studio/renderer/markdown/markdown-engine.v1.js');", /require\(/);
 });
 
 check('studio.html, publisher and activator agree on the semantic load order', () => {

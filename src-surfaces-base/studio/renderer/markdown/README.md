@@ -3,9 +3,13 @@
 Canonical contract for M03 P2 S2A T4. This directory holds the Renderer-owned
 Markdown semantics. The contract itself (target, layers, payload conventions,
 IR mapping) stays **engine-independent**, so it remains valid across an engine
-bump or replacement. S1 admits one engine against that contract:
-**markdown-it 15.0.1**, vendored and **unwired** — no delivery carrier, no load
-admission and no production consumer.
+bump or replacement. One engine is admitted against that contract —
+**markdown-it 15.0.1** — and it is the **single CommonMark/GFM semantic path
+for every surface**: Web/Studio loads the vendored browser UMD through the
+Studio carrier and consumes it in the canonical Renderer; Mobile consumes the
+same first-party sources in place through one thin bridge
+(`apps/studio/mobile/src/renderer/semantic-markdown.ts`) over the identically
+pinned npm package. Both bespoke Markdown parsers are retired.
 
 ## Target
 
@@ -77,8 +81,8 @@ defines the classification rule, not a gap-management framework.
 ## Versioning
 
 Render IR keeps `schemaVersion` **1**: T4 adds semantic kinds without changing
-the document shape. The IR is transient and unwired, with no independently
-versioned producer/consumer boundary, so the module version
+the document shape. The IR is transient and has no independently versioned
+producer/consumer boundary, so the module version
 (`0.2.0-m03-p2`) alone carries the additive change. There is no separate
 vocabulary-version axis, and no version field is emitted into produced IR.
 
@@ -125,19 +129,23 @@ S0.
 - **S2B** — the sink that renders IR, where `classifyUrl` is the URL authority.
 - **S2C** — sanitized-HTML / `opaqueProviderBlock` controlled fallback.
 
-## Legacy parser freeze
+## Bespoke parsers — retired
 
-T4 has started, so neither bespoke Markdown implementation may receive new
-behavior during the bounded dual-path window:
+The two hand-written Markdown implementations that predated T4 are gone, not
+frozen:
 
-- Web: the Markdown functions in `renderer/chat-renderer.studio.js`
-- Mobile: `apps/studio/mobile/src/renderer/parse.ts`
+- Web: the Markdown functions formerly in `renderer/chat-renderer.studio.js`
+  were deleted when the canonical body moved to the semantic pipeline (T5);
+- Mobile: `apps/studio/mobile/src/renderer/parse.ts` was deleted when
+  `ChatMarkdownRenderer` moved to the shared bridge (T4 Mobile cutover).
 
-They keep working unchanged until the adapter replaces them. Semantic edits are
-detected by
-`tools/validation/studio/validate-studio-markdown-legacy-freeze.mjs`, which pins
-per-function digests rather than whole-file hashes so unrelated edits elsewhere
-in those files stay possible.
+`tools/validation/studio/validate-studio-markdown-legacy-freeze.mjs` now guards
+the retired state: neither parser may return, the Mobile renderer directory
+holds only presentation files plus the bridge, Mobile depends on exactly
+markdown-it 15.0.1 with no competing engine, and studio.html, the publisher and
+the activator agree on the semantic load order. Cross-surface parity is proven
+by `validate-studio-markdown-conformance.mjs`, which projects the corpus through
+the browser UMD, the Node module path **and the actual Mobile bridge**.
 
 ## Engine
 
@@ -203,17 +211,15 @@ list.
 
 The engine requires a host **`atob`** at load time: the incorporated `entities`
 decoder base64-decodes its packed entity trie during module initialisation.
+This is a property of the incorporated decoder, not of the UMD packaging: both
+the vendored browser UMD and the npm module path throw `atob is not defined`
+without it.
 
-Recorded as a future **Studio classic-script LOAD_ADMISSION prerequisite** — the
-vendored UMD throws `atob is not defined` in a host that does not provide it,
-so Stage B must admit it against a host that does. Browsers do.
-
-Demonstrated separately: the **npm module path** markdown-it resolves for
-Mobile fails the same way without `atob`, so this is a property of the
-incorporated decoder rather than of the UMD packaging, and it is not specific to
-the artifact Studio vendors. Whether the React Native / Hermes runtime supplies
-`atob` is **UNMEASURED** here — no Hermes runtime execution was performed in S1 —
-and remains a Stage-B question.
+Both supported hosts provide it. Browsers do. The Mobile runtime was measured
+directly during the T4 Mobile cutover: inside the running Debug app on the iOS
+simulator — React Native 0.83.6, **Hermes 0.14.1** — `typeof globalThis.atob`
+is `"function"`, `btoa` is present, a round-trip succeeds, and the shared
+engine, GFM closure and adapter execute from the bundle. No shim was added.
 
 ### Notice model
 
