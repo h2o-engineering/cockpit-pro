@@ -1335,6 +1335,9 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   // S3B/T6: PresentationProfile contract + ChatGPT reference profile — LIVE.
   // Presentation class hooks only; loads before the renderers that consume it.
   "renderer/presentation/presentation-profile.v1.js",
+  // S3C/T7: Renderer-owned chatgpt-reference stylesheet, linked by studio.html
+  // after studio.css. Keep parallel to ARCHIVE_WORKBENCH_OUT_FILES below.
+  "renderer/presentation/chatgpt-reference.v1.css",
   "renderer/content/content-renderer.v1.js",
 ]);
 export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
@@ -1729,6 +1732,7 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   "renderer/semantic/render-ir.v1.js",
   "renderer/semantic/semantic-ingress.v1.js",
   "renderer/presentation/presentation-profile.v1.js",
+  "renderer/presentation/chatgpt-reference.v1.css",
   "renderer/content/content-renderer.v1.js",
 ]);
 

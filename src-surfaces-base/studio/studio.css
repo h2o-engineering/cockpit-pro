@@ -2389,22 +2389,9 @@ body[data-layout="wide"] .cgScroll > *{
   margin-bottom:0;
 }
 
-.wbCodeBlock{
-  margin:14px 0;
-  border:1px solid var(--wb-code-border);
-  border-radius:12px;
-  overflow:hidden;
-  background:var(--wb-code-bg);
-}
-
-.wbCodeLang{
-  padding:10px 14px 0;
-  font-size:11px;
-  line-height:1.3;
-  text-transform:uppercase;
-  letter-spacing:.04em;
-  color:var(--wb-dim);
-}
+/* ChatGPT reference-profile code-block presentation (.wbCodeBlock,
+   .wbCodeLang) is owned by the Renderer stylesheet
+   renderer/presentation/chatgpt-reference.v1.css, linked after this file. */
 
 .cgMsgBody pre,
 .wbRichRoot pre{

@@ -20,6 +20,11 @@ const STUDIO = path.join(REPO_ROOT, 'src-surfaces-base/studio');
 const CONTENT_REL = 'renderer/content/content-renderer.v1.js';
 const RENDERER_REL = 'renderer/chat-renderer.studio.js';
 const PROFILE_REL = 'renderer/presentation/presentation-profile.v1.js';
+const PROFILE_CSS_REL = 'renderer/presentation/chatgpt-reference.v1.css';
+const STUDIO_CSS_REL = 'studio.css';
+const STUDIO_HTML_REL = 'studio.html';
+const PACK_STUDIO_ABS = path.join(REPO_ROOT, 'tools/product/studio/pack-studio.mjs');
+const PROFILE_MARKER = 'data-h2o-presentation-profile="chatgpt-reference"';
 
 const STRICT = /^(1|true|yes)$/i.test(String(process.env.H2O_REQUIRE_CONTENT_RENDERER_TIER2 || ''));
 
@@ -252,6 +257,87 @@ check('the content renderer embeds no presentation class map and stays semantics
   }
 });
 
+/* ------------------------------------------- Tier 1: S3C CSS isolation */
+
+function stripCssComments(source) { return source.replace(/\/\*[\s\S]*?\*\//g, ' '); }
+
+/* Parse a small plain stylesheet into [{ selector, declarations: {prop: value} }]. */
+function parseRules(css) {
+  const rules = [];
+  const re = /([^{}]+)\{([^{}]*)\}/g;
+  let m;
+  while ((m = re.exec(stripCssComments(css))) !== null) {
+    const selector = m[1].trim();
+    const declarations = {};
+    for (const part of m[2].split(';')) {
+      const i = part.indexOf(':');
+      if (i === -1) continue;
+      declarations[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+    }
+    rules.push({ selector, declarations });
+  }
+  return rules;
+}
+
+const CODE_BLOCK_DECLARATIONS = {
+  margin: '14px 0', border: '1px solid var(--wb-code-border)', 'border-radius': '12px', overflow: 'hidden', background: 'var(--wb-code-bg)',
+};
+const CODE_LANG_DECLARATIONS = {
+  padding: '10px 14px 0', 'font-size': '11px', 'line-height': '1.3', 'text-transform': 'uppercase', 'letter-spacing': '.04em', color: 'var(--wb-dim)',
+};
+
+check('the Renderer-owned chatgpt-reference stylesheet exists, is profile-scoped and carries the code presentation', () => {
+  assert.equal(fs.existsSync(path.join(STUDIO, PROFILE_CSS_REL)), true, 'A: chatgpt-reference.v1.css must exist');
+  const css = read(PROFILE_CSS_REL);
+  assert.match(css, /Owner:\s+L-STUDIO-RENDERER/, 'B: Renderer-owned');
+  assert.match(css, /Profile:\s+chatgpt-reference/, 'B: names the reference profile');
+  const rules = parseRules(css);
+  assert.ok(rules.length >= 2, 'stylesheet carries rules');
+  for (const rule of rules) {
+    assert.ok(rule.selector.startsWith(`:where([${PROFILE_MARKER}]) `), `B: every rule is scoped to the profile marker with zero-specificity :where(): ${rule.selector}`);
+  }
+  assert.doesNotMatch(stripCssComments(css), /!important/, 'no !important escalation');
+  const byClass = (cls) => rules.filter((r) => r.selector === `:where([${PROFILE_MARKER}]) .${cls}`);
+  assert.equal(byClass('wbCodeBlock').length, 1, 'C: exactly one wbCodeBlock rule');
+  assert.deepEqual(byClass('wbCodeBlock')[0].declarations, CODE_BLOCK_DECLARATIONS, 'C: the effective wbCodeBlock declarations moved verbatim');
+  assert.equal(byClass('wbCodeLang').length, 1, 'D: exactly one wbCodeLang rule');
+  assert.deepEqual(byClass('wbCodeLang')[0].declarations, CODE_LANG_DECLARATIONS, 'D: the effective wbCodeLang declarations moved verbatim');
+  /* H: the selectors are exactly the profile's code hooks. */
+  const sandbox = vm.createContext({ console }); sandbox.globalThis = sandbox;
+  vm.runInContext(read(PROFILE_REL), sandbox, { filename: 'presentation-profile.v1.js' });
+  const profile = sandbox.H2O.Studio.Renderer.presentationProfile.reference();
+  assert.deepEqual([...profile.codeBlockClasses()], ['wbCodeBlock']);
+  assert.deepEqual([...profile.codeLanguageClasses()], ['wbCodeLang']);
+  for (const cls of [...profile.codeBlockClasses(), ...profile.codeLanguageClasses()]) {
+    assert.equal(byClass(cls).length, 1, `H: profile hook ${cls} is skinned by the Renderer stylesheet`);
+  }
+});
+
+check('global studio.css no longer declares the migrated code selectors', () => {
+  const css = stripCssComments(read(STUDIO_CSS_REL));
+  assert.doesNotMatch(css, /\.wbCodeBlock\b/, 'E: .wbCodeBlock must not be declared in studio.css');
+  assert.doesNotMatch(css, /\.wbCodeLang\b/, 'E: .wbCodeLang must not be declared in studio.css');
+  /* The generic pre/code rules stay global in this slice. */
+  assert.match(css, /\.cgMsgBody pre,\s*\.wbRichRoot pre\{/, 'generic pre rules remain in studio.css');
+});
+
+/* Imported at top level: check() is synchronous, so a promise handed to it
+ * would pass vacuously. */
+const packer = await import(pathToFileURL(PACK_STUDIO_ABS).href);
+
+check('studio.html links the profile stylesheet exactly once, after studio.css, and pack-studio carries it with parity', () => {
+  const html = read(STUDIO_HTML_REL);
+  const links = [...html.matchAll(/<link\s+rel="stylesheet"\s+href="\.\/([^"?]+)(?:\?[^"]*)?"\s*\/?>/g)].map((m) => m[1]);
+  assert.equal(links.filter((l) => l === PROFILE_CSS_REL).length, 1, 'F: profile stylesheet linked exactly once');
+  assert.equal(links.filter((l) => l === STUDIO_CSS_REL).length, 1, 'studio.css linked exactly once');
+  assert.ok(links.indexOf(STUDIO_CSS_REL) < links.indexOf(PROFILE_CSS_REL), 'F: profile stylesheet loads after studio.css');
+  for (const [name, list] of [['ARCHIVE_WORKBENCH_SOURCE_FILES', packer.ARCHIVE_WORKBENCH_SOURCE_FILES], ['ARCHIVE_WORKBENCH_OUT_FILES', packer.ARCHIVE_WORKBENCH_OUT_FILES]]) {
+    assert.equal(list.filter((f) => f === PROFILE_CSS_REL).length, 1, `G: ${name} carries the stylesheet exactly once`);
+  }
+  assert.equal(packer.ARCHIVE_WORKBENCH_SOURCE_FILES.indexOf(PROFILE_CSS_REL) - packer.ARCHIVE_WORKBENCH_SOURCE_FILES.indexOf(PROFILE_REL),
+    packer.ARCHIVE_WORKBENCH_OUT_FILES.indexOf(PROFILE_CSS_REL) - packer.ARCHIVE_WORKBENCH_OUT_FILES.indexOf(PROFILE_REL), 'G: source/output parity around the presentation entries');
+});
+
 /* ------------------------------------------------------------ Tier 2 */
 
 async function resolvePlaywright() {
@@ -274,7 +360,7 @@ if (!chromium) {
   console.log('SKIP is not PASS: the rendered DOM was not inspected.');
   if (STRICT) { console.error('FAIL H2O_REQUIRE_CONTENT_RENDERER_TIER2 is set'); process.exit(1); }
 } else {
-  const MIME = { '.js': 'text/javascript', '.html': 'text/html' };
+  const MIME = { '.js': 'text/javascript', '.html': 'text/html', '.css': 'text/css' };
   const server = http.createServer((req, res) => {
     const rel = decodeURIComponent(req.url.split('?')[0]).replace(/^\/+/, '');
     if (rel === '__harness__') {
@@ -297,8 +383,12 @@ if (!chromium) {
         CONTENT_REL,
         RENDERER_REL,
       ].map((r) => `<script src="./${r}"></script>`).join('\n');
+      /* S3C: production stylesheets in production order; the host carries the
+       * conversation-root profile marker the Renderer stylesheet is scoped to,
+       * and a second host without it proves the scope. */
+      const links = `<link rel="stylesheet" href="./${STUDIO_CSS_REL}"><link rel="stylesheet" href="./${PROFILE_CSS_REL}">`;
       res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end(`<!doctype html><meta charset="utf-8"><title>t5</title>\n${tags}\n<div id="host"></div>`);
+      res.end(`<!doctype html><meta charset="utf-8"><title>t5</title>${links}\n${tags}\n<div id="host" ${PROFILE_MARKER}></div><div id="unscoped"></div>`);
       return;
     }
     const file = path.join(STUDIO, rel);
@@ -374,6 +464,9 @@ if (!chromium) {
       codeBlock: q('div.wbCodeBlock pre code').map((n) => n.textContent),
       codeLang: q('div.wbCodeLang').map((n) => n.textContent),
       codeWrappers: q('div.wbCodeBlock').map((n) => ({ cls: n.className, badge: n.querySelector(':scope > .wbCodeLang')?.textContent ?? null, firstChild: n.firstElementChild.tagName.toLowerCase(), lastChild: n.lastElementChild.tagName.toLowerCase() })),
+      codeStyle: q('div.wbCodeBlock').map((n) => { const cs = getComputedStyle(n); const root = getComputedStyle(document.documentElement); return { margin: cs.margin, borderRadius: cs.borderRadius, overflow: cs.overflow, borderTopWidth: cs.borderTopWidth, borderTopStyle: cs.borderTopStyle, background: cs.backgroundColor, tokenBg: root.getPropertyValue('--wb-code-bg').trim() }; }),
+      langStyle: q('div.wbCodeLang').map((n) => { const cs = getComputedStyle(n); return { padding: cs.padding, fontSize: cs.fontSize, textTransform: cs.textTransform, letterSpacing: cs.letterSpacing }; }),
+      unscoped: (() => { const u = document.getElementById('unscoped'); u.replaceChildren(); const w = document.createElement('div'); w.className = 'wbCodeBlock'; const b = document.createElement('div'); b.className = 'wbCodeLang'; w.appendChild(b); u.appendChild(w); const cs = getComputedStyle(w); const bs = getComputedStyle(b); const out = { borderRadius: cs.borderRadius, overflow: cs.overflow, textTransform: bs.textTransform, fontSize: bs.fontSize }; u.replaceChildren(); return out; })(),
       th: q('th').map((n) => ({ text: n.textContent, align: n.style.textAlign, scope: n.getAttribute('scope') })),
       td: q('td').map((n) => ({ text: n.textContent, align: n.style.textAlign })),
       images: q('img').map((n) => ({ src: n.getAttribute('src'), alt: n.getAttribute('alt') })),
@@ -400,6 +493,22 @@ if (!chromium) {
       { cls: 'wbCodeBlock', badge: 'js', firstChild: 'div', lastChild: 'pre' },
       { cls: 'wbCodeBlock', badge: null, firstChild: 'pre', lastChild: 'pre' },
     ]);
+  });
+
+  check('the relocated code presentation applies through the profile-marked root and only there (S3C)', () => {
+    /* J: the Renderer stylesheet skins the ContentRenderer output exactly as
+     * the former global rules did, with theme tokens still supplied globally. */
+    for (const style of dom.codeStyle) {
+      assert.equal(style.margin, '14px 0px'); assert.equal(style.borderRadius, '12px'); assert.equal(style.overflow, 'hidden');
+      assert.equal(style.borderTopWidth, '1px'); assert.equal(style.borderTopStyle, 'solid');
+      assert.notEqual(style.background, 'rgba(0, 0, 0, 0)', 'code background comes from the shared --wb-code-bg token');
+      assert.ok(style.tokenBg.length > 0, 'the shared token is still defined by studio.css');
+    }
+    assert.equal(dom.codeStyle.length, 2);
+    assert.deepEqual(dom.langStyle, [{ padding: '10px 14px 0px', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.44px' }]);
+    /* Scope proof: outside a chatgpt-reference root the hooks carry no skin. */
+    assert.deepEqual(dom.unscoped, { borderRadius: '0px', overflow: 'visible', textTransform: 'none', fontSize: '16px' },
+      'the profile stylesheet must not skin code hooks outside a profile-marked conversation root');
     assert.equal(dom.ul, 1);
     assert.equal(dom.ol, 1);
     assert.deepEqual(dom.olStart, ['3'], 'an explicit ordered start must reach the DOM');
