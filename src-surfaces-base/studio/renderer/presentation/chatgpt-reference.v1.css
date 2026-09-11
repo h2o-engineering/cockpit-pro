@@ -1,5 +1,5 @@
 /*
- * @version 1.0.2
+ * @version 1.0.3
  * H2O Studio Renderer — chatgpt-reference PresentationProfile stylesheet.
  *
  * Owner:   L-STUDIO-RENDERER
@@ -15,7 +15,10 @@
  *
  * S3C (Renderer CSS Isolation) owns the migration of Renderer presentation
  * rules out of shared global studio.css into this source. Shared theme tokens
- * (--wb-code-bg, --wb-code-border, --wb-dim, ...) stay global theme inputs.
+ * (--wb-*: page, surface, text, borders, focus, code, mono) stay global theme
+ * inputs; the ChatGPT provider alias variables (--token-*, --main-surface-*,
+ * --text-*, --border-*, --tw-prose-*) are profile-owned and defined on the
+ * profile root.
  */
 
 /* Code block presentation (ContentRenderer codeBlock: wrapper + language badge). */
@@ -166,4 +169,749 @@
     width:fit-content;
     max-width:min(100%, 42rem);
   }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Provider-content compatibility for captured ChatGPT markup (rich replay).
+   The internal order is load-bearing and mirrors the accepted global cascade:
+   rich content baseline -> design-token bridge -> utility compatibility ->
+   prose/Markdown typography -> code-content compatibility (code component,
+   syntax colours, math, citations) -> dark-mode prose bridge -> late token /
+   content leftovers. Later subsections deliberately win over earlier ones at
+   equal specificity; never reorder them. Every selector is scoped to the
+   profile root; provider alias variables live on that root and are inherited
+   by provider descendants, while shared --wb-* theme inputs stay global.
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── 1. Rich content baseline presentation ──
+   Early .wbRichRoot content rules; the later compatibility subsections override these at equal specificity where they always did. */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot pre{
+  margin:0;
+  overflow:auto;
+  padding:14px 16px;
+  border-radius:12px;
+  border:1px solid var(--wb-code-border);
+  background:var(--wb-code-bg);
+  font-family:var(--mono);
+  font-size:12.5px;
+  line-height:1.65;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot code{
+  font-family:var(--mono);
+  font-size:.92em;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot :not(pre) > code{
+  padding:.12em .4em;
+  border-radius:8px;
+  background:rgba(255,255,255,.08);
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot :where(p, li, blockquote){
+  line-height:1.625;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot :where(ul, ol){
+  margin:.75rem 0;
+  padding-left:1.625rem;
+  list-style-position:outside;
+}
+/* Force list markers - Chrome extension pages may strip UA list-style */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot ul,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot .prose ul,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot .markdown ul {
+  list-style-type: disc !important;
+  list-style-position: outside !important;
+  padding-left: 1.625rem !important;
+  margin: .75rem 0 !important;
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot ol,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot .prose ol,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot .markdown ol {
+  list-style-type: decimal !important;
+  list-style-position: outside !important;
+  padding-left: 1.625rem !important;
+  margin: .75rem 0 !important;
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot li {
+  display: list-item !important;
+  padding-left:.25rem;
+  margin: .3rem 0 !important;
+  line-height: 1.7 !important;
+  white-space:normal;
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot li > :first-child{
+  margin-top:0 !important;
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot li > :last-child{
+  margin-bottom:0 !important;
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot li::marker{
+  color:var(--tw-prose-bullets, var(--wb-muted));
+}
+/* Force bold/strong rendering */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot strong,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot b {
+  font-weight: 700 !important;
+  color: var(--wb-text) !important;
+}
+/* Force heading sizes */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot h1 { font-size: 1.25rem !important; font-weight: 700 !important; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot h2 { font-size: 1.125rem !important; font-weight: 700 !important; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot h3 { font-size: 1.05rem !important; font-weight: 600 !important; }
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot :where(h1, h2, h3, h4){
+  margin:1.15rem 0 .5rem;
+  line-height:1.28;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot :where(blockquote){
+  margin:.95rem 0;
+  padding-left:14px;
+  border-left:3px solid rgba(255,255,255,.18);
+  color:var(--wb-text-soft);
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot :where(table){
+  width:100%;
+  border-collapse:collapse;
+  margin:1rem 0;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot :where(th, td){
+  border:1px solid rgba(255,255,255,.10);
+  padding:9px 10px;
+  text-align:left;
+}
+
+/* ── 2. ChatGPT provider design-token aliases ──
+   Alias variables consumed by provider-captured markup; defined on the profile root instead of :root. */
+/* ═══════════════════════════════════════════════════════════
+ *  PHASE 1.5 — ChatGPT design-token bridge
+ *
+ *  ChatGPT's :root defines CSS custom properties consumed by
+ *  utility classes like "text-token-text-primary".
+ *  These mappings ensure those classes render correctly when
+ *  captured outerHTML is replayed inside Studio.
+ * ═══════════════════════════════════════════════════════════ */
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]){
+  /* Surface / background tokens */
+  --token-main-surface-primary:      var(--wb-page);
+  --token-main-surface-secondary:    var(--wb-surface);
+  --token-main-surface-tertiary:     var(--wb-sidebar-elevated);
+  --token-surface-primary:           var(--wb-page);
+  --token-surface-secondary:         var(--wb-sidebar-elevated);
+  --token-surface-tertiary:          var(--wb-surface);
+
+  /* Text tokens */
+  --token-text-primary:              var(--wb-text);
+  --token-text-secondary:            var(--wb-text-soft);
+  --token-text-tertiary:             var(--wb-muted);
+  --token-text-error:                #ff8583;
+  --token-text-warning:              #ff9e6c;
+
+  /* Border tokens */
+  --token-border-light:              var(--wb-border);
+  --token-border-medium:             var(--wb-border-strong);
+  --token-border-heavy:              rgba(255,255,255,.24);
+  --token-border-sharp:              rgba(255,255,255,.08);
+
+  /* Exact names used by chatgpt.com root (some inline styles reference these) */
+  --main-surface-primary:            var(--wb-page);
+  --main-surface-secondary:          var(--wb-surface);
+  --main-surface-tertiary:           var(--wb-sidebar-elevated);
+  --text-primary:                    var(--wb-text);
+  --text-secondary:                  var(--wb-text-soft);
+  --text-tertiary:                   var(--wb-muted);
+  --border-medium:                   var(--wb-border-strong);
+  --border-light:                    var(--wb-border);
+
+  /* Code/prose inline bg */
+  --tw-prose-inline-code-bg:         rgba(255,255,255,.08);
+}
+
+/* — Utility class definitions for ChatGPT token names — */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .text-token-text-primary        { color: var(--wb-text) !important; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .text-token-text-secondary      { color: var(--wb-text-soft) !important; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .text-token-text-tertiary       { color: var(--wb-muted) !important; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .text-token-text-error          { color: #ff8583 !important; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .bg-token-main-surface-primary  { background-color: var(--wb-page) !important; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .bg-token-main-surface-secondary{ background-color: var(--wb-surface) !important; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .bg-token-main-surface-tertiary { background-color: var(--wb-sidebar-elevated) !important; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .bg-token-surface-primary       { background-color: var(--wb-page) !important; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .bg-token-surface-secondary     { background-color: var(--wb-sidebar-elevated) !important; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .bg-token-surface-tertiary      { background-color: var(--wb-surface) !important; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .border-token-border-medium     { border-color: var(--wb-border-strong) !important; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .border-token-border-light      { border-color: var(--wb-border) !important; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .border-token-border-heavy      { border-color: rgba(255,255,255,.24) !important; }
+
+/* ── 3. ChatGPT provider utility compatibility ──
+   Bounded utility vocabulary for sanitized provider markup; not a Tailwind dependency. */
+/* ═══════════════════════════════════════════════════════════
+ *  PHASE 2.2 — Tailwind utility + Prose compatibility layer
+ *
+ *  ChatGPT's message bodies use Tailwind utility classes and
+ *  the Typography plugin's .prose class.  These definitions
+ *  ensure captured outerHTML renders identically in Studio.
+ * ═══════════════════════════════════════════════════════════ */
+
+/* — Core Tailwind utilities — */
+
+/* Typography */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .font-bold      { font-weight:700; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .font-semibold  { font-weight:600; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .font-medium    { font-weight:500; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .font-normal    { font-weight:400; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .italic         { font-style:italic; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .not-italic     { font-style:normal; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .underline      { text-decoration:underline; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .line-through   { text-decoration:line-through; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .no-underline   { text-decoration:none; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .uppercase      { text-transform:uppercase; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .lowercase      { text-transform:lowercase; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .capitalize     { text-transform:capitalize; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .normal-case    { text-transform:none; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .tracking-tight { letter-spacing:-.025em; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .tracking-normal{ letter-spacing:0; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .leading-tight  { line-height:1.25; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .leading-snug   { line-height:1.375; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .leading-normal { line-height:1.5; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .leading-relaxed{ line-height:1.625; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .leading-loose  { line-height:2; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .text-left      { text-align:left; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .text-center    { text-align:center; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .text-right     { text-align:right; }
+
+/* Font size scale */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .text-xs    { font-size:.75rem;   line-height:1rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .text-sm    { font-size:.875rem;  line-height:1.25rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .text-base  { font-size:1rem;     line-height:1.5rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .text-lg    { font-size:1.125rem; line-height:1.75rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .text-xl    { font-size:1.25rem;  line-height:1.75rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .text-2xl   { font-size:1.5rem;   line-height:2rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .text-3xl   { font-size:1.875rem; line-height:2.25rem; }
+
+/* Whitespace */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .whitespace-pre-wrap { white-space:pre-wrap; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .whitespace-pre      { white-space:pre; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .whitespace-normal   { white-space:normal; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .whitespace-nowrap   { white-space:nowrap; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .\!whitespace-pre    { white-space:pre !important; }
+
+/* Word breaking */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .break-words { word-break:break-word; overflow-wrap:break-word; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .break-all   { word-break:break-all; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .break-keep  { word-break:keep-all; }
+
+/* Overflow */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .overflow-hidden    { overflow:hidden; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .overflow-auto      { overflow:auto; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .overflow-x-auto    { overflow-x:auto; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .overflow-y-auto    { overflow-y:auto; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .overflow-visible   { overflow:visible; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .\!overflow-visible { overflow:visible !important; }
+
+/* Display */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .flex         { display:flex; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .inline-flex  { display:inline-flex; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .inline       { display:inline; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .inline-block { display:inline-block; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .block        { display:block; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hidden       { display:none; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .grid         { display:grid; }
+
+/* Flex helpers */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .flex-col      { flex-direction:column; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .flex-row      { flex-direction:row; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .flex-wrap     { flex-wrap:wrap; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .flex-nowrap   { flex-wrap:nowrap; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .flex-1        { flex:1 1 0%; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .flex-auto     { flex:1 1 auto; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .flex-none     { flex:none; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .flex-grow     { flex-grow:1; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .flex-shrink-0 { flex-shrink:0; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .items-start   { align-items:flex-start; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .items-center  { align-items:center; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .items-end     { align-items:flex-end; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .items-stretch { align-items:stretch; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .justify-start   { justify-content:flex-start; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .justify-center  { justify-content:center; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .justify-end     { justify-content:flex-end; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .justify-between { justify-content:space-between; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .gap-1 { gap:.25rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .gap-2 { gap:.5rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .gap-3 { gap:.75rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .gap-4 { gap:1rem; }
+
+/* Width / height */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .w-full     { width:100%; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .w-auto     { width:auto; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .max-w-full { max-width:100%; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .h-full     { height:100%; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .h-auto     { height:auto; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .min-w-0    { min-width:0; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .min-h-0    { min-height:0; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .min-h-\[20px\] { min-height:20px; }
+
+/* Spacing */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .p-0  { padding:0; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .p-1  { padding:.25rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .p-2  { padding:.5rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .p-3  { padding:.75rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .p-4  { padding:1rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .px-2 { padding-left:.5rem;  padding-right:.5rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .px-3 { padding-left:.75rem; padding-right:.75rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .px-4 { padding-left:1rem;   padding-right:1rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .px-6 { padding-left:1.5rem; padding-right:1.5rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .py-1 { padding-top:.25rem;  padding-bottom:.25rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .py-2 { padding-top:.5rem;   padding-bottom:.5rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .py-3 { padding-top:.75rem;  padding-bottom:.75rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .py-4 { padding-top:1rem;    padding-bottom:1rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .pt-2 { padding-top:.5rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .pb-2 { padding-bottom:.5rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .pl-5 { padding-left:1.25rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .pl-6 { padding-left:1.5rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .pl-8 { padding-left:2rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .m-0  { margin:0; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .mt-2 { margin-top:.5rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .mt-4 { margin-top:1rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .mb-2 { margin-bottom:.5rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .mb-4 { margin-bottom:1rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .mx-auto { margin-left:auto; margin-right:auto; }
+
+/* Border-radius */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .rounded      { border-radius:.25rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .rounded-sm   { border-radius:.125rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .rounded-md   { border-radius:.375rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .rounded-lg   { border-radius:.5rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .rounded-xl   { border-radius:.75rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .rounded-2xl  { border-radius:1rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .rounded-3xl  { border-radius:1.5rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .rounded-full { border-radius:9999px; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .rounded-t-2xl{ border-top-left-radius:1rem; border-top-right-radius:1rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .rounded-b-2xl{ border-bottom-left-radius:1rem; border-bottom-right-radius:1rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .rounded-t-lg { border-top-left-radius:.5rem; border-top-right-radius:.5rem; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .rounded-b-lg { border-bottom-left-radius:.5rem; border-bottom-right-radius:.5rem; }
+
+/* Borders */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .border    { border:1px solid var(--wb-border); }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .border-0  { border:0; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .border-b  { border-bottom:1px solid var(--wb-border); }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .border-t  { border-top:1px solid var(--wb-border); }
+
+/* Position */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .relative { position:relative; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .absolute { position:absolute; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .sticky   { position:sticky; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .fixed    { position:fixed; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .z-10     { z-index:10; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .z-20     { z-index:20; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .inset-0  { inset:0; }
+
+/* Misc */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .opacity-0   { opacity:0; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .opacity-50  { opacity:.5; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .opacity-100 { opacity:1; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .pointer-events-none { pointer-events:none; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .select-none         { user-select:none; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cursor-pointer      { cursor:pointer; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .list-none   { list-style:none; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .list-disc   { list-style-type:disc; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .list-decimal{ list-style-type:decimal; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .sr-only     { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border-width:0; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .contain-inline-size { contain:inline-size; }
+
+/* ── 4. ChatGPT prose / Markdown compatibility ──
+   Includes the canonical .cgMsgBody table members that share these rules. */
+/* — Prose / Markdown typography —
+   ChatGPT wraps AI responses in div.markdown.prose.
+   Replicates Tailwind Typography's dark-mode prose.          */
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) div[class*="prose"] {
+  font-size:16px;
+  line-height:1.625;
+  color:var(--wb-text);
+  max-width:100%;
+  word-break:break-word;
+  overflow-wrap:break-word;
+}
+
+/* Paragraphs */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose > p,   :where([data-h2o-presentation-profile="chatgpt-reference"]) .prose p,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown > p, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown p { margin-top:0; margin-bottom:1rem; }
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose > :last-child,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown > :last-child { margin-bottom:0; }
+
+/* Headings */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose h1, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown h1 {
+  font-size:1.875rem; font-weight:700; line-height:1.2;
+  margin:1.5rem 0 .75rem; letter-spacing:-.02em;
+  color:var(--wb-text);
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose h2, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown h2 {
+  font-size:1.5rem; font-weight:700; line-height:1.25;
+  margin:1.4rem 0 .65rem; letter-spacing:-.015em;
+  color:var(--wb-text);
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose h3, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown h3 {
+  font-size:1.25rem; font-weight:600; line-height:1.3;
+  margin:1.25rem 0 .6rem;
+  color:var(--wb-text);
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose h4, :where([data-h2o-presentation-profile="chatgpt-reference"]) .prose h5, :where([data-h2o-presentation-profile="chatgpt-reference"]) .prose h6,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown h4, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown h5, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown h6 {
+  font-size:1rem; font-weight:600; line-height:1.4;
+  margin:1rem 0 .5rem;
+  color:var(--wb-text);
+}
+
+/* Lists */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose ul, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown ul {
+  list-style-type:disc;
+  list-style-position:outside;
+  margin:.75rem 0;
+  padding-left:1.625rem;
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose ol, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown ol {
+  list-style-type:decimal;
+  list-style-position:outside;
+  margin:.75rem 0;
+  padding-left:1.625rem;
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose li, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown li {
+  margin:.35rem 0;
+  padding-left:.25rem;
+  line-height:1.7;
+  white-space:normal;
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose li > ul, :where([data-h2o-presentation-profile="chatgpt-reference"]) .prose li > ol,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown li > ul, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown li > ol {
+  margin:.35rem 0;
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose li > :first-child,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown li > :first-child {
+  margin-top:0;
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose li > :last-child,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown li > :last-child {
+  margin-bottom:0;
+}
+
+/* Inline emphasis */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose strong, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown strong { font-weight:700; color:var(--wb-text); }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose em,     :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown em     { font-style:italic; }
+
+/* Horizontal rule */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose hr, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown hr {
+  border:none;
+  border-top:1px solid var(--wb-border);
+  margin:1.5rem 0;
+}
+
+/* Blockquote */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose blockquote, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown blockquote {
+  font-style:italic;
+  border-left:3px solid rgba(255,255,255,.2);
+  padding:.25rem 0 .25rem 1rem;
+  margin:1rem 0;
+  color:var(--wb-muted);
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose blockquote p, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown blockquote p { margin:0; }
+
+/* Tables — full style with sticky header support */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsgBody table,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose table, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown table {
+  width:100%;
+  border-collapse:collapse;
+  margin:1rem 0;
+  font-size:.9375rem;
+  display:block;
+  overflow-x:auto;
+  max-width:100%;
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsgBody thead,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose thead, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown thead {
+  background:rgba(255,255,255,.04);
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsgBody th,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose th, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown th {
+  border:1px solid rgba(255,255,255,.1);
+  padding:.5rem .75rem;
+  text-align:left;
+  font-weight:600;
+  font-size:.875rem;
+  color:var(--wb-text);
+  white-space:nowrap;
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsgBody td,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose td, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown td {
+  border:1px solid rgba(255,255,255,.08);
+  padding:.5rem .75rem;
+  text-align:left;
+  font-size:.9375rem;
+  line-height:1.6;
+  vertical-align:top;
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsgBody tr:nth-child(even) td,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose tr:nth-child(even) td,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown tr:nth-child(even) td {
+  background:rgba(255,255,255,.02);
+}
+
+/* Inline code */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose code:not(pre code),
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown code:not(pre code) {
+  padding:.12em .4em;
+  border-radius:6px;
+  background:var(--tw-prose-inline-code-bg, rgba(255,255,255,.08));
+  font-family:var(--mono);
+  font-size:.875em;
+  word-break:break-all;
+  color:var(--wb-text);
+}
+
+/* Pre blocks inside prose — defer to ChatGPT's code block structure */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose pre, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown pre {
+  margin:0;
+  padding:0;
+  background:none;
+  border:none;
+  overflow:visible;
+}
+
+/* ── 5. ChatGPT provider code-content compatibility ──
+   Provider code-block component, syntax colours, math and citations. Distinct from the H2O ContentRenderer wbCodeBlock / wbCodeLang rules above. */
+/* — ChatGPT code block component —
+   ChatGPT wraps code in a div with a language header + body.
+   These selectors match the class combinations ChatGPT uses.  */
+
+/* Outer container (rounded dark card) */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot :where(
+  [class*="rounded-2xl"][class*="bg-token-main-surface-secondary"],
+  [class*="contain-inline-size"]
+){
+  border-radius:12px;
+  overflow:hidden;
+  margin:.75rem 0;
+  background:var(--wb-code-bg);
+  border:1px solid var(--wb-code-border);
+}
+
+/* Language label header bar */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot :where(
+  pre > div:first-child,
+  [class*="rounded-t-2xl"],
+  [class*="rounded-t-lg"][class*="flex"][class*="items-center"]
+){
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:8px 14px;
+  background:rgba(255,255,255,.04);
+  border-bottom:1px solid var(--wb-code-border);
+  font-family:var(--mono);
+  font-size:11px;
+  line-height:1.3;
+  color:var(--wb-dim);
+}
+
+/* Copy button inside header — freeze it */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot :where(
+  [class*="rounded-t-2xl"] button,
+  pre > div:first-child button
+){
+  pointer-events:none;
+  opacity:.5;
+  font-size:11px;
+  color:var(--wb-dim);
+}
+
+/* Code body wrapper */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot :where(
+  [class*="overflow-y-auto"][class*="p-4"],
+  pre > div:last-child
+){
+  padding:14px 16px;
+  overflow:auto;
+  background:var(--wb-code-bg);
+}
+
+/* The actual code element */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot code[class*="hljs"],
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot code[class*="language-"],
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot code.\!whitespace-pre {
+  display:block;
+  font-family:var(--mono);
+  font-size:13px;
+  line-height:1.65;
+  color:#e8e8e8;
+  background:transparent;
+  white-space:pre;
+  tab-size:2;
+  border:none;
+  padding:0;
+}
+
+/* — Syntax highlighting (hljs dark theme) —
+   Ensures .hljs-* classes from captured code blocks
+   render with sensible dark-mode colours.                     */
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-keyword,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-selector-tag    { color:#f47067; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-string,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-attr,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-attribute       { color:#aff0a0; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-number,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-literal,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-symbol          { color:#79c0ff; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-comment,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-quote           { color:#8b949e; font-style:italic; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-built_in,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-type            { color:#ffa657; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-name,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-title,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-function        { color:#d2a8ff; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-variable,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-params          { color:#e8e8e8; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-meta            { color:#79c0ff; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-tag             { color:#f47067; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-deletion        { color:#ff7b72; background:rgba(255,123,114,.1); }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-addition        { color:#aff0a0; background:rgba(175,240,160,.1); }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-section         { color:#79c0ff; font-weight:700; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-link            { color:#79c0ff; text-decoration:underline; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-emphasis        { font-style:italic; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .hljs-strong          { font-weight:700; }
+
+/* — KaTeX math rendering —
+   Preserves rendered math blocks from captured responses.     */
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .katex-display {
+  margin:1rem 0;
+  overflow-x:auto;
+  overflow-y:hidden;
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .katex {
+  font-size:1.05em;
+  line-height:1.2;
+  white-space:nowrap;
+}
+
+/* — Citation / footnote links —
+   ChatGPT uses superscript citation links in some responses.  */
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot sup a,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot [data-footnote-ref] {
+  color:var(--wb-focus);
+  font-size:.72em;
+  vertical-align:super;
+  text-decoration:none;
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot sup a:hover {
+  text-decoration:underline;
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot [data-footnotes] {
+  margin-top:1.5rem;
+  padding-top:1rem;
+  border-top:1px solid var(--wb-border);
+  font-size:.875rem;
+  color:var(--wb-muted);
+}
+
+/* ── 6. ChatGPT dark-mode prose bridge ──
+   Prose token variables and nested prose colours; must follow subsection 4 (equal-specificity overrides). */
+/* ═══════════════════════════════════════════════════════════
+ *  ChatGPT dark-mode Tailwind prefix bridge
+ *
+ *  ChatGPT uses "dark:" prefixed Tailwind classes via the
+ *  html.dark class. Studio sets color-scheme:dark but doesn't
+ *  run the Tailwind JIT compiler, so dark: classes are inert.
+ *  We explicitly define the dark-mode prose overrides here.
+ * ═══════════════════════════════════════════════════════════ */
+
+/* dark:prose-invert — makes prose text white on dark bg */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .dark .prose,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .dark .markdown,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown {
+  --tw-prose-body:           var(--wb-text);
+  --tw-prose-headings:       var(--wb-text);
+  --tw-prose-lead:           var(--wb-text-soft);
+  --tw-prose-links:          var(--wb-focus);
+  --tw-prose-bold:           var(--wb-text);
+  --tw-prose-counters:       var(--wb-muted);
+  --tw-prose-bullets:        var(--wb-muted);
+  --tw-prose-hr:             var(--wb-border);
+  --tw-prose-quotes:         var(--wb-text-soft);
+  --tw-prose-quote-borders:  var(--wb-border-strong);
+  --tw-prose-captions:       var(--wb-muted);
+  --tw-prose-code:           var(--wb-text);
+  --tw-prose-pre-code:       var(--wb-text);
+  --tw-prose-pre-bg:         var(--wb-code-bg);
+  --tw-prose-th-borders:     rgba(255,255,255,.12);
+  --tw-prose-td-borders:     rgba(255,255,255,.08);
+  color: var(--wb-text);
+}
+
+/* ChatGPT wraps each message in these exact classes */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose-invert { color: var(--wb-text); }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .dark\:prose-invert { color: var(--wb-text); }
+
+/* w-full / break-words utility classes on markdown wrapper */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .w-full  { width: 100%; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .break-words { word-break: break-word; overflow-wrap: break-word; }
+
+/* light / dark mode toggle class ChatGPT adds to prose wrapper */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .light { color: var(--wb-text); }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .dark  { color: var(--wb-text); }
+
+
+/* ── ChatGPT message body structure ─────────────────────────────────────
+   The actual class chain on a ChatGPT answer is:
+   div.markdown.prose.w-full.break-words.dark:prose-invert.light
+   (or .dark instead of .light in dark mode)
+   Everything inside renders via the prose token variables above.  */
+
+/* Ensure nested prose elements get correct colours via CSS vars */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose p,   :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown p   { color: var(--tw-prose-body,   var(--wb-text)); }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose a,   :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown a   { color: var(--tw-prose-links,  var(--wb-focus)); }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose strong, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown strong { color: var(--tw-prose-bold, var(--wb-text)); font-weight: 700; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose em,  :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown em  { font-style: italic; }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose h1,:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose h2,:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose h3,:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose h4,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown h1,:where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown h2,:where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown h3,:where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown h4 {
+  color: var(--tw-prose-headings, var(--wb-text));
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose code:not(pre code), :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown code:not(pre code) {
+  color: var(--tw-prose-code, var(--wb-text));
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose blockquote, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown blockquote {
+  color: var(--tw-prose-quotes, var(--wb-text-soft));
+  border-left-color: var(--tw-prose-quote-borders, var(--wb-border-strong));
+}
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .prose hr, :where([data-h2o-presentation-profile="chatgpt-reference"]) .markdown hr {
+  border-color: var(--tw-prose-hr, var(--wb-border));
+}
+
+/* ── 7. Late provider content leftovers ──
+   Math overflow, token utilities and the sandbox output block that followed the outer-structure rules in the global sheet. */
+/* Inline math from KaTeX */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .katex-html { overflow-x: auto; }
+
+/* GPT tool-use / thinking blocks */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .border-token-surface-primary { border-color: var(--wb-border); }
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .bg-token-surface-secondary   { background-color: var(--wb-sidebar-elevated); }
+
+/* OpenAI sandbox code execution result block */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .sandbox-output {
+  background: var(--wb-code-bg);
+  border: 1px solid var(--wb-code-border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-family: var(--mono);
+  font-size: 13px;
+  margin: 8px 0;
 }

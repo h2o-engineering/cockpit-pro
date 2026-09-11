@@ -289,6 +289,44 @@ function parseRules(css) {
   return rules;
 }
 
+const norm = (sel) => sel.replace(/\s+/g, ' ').trim();
+/* Split a selector list on top-level commas only (commas inside :where()/:is()/:not() stay). */
+function splitMembers(selector) {
+  const out = []; let depth = 0; let cur = '';
+  for (const ch of selector) {
+    if (ch === '(') depth += 1; else if (ch === ')') depth -= 1;
+    if (ch === ',' && depth === 0) { out.push(norm(cur)); cur = ''; } else cur += ch;
+  }
+  if (cur.trim()) out.push(norm(cur));
+  return out;
+}
+
+const SCOPE = `:where([${PROFILE_MARKER}])`;
+
+/* The only !important declarations allowed in the profile stylesheet: the
+ * provider-compatibility rules that carried !important in the accepted global
+ * cascade and moved verbatim (slice D). Every other profile rule must stay
+ * importance-free - no new !important is ever introduced by isolation. */
+const INHERITED_IMPORTANT_SELECTORS = new Set([
+  '.wbRichRoot ul, .wbRichRoot .prose ul, .wbRichRoot .markdown ul', '.wbRichRoot ol, .wbRichRoot .prose ol, .wbRichRoot .markdown ol',
+  '.wbRichRoot li', '.wbRichRoot li > :first-child', '.wbRichRoot li > :last-child', '.wbRichRoot strong, .wbRichRoot b',
+  '.wbRichRoot h1', '.wbRichRoot h2', '.wbRichRoot h3',
+  '.text-token-text-primary', '.text-token-text-secondary', '.text-token-text-tertiary', '.text-token-text-error',
+  '.bg-token-main-surface-primary', '.bg-token-main-surface-secondary', '.bg-token-main-surface-tertiary',
+  '.bg-token-surface-primary', '.bg-token-surface-secondary', '.bg-token-surface-tertiary',
+  '.border-token-border-medium', '.border-token-border-light', '.border-token-border-heavy',
+  '.\\!whitespace-pre', '.\\!overflow-visible',
+]);
+function unscopedSelector(selector) {
+  return splitMembers(selector).map((m) => (m === SCOPE ? ':root' : m.replace(`${SCOPE} `, ''))).join(', ');
+}
+function assertNoNewImportant(rules) {
+  for (const r of rules) {
+    if (!Object.values(r.declarations).some((v) => /!important/.test(v))) continue;
+    assert.ok(INHERITED_IMPORTANT_SELECTORS.has(unscopedSelector(r.selector)), `no new !important in the profile stylesheet: ${unscopedSelector(r.selector)}`);
+  }
+}
+
 const CODE_BLOCK_DECLARATIONS = {
   margin: '14px 0', border: '1px solid var(--wb-code-border)', 'border-radius': '12px', overflow: 'hidden', background: 'var(--wb-code-bg)',
 };
@@ -304,9 +342,13 @@ check('the Renderer-owned chatgpt-reference stylesheet exists, is profile-scoped
   const rules = parseRules(css);
   assert.ok(rules.length >= 2, 'stylesheet carries rules');
   for (const rule of rules) {
-    assert.ok(rule.selector.startsWith(`:where([${PROFILE_MARKER}]) `), `B: every rule is scoped to the profile marker with zero-specificity :where(): ${rule.selector}`);
+    /* Every selector-list member carries the zero-specificity profile scope; the
+     * bare scope itself is the profile root (provider alias variables). */
+    for (const member of splitMembers(rule.selector)) {
+      assert.ok(member === `:where([${PROFILE_MARKER}])` || member.startsWith(`:where([${PROFILE_MARKER}]) `), `B: every selector member is scoped to the profile marker with zero-specificity :where(): ${member}`);
+    }
   }
-  assert.doesNotMatch(stripCssComments(css), /!important/, 'no !important escalation');
+  assertNoNewImportant(rules);
   const byClass = (cls) => rules.filter((r) => r.selector === `:where([${PROFILE_MARKER}]) .${cls}` && r.media === null);
   assert.equal(byClass('wbCodeBlock').length, 1, 'C: exactly one wbCodeBlock rule');
   assert.deepEqual(byClass('wbCodeBlock')[0].declarations, CODE_BLOCK_DECLARATIONS, 'C: the effective wbCodeBlock declarations moved verbatim');
@@ -327,8 +369,8 @@ check('global studio.css no longer declares the migrated code selectors', () => 
   const css = stripCssComments(read(STUDIO_CSS_REL));
   assert.doesNotMatch(css, /\.wbCodeBlock\b/, 'E: .wbCodeBlock must not be declared in studio.css');
   assert.doesNotMatch(css, /\.wbCodeLang\b/, 'E: .wbCodeLang must not be declared in studio.css');
-  /* The rich half of the split pre rule stays global (slice B moved the canonical half). */
-  assert.match(css, /\n\.wbRichRoot pre\{/, 'rich pre rule remains in studio.css');
+  /* Slice D moved the rich content baseline (incl. .wbRichRoot pre) into the profile stylesheet. */
+  assert.doesNotMatch(css, /\n\.wbRichRoot pre\{/, 'rich pre rule no longer in studio.css');
 });
 
 /* Imported at top level: check() is synchronous, so a promise handed to it
@@ -348,7 +390,6 @@ check('studio.html links the profile stylesheet exactly once, after studio.css, 
     packer.ARCHIVE_WORKBENCH_OUT_FILES.indexOf(PROFILE_CSS_REL) - packer.ARCHIVE_WORKBENCH_OUT_FILES.indexOf(PROFILE_REL), 'G: source/output parity around the presentation entries');
 });
 
-const SCOPE = `:where([${PROFILE_MARKER}])`;
 const CANONICAL_MESSAGE_RULES = {
   '.cgMsg': { color: 'var(--wb-text)' },
   '.cgMsg--user': { 'max-width': 'min(var(--wb-user-w), 44rem)', width: 'fit-content', padding: '10px 20px', 'border-radius': 'var(--wb-radius-xl)', background: 'var(--wb-user-bg)' },
@@ -378,8 +419,8 @@ check('canonical message / content-body presentation lives in the profile styles
   assert.equal(narrow.length, 1, 'H: the narrow canonical user-bubble override is migrated with the base rule');
   assert.deepEqual(narrow[0].declarations, NARROW_USER_OVERRIDE);
   assert.ok(narrow[0].index > base.index, 'H: the override must follow the base rule so it still wins at equal specificity');
-  for (const rule of rules) assert.ok(rule.selector.startsWith(`${SCOPE} `), `B: every rule is profile-scoped: ${rule.selector}`);
-  assert.doesNotMatch(stripCssComments(read(PROFILE_CSS_REL)), /!important/);
+  for (const rule of rules) for (const member of splitMembers(rule.selector)) assert.ok(member === SCOPE || member.startsWith(`${SCOPE} `), `B: every rule member is profile-scoped: ${member}`);
+  assertNoNewImportant(rules);
 });
 
 check('studio.css keeps only structural .cgMsg sizing and the rich halves of the split pre/code rules', () => {
@@ -395,13 +436,14 @@ check('studio.css keeps only structural .cgMsg sizing and the rich halves of the
   const cgMsg = rules.filter((r) => r.selector === '.cgMsg');
   assert.equal(cgMsg.length, 1);
   assert.deepEqual(cgMsg[0].declarations, { 'min-width': '0' }, 'D: global .cgMsg keeps only structural min-width');
-  /* E: the rich halves survive as standalone rules with the same values. */
-  const richPre = rules.filter((r) => r.selector === '.wbRichRoot pre' && r.media === null);
-  assert.equal(richPre.length, 1); assert.deepEqual(richPre[0].declarations, CANONICAL_MESSAGE_RULES['.cgMsgBody pre'], 'E: rich pre values unchanged');
-  const richCode = rules.filter((r) => r.selector === '.wbRichRoot code' && r.media === null);
-  assert.equal(richCode.length, 1); assert.deepEqual(richCode[0].declarations, CANONICAL_MESSAGE_RULES['.cgMsgBody code'], 'E: rich code values unchanged');
-  const richInline = rules.filter((r) => r.selector === '.wbRichRoot :not(pre) > code' && r.media === null);
-  assert.equal(richInline.length, 1); assert.deepEqual(richInline[0].declarations, CANONICAL_MESSAGE_RULES['.cgMsgBody :not(pre) > code'], 'E: rich inline-code values unchanged');
+  /* E: the rich halves (moved to the profile stylesheet in slice D) keep the same values as the canonical halves. */
+  const prof = parseRules(read(PROFILE_CSS_REL)).map((r) => ({ ...r, selector: norm(r.selector) }));
+  for (const [rich, canonical] of [['.wbRichRoot pre', '.cgMsgBody pre'], ['.wbRichRoot code', '.cgMsgBody code'], ['.wbRichRoot :not(pre) > code', '.cgMsgBody :not(pre) > code']]) {
+    const found = prof.filter((r) => r.selector === norm(`${SCOPE} ${rich}`) && r.media === null);
+    assert.equal(found.length, 1, `E: ${rich} is profile-owned`);
+    assert.deepEqual(found[0].declarations, CANONICAL_MESSAGE_RULES[canonical], `E: ${rich} values unchanged`);
+    assert.equal(rules.filter((r) => r.media === null && splitMembers(r.selector).includes(rich)).length, 0, `E: ${rich} no longer global`);
+  }
   /* Slice C moved the bubble member of the narrow rule to the profile
    * stylesheet; the deferred user-host member stays global. */
   const narrowRich = rules.filter((r) => r.media === '(max-width: 720px)' && r.selector.includes('.wbRichRoot :where('));
@@ -432,17 +474,6 @@ const DEFERRED_GLOBAL_RULES = {
   '.wbRichRoot :where([data-message-author-role="user"]):not(:has(.user-message-bubble-color))': { 'max-width': 'min(var(--wb-user-w), 44rem)', width: 'fit-content', 'margin-left': 'auto', padding: '10px 20px', 'border-radius': 'var(--wb-radius-xl)', background: 'var(--wb-user-bg)' },
   '.wbRichRoot .cgTurn--user[data-testid^="conversation-turn"]': { display: 'flex', 'flex-direction': 'column', 'align-items': 'flex-end', 'justify-content': 'flex-start' },
 };
-const norm = (sel) => sel.replace(/\s+/g, ' ').trim();
-/* Split a selector list on top-level commas only (commas inside :where()/:is()/:not() stay). */
-function splitMembers(selector) {
-  const out = []; let depth = 0; let cur = '';
-  for (const ch of selector) {
-    if (ch === '(') depth += 1; else if (ch === ')') depth -= 1;
-    if (ch === ',' && depth === 0) { out.push(norm(cur)); cur = ''; } else cur += ch;
-  }
-  if (cur.trim()) out.push(norm(cur));
-  return out;
-}
 
 check('rich-replay shell / bubble presentation lives in the profile stylesheet with its narrow override (S3C slice C)', () => {
   const rules = parseRules(read(PROFILE_CSS_REL)).map((r) => ({ ...r, selector: norm(r.selector) }));
@@ -458,9 +489,8 @@ check('rich-replay shell / bubble presentation lives in the profile stylesheet w
   assert.deepEqual(narrow[0].declarations, NARROW_USER_OVERRIDE);
   assert.ok(narrow[0].index > base.index, 'I: the override follows the base rule');
   for (const sel of Object.keys(DEFERRED_GLOBAL_RULES)) assert.equal(rules.filter((r) => r.selector.includes(norm(sel))).length, 0, `deferred rule must not be in the profile stylesheet: ${sel}`);
-  for (const sel of ['.wbRichRoot h1', '.wbRichRoot :where(h1, h2, h3, h4)', '.wbRichRoot pre', '.wbRichRoot code', '.wbRichRoot :where(p, li, blockquote)', '.wbRichRoot :where(ul, ol)', '.prose', '.markdown', '.leading-tight', '.flex']) {
-    assert.equal(rules.filter((r) => splitMembers(r.selector).some((m) => m === norm(`${SCOPE} ${sel}`) || m === sel)).length, 0, `C: content typography / provider compatibility stays global: ${sel}`);
-  }
+  /* Slice D moved content typography and the provider compatibility layer here
+   * as one ordered unit; its own check below proves order and membership. */
 });
 
 check('studio.css keeps the deferred rich rules, the prose/Tailwind layer, Reader-route, attachment and edit rules (S3C slice C)', () => {
@@ -482,11 +512,10 @@ check('studio.css keeps the deferred rich rules, the prose/Tailwind layer, Reade
   /* The later competitors that force the deferrals still exist as they were. */
   assert.ok(rules.some((r) => members(r).includes('.wbReader [data-message-author-role]') && 'max-width' in r.declarations), 'Reader appearance width rule still global');
   assert.ok(rules.some((r) => r.selector === '.wbReader [data-turn].is-in-collapsed-section' && r.declarations.display === 'none'), 'Reader collapsed-section rule still global');
-  /* C: prose / Tailwind / rich content typography stay global. */
-  for (const sel of ['.wbRichRoot h1', '.wbRichRoot h2', '.wbRichRoot h3', '.wbRichRoot :where(h1, h2, h3, h4)', '.wbRichRoot pre', '.wbRichRoot code', '.wbRichRoot :not(pre) > code', '.wbRichRoot :where(p, li, blockquote)', '.wbRichRoot :where(ul, ol)', '.wbRichRoot li', '.wbRichRoot :where(blockquote)', '.wbRichRoot :where(table)', '.leading-tight', '.flex', '.w-full', '.rounded-3xl', '.text-message', '.agent-turn', '.user-turn']) {
-    assert.ok(rules.some((r) => members(r).includes(sel)), `C: ${sel} remains global`);
+  /* Provider OUTER structure stays global (slice D stopped before it). */
+  for (const sel of ['.text-message', '.agent-turn', '.user-turn', '[data-testid^="conversation-turn"]', '.result-streaming', '.wbRichRoot .text-message']) {
+    assert.ok(rules.some((r) => members(r).includes(sel)), `provider outer-structure rule ${sel} remains global`);
   }
-  assert.ok(rules.some((r) => members(r).includes('.prose h1') || members(r).includes('.prose h1, .markdown h1')), 'C: prose heading layer remains global');
   /* D: Reader-route rich alignment blocks remain global and !important. */
   const readerRich = rules.filter((r) => members(r).some((m) => m.startsWith('body[data-route="reader"] .wbRichRoot') && /cgTurn--user|user-message-bubble-color|data-message-author-role="user"/.test(m)));
   assert.ok(readerRich.length >= 4, `D: Reader-route rich alignment rules remain global (found ${readerRich.length})`);
@@ -497,6 +526,77 @@ check('studio.css keeps the deferred rich rules, the prose/Tailwind layer, Reade
   for (const sel of ['.cgUserAttachmentGrid', '.cgUserAttachmentCard', '.cgMsg--edited', '.wbTurn--editing', '[data-edit-mode="on"]']) {
     assert.ok(rules.some((r) => members(r).some((m) => m.includes(sel))), `${sel} rules remain global`);
   }
+});
+
+/* S3C slice D: the provider-content compatibility layer is one ordered unit in
+ * the profile stylesheet. Anchors are listed in the load-bearing order. */
+const PROVIDER_LAYER_ORDER = [
+  '.wbRichRoot pre', '.wbRichRoot :not(pre) > code',                               // 1. rich content baseline
+  '.wbRichRoot :where(p, li, blockquote)', '.wbRichRoot li', '.wbRichRoot h1', '.wbRichRoot :where(h1, h2, h3, h4)', '.wbRichRoot :where(th, td)',
+  ':root',                                                                        // 2. provider alias variables (profile root)
+  '.text-token-text-primary', '.border-token-border-heavy',                        //    token utility classes
+  '.font-bold', '.leading-tight', '.text-sm', '.flex', '.w-full', '.mt-2', '.rounded-3xl', '.relative', '.sr-only', '.contain-inline-size', // 3. utilities (baseline order: typography, sizes, display, sizing, spacing, radius, position, misc)
+  '.prose, .markdown, div[class*="prose"]', '.prose h1, .markdown h1', '.prose blockquote, .markdown blockquote', '.cgMsgBody table, .prose table, .markdown table', '.cgMsgBody tr:nth-child(even) td, .prose tr:nth-child(even) td, .markdown tr:nth-child(even) td', '.prose code:not(pre code), .markdown code:not(pre code)', '.prose pre, .markdown pre', // 4. prose
+  '.wbRichRoot :where( [class*="rounded-2xl"][class*="bg-token-main-surface-secondary"], [class*="contain-inline-size"] )', '.wbRichRoot code[class*="hljs"], .wbRichRoot code[class*="language-"], .wbRichRoot code.\\!whitespace-pre', // 5. code component
+  '.hljs-keyword, .hljs-selector-tag', '.hljs-strong', '.katex-display', '.katex', '.wbRichRoot sup a, .wbRichRoot [data-footnote-ref]', '.wbRichRoot [data-footnotes]', // 5. syntax / math / citations
+  '.dark .prose, .dark .markdown, .prose, .markdown', '.prose-invert', '.dark\\:prose-invert', '.light', '.prose p, .markdown p', '.prose blockquote, .markdown blockquote', '.prose hr, .markdown hr', // 6. dark-mode prose bridge (second .prose blockquote / hr occurrences)
+  '.katex-html', '.border-token-surface-primary', '.sandbox-output',              // 7. late leftovers
+];
+const PROVIDER_ALIAS_VARIABLES = ['--token-main-surface-primary', '--token-surface-tertiary', '--token-text-primary', '--token-text-error', '--token-border-light', '--token-border-sharp', '--main-surface-primary', '--text-primary', '--text-tertiary', '--border-medium', '--border-light', '--tw-prose-inline-code-bg'];
+const SHARED_THEME_INPUTS = ['--wb-page', '--wb-surface', '--wb-text', '--wb-text-soft', '--wb-muted', '--wb-border', '--wb-border-strong', '--wb-focus', '--wb-code-bg', '--wb-code-border', '--mono', '--wb-user-bg', '--wb-radius-xl'];
+
+check('the provider-content compatibility layer lives in the profile stylesheet as one ordered unit (S3C slice D)', () => {
+  const rules = parseRules(read(PROFILE_CSS_REL)).map((r) => ({ ...r, selector: norm(r.selector), plain: unscopedSelector(norm(r.selector)) }));
+  /* A + F: every anchor is present, scoped, and in the accepted relative order
+   * (later occurrences count for the repeated dark-bridge selectors). */
+  let last = -1; let lastName = '';
+  for (const anchor of PROVIDER_LAYER_ORDER) {
+    const found = rules.filter((r) => r.media === null && r.plain === norm(anchor) && r.index > last);
+    assert.ok(found.length >= 1, `A: provider-layer rule present after "${lastName}": ${anchor}`);
+    last = found[0].index; lastName = anchor;
+  }
+  /* B: scoping is asserted for every member by the slice-A check; C: alias
+   * variables live on the profile root and nowhere else in the sheet. */
+  const rootRules = rules.filter((r) => r.selector === SCOPE);
+  assert.equal(rootRules.length, 1, 'C: exactly one profile-root variable block');
+  for (const v of PROVIDER_ALIAS_VARIABLES) assert.ok(v in rootRules[0].declarations, `C: provider alias ${v} defined on the profile root`);
+  /* D: the sheet defines no shared --wb-* theme input (it may consume them). */
+  for (const r of rules) for (const prop of Object.keys(r.declarations)) assert.ok(!prop.startsWith('--wb-'), `D: profile stylesheet must not define shared theme input ${prop}`);
+  /* K: replay-interaction safety and image/media presentation are not part of the unit. */
+  assert.equal(rules.filter((r) => r.plain.includes('button, input, textarea, select, summary')).length, 0, 'K: replay-interaction safety stays outside the profile');
+  assert.equal(rules.filter((r) => r.plain.includes(':where(img, video, canvas, svg)') || r.plain.includes('.cgMsgBody img') || r.plain.includes('.dalle-image-container')).length, 0, 'J: image/media presentation stays outside the profile');
+  /* L: canonical table members moved with the prose table rules. */
+  for (const sel of ['.cgMsgBody table', '.cgMsgBody thead', '.cgMsgBody th', '.cgMsgBody td', '.cgMsgBody tr:nth-child(even) td']) {
+    assert.ok(rules.some((r) => splitMembers(r.plain).includes(sel)), `L: canonical table member ${sel} is profile-owned`);
+  }
+  /* Provider OUTER structure is not absorbed. */
+  for (const sel of ['.text-message', '.agent-turn', '.user-turn', '[data-testid^="conversation-turn"]', '.wbRichRoot .text-message', '.result-streaming']) {
+    assert.equal(rules.filter((r) => splitMembers(r.plain).includes(sel)).length, 0, `provider outer-structure rule ${sel} stays outside the profile`);
+  }
+});
+
+check('global studio.css keeps no duplicate of the migrated provider-content layer and keeps the shared theme inputs, safety and image rules (S3C slice D)', () => {
+  const glob = parseRules(read(STUDIO_CSS_REL)).map((r) => ({ ...r, selector: norm(r.selector) }));
+  const prof = parseRules(read(PROFILE_CSS_REL)).map((r) => ({ ...r, plain: unscopedSelector(norm(r.selector)) }));
+  const globalMembers = new Set(); for (const r of glob) if (r.media === null) for (const m of splitMembers(r.selector)) globalMembers.add(m);
+  /* E: no profile-owned selector member (other than the structural .cgMsg split) is still declared globally. */
+  const overlap = [];
+  for (const r of prof) for (const m of splitMembers(r.plain)) if (m !== ':root' && m !== '.cgMsg' && globalMembers.has(m)) overlap.push(m);
+  assert.deepEqual([...new Set(overlap)], [], 'E: studio.css must not duplicate any profile-owned selector member');
+  /* C/D: alias variables gone from global :root; shared inputs still global. */
+  const roots = glob.filter((r) => r.selector === ':root');
+  assert.ok(roots.length >= 1, 'global :root theme block exists');
+  for (const v of PROVIDER_ALIAS_VARIABLES) assert.ok(!roots.some((r) => v in r.declarations), `C: provider alias ${v} no longer on global :root`);
+  for (const v of SHARED_THEME_INPUTS) assert.ok(roots.some((r) => v in r.declarations), `D: shared theme input ${v} stays on global :root`);
+  /* K: replay-interaction safety; J: image/media and attachment rules stay global. */
+  const safety = glob.filter((r) => r.selector === '.wbRichRoot :where(button, input, textarea, select, summary)');
+  assert.equal(safety.length, 1); assert.deepEqual(safety[0].declarations, { 'pointer-events': 'none' }, 'K: replay-interaction safety rule unchanged and global');
+  assert.ok(glob.some((r) => r.selector === '.wbRichRoot :where(img, video, canvas, svg)'), 'J: rich media containment stays global');
+  assert.ok(glob.some((r) => splitMembers(r.selector).includes('.cgMsgBody img')), 'J: canonical image presentation stays global');
+  assert.ok(glob.some((r) => splitMembers(r.selector).some((m) => m.includes('.dalle-image-container img'))), 'J: provider image rules stay global');
+  /* L: canonical table members no longer global; .cgMsgBody img still is. */
+  for (const sel of ['.cgMsgBody table', '.cgMsgBody thead', '.cgMsgBody th', '.cgMsgBody td', '.cgMsgBody tr:nth-child(even) td']) assert.equal(globalMembers.has(sel), false, `L: ${sel} no longer global`);
+  assert.equal(globalMembers.has('.cgMsgBody img'), true);
 });
 
 check('profile stylesheet @version and the studio.html cache query match exactly', () => {
@@ -669,6 +769,25 @@ if (!chromium) {
     const out = { mode: r.renderMode, bubbles: r.root.querySelectorAll('.user-message-bubble-color').length, maxWidth: cs.maxWidth, padding: cs.padding, borderRadius: cs.borderRadius, marginLeft: cs.marginLeft, background: cs.backgroundColor, hostColor: getComputedStyle(host).color, viewport: innerWidth };
     mount.replaceChildren(); return out;
   };
+  /* S3C slice D: the provider compatibility vocabulary applies only beneath a
+   * profile-marked root. The same synthetic provider node is measured inside
+   * the marked host and outside it. */
+  const SCOPE_PROBE = (parentId) => {
+    const parent = document.getElementById(parentId);
+    const node = document.createElement('div'); node.className = 'flex text-sm rounded-lg text-token-text-primary relative'; node.textContent = 'probe';
+    const prose = document.createElement('div'); prose.className = 'markdown prose';
+    const inner = document.createElement('h2'); inner.className = 'leading-tight mt-2'; inner.textContent = 'h'; prose.appendChild(inner);
+    /* A non-prose rich heading is the order-sensitive pair: the rich baseline
+     * `.wbRichRoot :where(h1, h2, h3, h4)` and the utilities `.leading-tight` /
+     * `.mt-2` share specificity (0,1,0), so the later rule wins. */
+    const rich = document.createElement('div'); rich.className = 'wbRichRoot';
+    const richHeading = document.createElement('h2'); richHeading.className = 'leading-tight mt-2'; richHeading.textContent = 'h'; rich.appendChild(richHeading);
+    parent.appendChild(node); parent.appendChild(prose); parent.appendChild(rich);
+    const cs = getComputedStyle(node); const hs = getComputedStyle(inner); const rs = getComputedStyle(richHeading);
+    const out = { display: cs.display, fontSize: cs.fontSize, borderRadius: cs.borderRadius, position: cs.position, color: cs.color, headingLineHeight: hs.lineHeight, headingMarginTop: hs.marginTop, headingFontSize: hs.fontSize, richHeadingFontSize: rs.fontSize, richHeadingLineHeight: rs.lineHeight, richHeadingMarginTop: rs.marginTop, tokenText: getComputedStyle(node).getPropertyValue('--token-text-primary').trim() };
+    node.remove(); prose.remove(); rich.remove(); return out;
+  };
+  const scoping = { inside: await page.evaluate(SCOPE_PROBE, 'host'), outside: await page.evaluate(SCOPE_PROBE, 'unscoped') };
   const cascade = { normal: await page.evaluate(PROBE), richNormal: await page.evaluate(RICH_PROBE) };
   await page.setViewportSize({ width: 480, height: 800 });
   cascade.narrow = await page.evaluate(PROBE);
@@ -685,6 +804,30 @@ if (!chromium) {
       assert.equal(probe.padding, '10px 20px'); assert.equal(probe.borderRadius, '24px');
       assert.notEqual(probe.background, 'rgba(0, 0, 0, 0)', 'user bubble background comes from the shared --wb-user-bg token');
     }
+  });
+
+  check('provider compatibility utilities, prose and alias tokens apply only beneath the profile-marked root (S3C slice D)', () => {
+    const i = scoping.inside, o = scoping.outside;
+    assert.equal(i.display, 'flex'); assert.equal(i.fontSize, '14px'); assert.equal(i.borderRadius, '8px'); assert.equal(i.position, 'relative');
+    assert.notEqual(i.tokenText, '', 'provider alias variable resolves beneath the profile root');
+    /* Prose h2 (1.5rem, line-height 1.25, margin 1.4rem) dominates the utility
+     * classes at (0,1,1), exactly as in the accepted global cascade. */
+    assert.equal(i.headingFontSize, '24px'); assert.equal(i.headingLineHeight, '30px'); assert.equal(i.headingMarginTop, '22.4px');
+    /* Non-prose rich heading: the utilities are ordered AFTER the rich baseline
+     * inside the unit, so .leading-tight (1.25 x 18px) and .mt-2 (.5rem) win;
+     * a reversed order would yield 23.04px / 18.4px. */
+    assert.equal(i.richHeadingFontSize, '18px', 'rich heading size from the rich baseline (!important)');
+    assert.equal(i.richHeadingLineHeight, '22.5px', 'utility .leading-tight wins over the rich baseline line-height by order');
+    assert.equal(i.richHeadingMarginTop, '8px', 'utility .mt-2 wins over the rich baseline margin by order');
+    assert.equal(o.display, 'block', 'negative scope: .flex has no effect outside the profile root');
+    assert.equal(o.fontSize, '16px'); assert.equal(o.borderRadius, '0px'); assert.equal(o.position, 'static');
+    assert.equal(o.tokenText, '', 'negative scope: provider alias variables are not global');
+    /* The UA default h2 (1.5em) coincides with prose 1.5rem at the root font
+     * size, so line-height and margin are the discriminating prose metrics. */
+    assert.notEqual(o.headingLineHeight, i.headingLineHeight, 'negative scope: prose heading metrics do not apply outside the profile root');
+    assert.notEqual(o.headingMarginTop, i.headingMarginTop, 'negative scope: prose heading margin does not apply outside the profile root');
+    assert.equal(o.richHeadingFontSize, '24px', 'negative scope: the rich baseline heading size is not global');
+    assert.equal(o.richHeadingLineHeight, 'normal', 'negative scope: neither the rich baseline nor .leading-tight applies outside the profile root');
   });
 
   check('rich user bubble skin and its narrow override cascade correctly from the profile stylesheet (S3C slice C)', () => {

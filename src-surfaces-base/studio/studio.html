@@ -1,5 +1,5 @@
 <!--
- * @version 2.5.49
+ * @version 2.5.50
  * Changes: fixed shell, collapsed rail, simplified topbar;
  *          stylesheet href carries ?v=2.5.46 cache-bust because the Tauri
  *          V2 dev server (http://127.0.0.1:1430/) emits no
@@ -27,7 +27,10 @@
  *          v2.5.48 canonical message / content-body presentation moved
  *          out of studio.css into that stylesheet (profile css v1.0.1);
  *          v2.5.49 rich-replay shell / bubble presentation moved out of
- *          studio.css into that stylesheet (profile css v1.0.2).
+ *          studio.css into that stylesheet (profile css v1.0.2);
+ *          v2.5.50 ChatGPT provider-content compatibility layer (token
+ *          bridge, utilities, prose, code) moved out of studio.css into
+ *          that stylesheet (profile css v1.0.3).
 -->
 <!doctype html>
 <html>
@@ -35,11 +38,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>H2O Studio vNext</title>
-  <link rel="stylesheet" href="./studio.css?v=2.5.49" />
+  <link rel="stylesheet" href="./studio.css?v=2.5.50" />
   <!-- Renderer-owned PresentationProfile stylesheet (L-STUDIO-RENDERER):
        chatgpt-reference presentation rules scoped to the conversation root
        marker. Loads after studio.css. -->
-  <link rel="stylesheet" href="./renderer/presentation/chatgpt-reference.v1.css?v=1.0.2" />
+  <link rel="stylesheet" href="./renderer/presentation/chatgpt-reference.v1.css?v=1.0.3" />
 </head>
 <body data-h2o-studio-mode="1">
   <div class="wbShell">
