@@ -234,6 +234,9 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   // Desktop-only, verification-gated import/recovery (Phase H.4). Dry-run + explicit
   // no-overwrite import-as-new (fresh ids, provenance) via the Desktop store adapters.
   "ingestion/saved-chat-archive-importer.studio.js",
+  // M10 P3.6a: thin client over the trusted native portable verifier. Owns no
+  // verification, no contentHash, and no legacy fallback.
+  "ingestion/saved-chat-portable-package-verification.tauri.js",
   // Desktop-only, verification-gated .h2ochat export/share (Phase J.2). Dry-run +
   // explicit no-overwrite manifest-driven folder copy to $HOME/H2O Studio Exports/.
   "ingestion/saved-chat-archive-exporter.studio.js",
@@ -255,6 +258,24 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   // diagnostics into Settings -> Diagnostics via the injected read-only API; no
   // mutation/repair/import/sync/Chrome. Shows Desktop-only message when absent.
   "ingestion/saved-chat-reclamation-ui.studio.js",
+  // M10 P3a: the trusted chain. The thin client reads the P1 Rust integrity
+  // command; the composition joins it with the existing separate DB/CAS/renderer
+  // observations and the P2 mapper. Loaded before the diagnostics facade can be
+  // invoked; all three resolve their collaborators lazily, at call time.
+  "ingestion/saved-chat-archive-integrity.tauri.js",
+  // M10 P3.5b: read-only renderer DRIFT observation over trusted-valid
+  // packages. Owns no gzip; decodes via the codec's bounded non-verifying
+  // decoder. Resolved lazily by the composition below.
+  "ingestion/saved-chat-archive-renderer-hygiene.js",
+  "ingestion/saved-chat-archive-health-composition.js",
+  // M10 P2: pure trusted-facts -> operator-state mapping. No verification,
+  // filesystem, invoke or mutation authority.
+  "ingestion/saved-chat-archive-health-mapping.js",
+  // Saved Chat Recovery Center timeline surface. New-UI-only, read-only
+  // per-chat version timeline; composes trusted integrity, the canonical
+  // partition, coverage and the read-only inspector. No ordering, hashing,
+  // validity, classification or recovery-eligibility authority; no mutation.
+  "ingestion/saved-chat-recovery-center-ui.studio.js",
   "ingestion/archive-health-ui.studio.js",
   // Chrome: saved-chat archive request delivery UI (Phase D.3C.2). Minimal
   // manual Settings utility card wiring the D.3C.1 delivery APIs under an
@@ -1401,11 +1422,21 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   "ingestion/saved-chat-archive-materializer-action.studio.js",
   "ingestion/saved-chat-archive-inspector.studio.js",
   "ingestion/saved-chat-archive-importer.studio.js",
+  "ingestion/saved-chat-portable-package-verification.tauri.js",
   "ingestion/saved-chat-archive-exporter.studio.js",
   "ingestion/saved-chat-archive-restore.studio.js",
   "ingestion/saved-chat-archive-relink.studio.js",
   "ingestion/saved-chat-archive-materializer.tauri.js",
   "ingestion/saved-chat-reclamation-ui.studio.js",
+  "ingestion/saved-chat-archive-integrity.tauri.js",
+  "ingestion/saved-chat-archive-renderer-hygiene.js",
+  "ingestion/saved-chat-archive-health-composition.js",
+  "ingestion/saved-chat-archive-health-mapping.js",
+  // Saved Chat Recovery Center timeline surface. New-UI-only, read-only
+  // per-chat version timeline; composes trusted integrity, the canonical
+  // partition, coverage and the read-only inspector. No ordering, hashing,
+  // validity, classification or recovery-eligibility authority; no mutation.
+  "ingestion/saved-chat-recovery-center-ui.studio.js",
   "ingestion/archive-health-ui.studio.js",
   // Chrome: saved-chat archive request delivery UI (Phase D.3C.2). Minimal
   // manual Settings utility card wiring the D.3C.1 delivery APIs under an

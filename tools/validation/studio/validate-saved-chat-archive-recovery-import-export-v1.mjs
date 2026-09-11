@@ -86,6 +86,24 @@ const FORBIDDEN_IMPORTER_NAMES = [
 // module — never leaked into the writer/diagnostics/inspector/scanner/materializer
 // or the Chrome reader.
 const IMPORTER_ENTRY_NAMES = ['dryRunImportPackage', 'importVerifiedPackage'];
+/* The import entry points are CALLER-CONFINED. They were confined to the
+ * importer alone; the Recovery Center is now the one admitted caller, because
+ * T04 wires Recover-as-New through exactly these governed entry points rather
+ * than acquiring write authority of its own.
+ *
+ * This is a topology change, not an authority change, so the allowlist is an
+ * exact path set with a pinned size — a third caller cannot appear silently —
+ * and the admitted caller is additionally pinned to the exact importer symbols
+ * it may name. */
+const RECOVERY_CENTER_REL = 'src-surfaces-base/studio/ingestion/saved-chat-recovery-center-ui.studio.js';
+const IMPORTER_ENTRY_CALLERS = new Set([IMPORTER_REL, RECOVERY_CENTER_REL]);
+/* Everything the Recovery Center may name on the importer: the two T04 entry
+ * points plus the pure snapshot mapper accepted at T03. */
+const RECOVERY_CENTER_IMPORTER_SYMBOLS = new Set([
+  'dryRunImportPackage',
+  'importVerifiedPackage',
+  'buildTurnsFromPackageSnapshot',
+]);
 // Broad/placeholder .h2ochat EXPORT / share entry points remain forbidden. J.2
 // allows only the bounded Desktop archiveExporter module with these explicit
 // names.
@@ -99,6 +117,15 @@ const EXPORTER_ENTRY_NAMES = ['archiveExporter', 'dryRunExportPackage', 'exportV
 // so bare `archiveRestore` does not collide with unrelated sync-lane identifiers like
 // archiveRestoreInstalled.)
 const RESTORE_ENTRY_NAMES = ['H2O.Studio.archiveRestore', 'dryRunRestorePackage', 'restoreVerifiedPackage'];
+/* T05: the restore entry points gain exactly one admitted caller, the Recovery
+ * Center, on the same terms as the importer entry points above — an exact path
+ * set with a pinned size, plus a symbol pin on what that caller may name.
+ * Relink stays module-only. */
+const RESTORE_ENTRY_CALLERS = new Set([RESTORE_REL, RECOVERY_CENTER_REL]);
+const RECOVERY_CENTER_RESTORE_SYMBOLS = new Set([
+  'dryRunRestorePackage',
+  'restoreVerifiedPackage',
+]);
 // Planned K.4 relink entry points. They may exist ONLY in the future relink module.
 // Tombstone override/undelete remains deferred everywhere.
 const RELINK_ENTRY_NAMES = ['H2O.Studio.archiveRelink', 'dryRunRelinkPackage', 'relinkVerifiedPackage'];
@@ -242,31 +269,146 @@ check('[INVARIANT] .h2ochat referenced only by writer/diagnostics/inspector/impo
       assert.ok(!code.includes(name), 'unexpected legacy import entry-point name: ' + name + ' in ' + path.relative(REPO_ROOT, abs));
     }
   }
-  // The real H.4 import entry points may live ONLY in the importer module.
+  // The real H.4 import entry points may live ONLY in the importer module and,
+  // since T04, in the Recovery Center that requests recovery through them.
+  const observedCallers = [];
   for (const abs of walkJs(path.join(REPO_ROOT, STUDIO_DIR_REL))) {
     const rel = path.relative(REPO_ROOT, abs);
-    if (rel === IMPORTER_REL) continue;
     const code = stripComments(fs.readFileSync(abs, 'utf8'));
-    for (const name of IMPORTER_ENTRY_NAMES) {
-      assert.ok(!code.includes(name), 'import entry point leaked outside the importer module: ' + name + ' in ' + rel);
+    const names = IMPORTER_ENTRY_NAMES.filter((name) => code.includes(name));
+    if (names.length) observedCallers.push(rel);
+    if (IMPORTER_ENTRY_CALLERS.has(rel)) continue;
+    for (const name of names) {
+      assert.ok(false, 'import entry point leaked outside the admitted callers: ' + name + ' in ' + rel);
     }
   }
+  /* The allowlist is EXACTLY two paths and cannot grow silently. */
+  assert.equal(IMPORTER_ENTRY_CALLERS.size, 2, 'the admitted importer-caller set changed size');
+  assert.ok(IMPORTER_ENTRY_CALLERS.has(IMPORTER_REL), 'the importer itself must remain admitted');
+  assert.ok(IMPORTER_ENTRY_CALLERS.has(RECOVERY_CENTER_REL), 'the Recovery Center must be the only other admitted caller');
+  for (const rel of [IMPORTER_REL, RECOVERY_CENTER_REL]) {
+    assert.ok(fs.existsSync(path.join(REPO_ROOT, rel)), 'an admitted caller does not exist: ' + rel);
+  }
+  /* Both admitted callers must actually be observed, so the allowlist can never
+   * quietly carry a path that no longer participates. */
+  assert.deepEqual(observedCallers.slice().sort(), [IMPORTER_REL, RECOVERY_CENTER_REL].slice().sort(),
+    'observed importer-entry callers differ from the admitted set: ' + observedCallers.join(', '));
+
+  /* The admitted caller may name ONLY the governed T04 entry points and the pure
+   * mapper. A fourth importer symbol in the Recovery Center would be new reach
+   * into that module regardless of what it is called. */
+  const rcCode = stripComments(readRepo(RECOVERY_CENTER_REL));
+  const rcSymbols = new Set(
+    (rcCode.match(/archiveImporter\s*\)?\s*\.\s*([A-Za-z0-9_$]+)/g) || [])
+      .map((m) => m.split('.').pop().trim()),
+  );
+  for (const sym of rcSymbols) {
+    assert.ok(RECOVERY_CENTER_IMPORTER_SYMBOLS.has(sym),
+      'Recovery Center names a non-admitted importer symbol: archiveImporter.' + sym);
+  }
+  assert.equal(RECOVERY_CENTER_IMPORTER_SYMBOLS.size, 3, 'the admitted Recovery Center symbol set changed size');
   // The planned K restore/relink entry points may live ONLY in their dedicated
   // modules. This keeps importer/exporter/restore roles separated.
+  const observedRestoreCallers = [];
   for (const abs of walkJs(path.join(REPO_ROOT, STUDIO_DIR_REL))) {
     const rel = path.relative(REPO_ROOT, abs);
     const code = stripComments(fs.readFileSync(abs, 'utf8'));
-    if (rel !== RESTORE_REL) {
-      for (const name of RESTORE_ENTRY_NAMES) {
-        assert.ok(!code.includes(name), 'restore entry point leaked outside the restore module: ' + name + ' in ' + rel);
+    const restoreNames = RESTORE_ENTRY_NAMES.filter((name) => code.includes(name));
+    if (restoreNames.length) observedRestoreCallers.push(rel);
+    if (!RESTORE_ENTRY_CALLERS.has(rel)) {
+      for (const name of restoreNames) {
+        assert.ok(false, 'restore entry point leaked outside the admitted callers: ' + name + ' in ' + rel);
       }
     }
+    /* Relink is unchanged: it may live ONLY in the relink module. Tombstone
+     * override/undelete remains deferred everywhere. */
     if (rel !== RELINK_REL) {
       for (const name of RELINK_ENTRY_NAMES) {
         assert.ok(!code.includes(name), 'relink entry point leaked outside the relink module: ' + name + ' in ' + rel);
       }
     }
   }
+  /* The restore-caller allowlist is EXACTLY two paths and both must participate. */
+  assert.equal(RESTORE_ENTRY_CALLERS.size, 2, 'the admitted restore-caller set changed size');
+  assert.ok(RESTORE_ENTRY_CALLERS.has(RESTORE_REL), 'the restore module itself must remain admitted');
+  assert.ok(RESTORE_ENTRY_CALLERS.has(RECOVERY_CENTER_REL), 'the Recovery Center must be the only other admitted caller');
+  assert.equal(RESTORE_ENTRY_CALLERS.has(RELINK_REL), false, 'the relink module must never be an admitted restore caller');
+  assert.deepEqual(observedRestoreCallers.slice().sort(), [RESTORE_REL, RECOVERY_CENTER_REL].slice().sort(),
+    'observed restore-entry callers differ from the admitted set: ' + observedRestoreCallers.join(', '));
+  /* And it may name ONLY the two governed T05 entry points. */
+  const rcRestoreSymbols = new Set(
+    (rcCode.match(/archiveRestore\s*\)?\s*\.\s*([A-Za-z0-9_$]+)/g) || [])
+      .map((m) => m.split('.').pop().trim()),
+  );
+  assert.ok(rcRestoreSymbols.size > 0, 'the Recovery Center names no restore symbol — the pin would pass vacuously');
+  for (const sym of rcRestoreSymbols) {
+    assert.ok(RECOVERY_CENTER_RESTORE_SYMBOLS.has(sym),
+      'Recovery Center names a non-admitted restore symbol: archiveRestore.' + sym);
+  }
+  assert.equal(RECOVERY_CENTER_RESTORE_SYMBOLS.size, 2, 'the admitted Recovery Center restore symbol set changed size');
+  for (const sym of RECOVERY_CENTER_RESTORE_SYMBOLS) {
+    assert.ok(rcRestoreSymbols.has(sym), 'an admitted restore symbol is not actually used: ' + sym);
+  }
+});
+
+check('[INVARIANT] archive-path recovery reads are bound to TRUSTED package state, not to the package', () => {
+  /* The defect this pins: a package read after its trusted verification could
+   * supply the very digest/length/encoding used to validate it, and could
+   * choose the weaker read regime by claiming a different schemaVersion. Both
+   * governed consumers now take those expectations from the trusted
+   * archive-integrity occupant instead.
+   *
+   * Scanned on COMMENT-STRIPPED source: the modules' own prose describes the
+   * manifest they no longer trust, so a raw substring scan would report the
+   * comment that promises the opposite. */
+  const RESTORE_REL_LOCAL = 'src-surfaces-base/studio/ingestion/saved-chat-archive-restore.studio.js';
+  for (const rel of [IMPORTER_REL, RESTORE_REL_LOCAL]) {
+    const code = stripComments(readRepo(rel));
+    const who = rel.split('/').pop();
+
+    /* 1. The archive path performs no manifest read at all, so no descriptor or
+     *    regime decision can be derived from one. */
+    for (const banned of ['readPackageManifestJson', "readPackageTextFile(packagePath, 'manifest.json')"]) {
+      assert.ok(!code.includes(banned), `${who}: archive path still reads the package manifest: ${banned}`);
+    }
+    /* 2. The regime is chosen by the TRUSTED construction family, never by a
+     *    package-supplied schemaVersion or descriptor presence. */
+    assert.ok(code.includes('anchors.family === FAMILY_V3'),
+      `${who}: the read regime is not selected from the trusted construction family`);
+    assert.ok(!/m\.schemaVersion === 3/.test(code) || rel === IMPORTER_REL,
+      `${who}: a package-supplied schemaVersion still selects the read regime`);
+    /* 3. Trusted member anchors are required, and the v3 descriptor is built
+     *    solely from them. */
+    for (const required of ['trustedOccupantFor', 'trustedStateMatches', 'trustedMemberAnchors',
+      'trustedSnapshotDescriptor', 'readBoundPackageSnapshotJson']) {
+      assert.ok(code.includes(required), `${who}: missing trusted-binding seam ${required}`);
+    }
+    assert.ok(code.includes('descriptor: trustedSnapshotDescriptor(anchors)'),
+      `${who}: the v3 descriptor is not built solely from trusted anchors`);
+    /* 4. v1/v2 compare the bounded reader's own returned measurements. */
+    assert.ok(code.includes('read.physicalSha256') && code.includes('read.physicalByteLength'),
+      `${who}: the v1/v2 read is not compared against the trusted physical measurements`);
+    /* 5. Fail-closed, never a downgrade: an incomplete anchor set returns null
+     *    rather than falling through to the weaker path. */
+    assert.ok(/if \(!anchors\) return null;/.test(code),
+      `${who}: partial trusted anchors do not fail closed`);
+    /* 6. Neither module recomputes a digest of its own. */
+    for (const banned of ['createHash', 'subtle.digest', 'sha256PrefixedBytes(']) {
+      assert.ok(!code.includes(banned), `${who}: a second hash authority appeared: ${banned}`);
+    }
+  }
+
+  /* The PORTABLE path is a different shape and stays untouched: it verifies one
+   * in-memory contained entry set and then reads its manifest and snapshot from
+   * that same set, so it has no second-read window. Its manifest use is
+   * legitimate and must not be banned by the archive-path rule above. */
+  const importerCode = stripComments(readRepo(IMPORTER_REL));
+  assert.ok(importerCode.includes('readPackageSnapshotJsonFromBytes'),
+    'the portable in-memory read seam was removed');
+  assert.ok(importerCode.includes('loadPortableCandidate'),
+    'the portable candidate path was removed');
+  assert.ok(/sourceKind\) === 'archive-package'/.test(importerCode),
+    'the importer no longer distinguishes the archive path from the portable path');
 });
 
 check('[INVARIANT] Chrome runtime (mv3 reader) has no package/CAS body or SQLite authority', () => {
@@ -282,9 +424,24 @@ check('[INVARIANT] scanner/materializer/writer behavior unchanged for H.1', () =
   assert.ok(writerCode.includes('writeSavedChatPackageV1'), 'writer still defines the package writer');
 });
 
-check('[INVARIANT] diagnostics still validates required files + hashes/assets, read-only', () => {
-  assert.match(diagCode, /REQUIRED_FILES/);
-  assert.match(diagCode, /sha256/);
+check('[INVARIANT] diagnostics keeps its live observations and stays read-only', () => {
+  /* M10 P4 retired the duplicate JS package verifier. What survives here is
+     everything that was never a validity decision: DB drift, live-CAS presence,
+     write residue, capability reporting, and the trusted Health facade. */
+  for (const live of [
+    'dbDriftForIdentity', 'liveCasPresenceForShas', 'residueObservationV1',
+    'diagnoseSavedChatArchiveCapabilitiesV1', 'diagnoseSavedChatArchiveV1',
+  ]) {
+    assert.match(diagCode, new RegExp(live), 'live observation missing: ' + live);
+  }
+  /* And it decides no package validity of its own any more: the verifier entry
+     points are gone and nothing left computes a hash. */
+  for (const retired of [
+    'validateSavedChatPackageV1', 'validateSavedChatPackageBytesV1',
+    'filesystemPackageSource', 'memoryPackageSource', 'sha256Hex', 'canonicalJson',
+  ]) {
+    assert.ok(!diagCode.includes(retired), 'retired verifier surface still present: ' + retired);
+  }
   for (const banned of ['plugin:fs|write', 'plugin:sql|execute', MATERIALIZE_API, 'snapshots.create', 'snapshots.upsert']) {
     assert.ok(!diagCode.includes(banned), 'diagnostics must stay read-only (found: ' + banned + ')');
   }
@@ -323,14 +480,41 @@ check('[H.2] inspector is Desktop-only (detectTauri + isDesktopCapable gate)', (
   assert.match(inspectorCode, /isDesktopCapable/);
 });
 
-check('[H.2] inspector reuses the read-only diagnostics validation (validateSavedChatPackageV1 + listSavedChatArchivePackagesV1)', () => {
-  assert.ok(inspectorCode.includes('validateSavedChatPackageV1'), 'inspector must reuse validateSavedChatPackageV1');
-  assert.ok(inspectorCode.includes('listSavedChatArchivePackagesV1'), 'inspector must reuse the package inventory list');
+/* M10 P3.5 superseded the original H.2 assertion. The Inspector used to reuse
+ * the read-only JS diagnostics walk (validateSavedChatPackageV1 +
+ * listSavedChatArchivePackagesV1); archive integrity is now read from the
+ * TRUSTED native authority and partitioned through the canonical archive-health
+ * mapping, so requiring the legacy verifier would now assert the architecture
+ * P3.5 deliberately retired. The read-only, no-write, no-HTML-execution and
+ * status-vocabulary guarantees around it are unchanged and still asserted by
+ * the sibling checks below.
+ *
+ * `mapInspectStatus` deliberately REMAINS in the Inspector for the M08 portable
+ * importer carveout; P3.6 retires it. This check therefore constrains only the
+ * archive-integrity decision path. */
+check('[H.2] inspector decides archive integrity from the trusted native authority, not the legacy JS verifier', () => {
+  assert.ok(inspectorCode.includes('readSavedChatArchiveIntegrityV1'),
+    'inspector must read archive integrity from the trusted native client');
+  assert.ok(inspectorCode.includes('partitionOccupants'),
+    'inspector must partition occupants through the canonical archive-health mapping');
+  assert.ok(inspectorCode.includes('mapTrustedInspectStatus'),
+    'inspector must map the TRUSTED occupant into its status vocabulary');
+  for (const retired of ['validateSavedChatPackageV1', 'listSavedChatArchivePackagesV1']) {
+    assert.ok(!inspectorCode.includes(retired),
+      'inspector must not decide archive integrity through the retired legacy verifier: ' + retired);
+  }
 });
 
 check('[H.2] inspector exposes the granular status vocabulary', () => {
-  for (const st of ['verified', 'corrupted', 'missing-files', 'hash-mismatch', 'unsupported-version', 'read-error']) {
+  /* M10 P3.5 replaced the legacy labels with the trusted taxonomy, and P3.6b
+     deleted the last legacy mapper: `missing-files` and `unsupported-version`
+     are retired because no trusted fact proves either claim. */
+  for (const st of ['verified', 'corrupted', 'hash-mismatch', 'read-error',
+    'incomplete', 'unreadable', 'identity-mismatch', 'unsupported-encoding']) {
     assert.ok(inspectorCode.includes("'" + st + "'"), 'inspector status missing: ' + st);
+  }
+  for (const retired of ['missing-files', 'unsupported-version']) {
+    assert.ok(!inspectorCode.includes("'" + retired + "'"), 'retired status still present: ' + retired);
   }
 });
 
@@ -433,8 +617,15 @@ check('[H.4] restore/relink deferred + import-as-new records provenance + full d
   for (const prov of ['recovered', 'originalChatId', 'originalSnapshotId', 'recoveredAt']) {
     assert.ok(importerCode.includes(prov), 'provenance field missing: ' + prov);
   }
-  for (const st of ['import-ready', 'already-imported', 'conflict-chat-id', 'conflict-snapshot-id', 'corrupted', 'unsupported-version', 'rejected', 'imported']) {
+  /* M10 P3.6b retired `unsupported-version`: portable import is decided by the
+     trusted native verifier, which refuses an incoherent version triple as
+     structural incoherence — a different claim from "version unsupported",
+     and no trusted fact proves the latter. */
+  for (const st of ['import-ready', 'already-imported', 'conflict-chat-id', 'conflict-snapshot-id', 'corrupted', 'rejected', 'imported']) {
     assert.ok(importerCode.includes(st), 'decision/state missing: ' + st);
+  }
+  assert.ok(!importerCode.includes('unsupported-version'), 'unsupported-version is retired');
+  {
   }
 });
 

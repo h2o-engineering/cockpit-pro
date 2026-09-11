@@ -38,43 +38,61 @@ const CHAT = 'chat_cov';
 const HASH_A = 'sha256-' + 'a'.repeat(64);
 const HASH_B = 'sha256-' + 'b'.repeat(64);
 
-/* A verified-package fixture. `contentHash` is what the governed validator
- * RECOMPUTES; `manifestContentHash` is what the manifest merely claims — the
- * engine must never read the latter. */
+/* M10 P3.5a: a TRUSTED OCCUPANT fixture. Package validity is decided by Rust,
+ * so the fixture states the trusted class/reason directly rather than a legacy
+ * diagnostic. `contentHash` is what the trusted verifier RECOMPUTED. */
+const FAMILY_BY_SCHEMA = { 1: 'v1', 2: 'v2', 3: 'v3' };
 function pkg({
   dir, classification = 'generation', contentHash = HASH_A, status = 'ok',
   savedAt = '2026-01-01T00:00:00.000Z', schemaVersion = 2, chatId = CHAT,
-  blockers = [], manifestContentHash = 'sha256-' + 'f'.repeat(64),
-  mtime = 0, generatedAt = '2099-01-01T00:00:00.000Z',
+  blockers = [], reason = 'corrupt',
 }) {
-  return {
-    packagePath: `archive/packages/${dir}`,
-    packageDirName: dir,
-    nameClassification: classification,
-    chatId, snapshotId: 'snap1',
-    schemaVersion, payloadVersion: schemaVersion === 2 ? 2 : null,
-    status, savedAt, blockers: blockers.map((code) => ({ code })),
-    hashChecks: { expectedContentHash: contentHash, actualContentHash: manifestContentHash },
-    // Timestamps deliberately present so a test can prove they are ignored.
-    mtimeMs: mtime, manifestGeneratedAt: generatedAt,
+  const klass = status !== 'ok'
+    ? 'indeterminate'
+    : (classification === 'legacy' ? 'legacy-package' : 'verified-generation');
+  const occupant = {
+    path: `archive/packages/${dir}`,
+    name: dir,
+    class: klass,
+    blockers: blockers.map((code) => ({ code })),
   };
+  if (klass === 'indeterminate') {
+    occupant.reason = reason;
+    return occupant;
+  }
+  occupant.chatId = chatId;
+  occupant.snapshotId = 'snap1';
+  occupant.contentHash = contentHash;
+  occupant.constructionFamily = FAMILY_BY_SCHEMA[schemaVersion] || 'v2';
+  occupant.snapshotEncoding = 'identity';
+  occupant.savedAt = savedAt;
+  occupant.orderable = true;
+  occupant.assetShas = [];
+  return occupant;
 }
 
-function load({ packages = [], complete = true, truncated = false, blockers = [], projection }) {
+/* Non-package occupants the canonical partition must exclude entirely. */
+const reservedOccupant = () => ({ path: 'archive/packages/.h2o-archive.lock', name: '.h2o-archive.lock', class: 'reserved-infrastructure', blockers: [] });
+const strayOccupant = () => ({ path: 'archive/packages/notes.txt', name: 'notes.txt', class: 'indeterminate', reason: 'not-a-package-name', blockers: [] });
+
+const MAPPER_REL = 'src-surfaces-base/studio/ingestion/saved-chat-archive-health-mapping.js';
+
+function load({ packages = [], complete = true, projection, integrityThrows = false, extraOccupants = [] }) {
   const context = { console, setTimeout, __TAURI_INTERNALS__: {}, H2O: { Studio: { ingestion: {} } } };
   context.globalThis = context;
   const sandbox = vm.createContext(context);
+  /* The REAL canonical partition — Coverage must never re-implement it. */
+  vm.runInContext(readRepo(MAPPER_REL), sandbox, { filename: MAPPER_REL });
   const ing = sandbox.H2O.Studio.ingestion;
-  ing.listSavedChatArchivePackagesV1 = async () => ({
-    packages: packages.map((p) => ({ packagePath: p.packagePath })),
-    complete, truncated, blockers: blockers.map((code) => ({ code })),
-  });
-  const byPath = new Map(packages.map((p) => [p.packagePath, p]));
-  ing.validateSavedChatPackageV1 = async ({ packagePath, includeDbChecks, includeCasChecks }) => {
-    // The engine must exclude mutable EXTERNAL state from package validity.
-    assert.equal(includeDbChecks, false, 'DB correlation must not decide package validity');
-    assert.equal(includeCasChecks, false, 'live CAS presence must not decide package validity');
-    return byPath.get(packagePath);
+  ing.readSavedChatArchiveIntegrityV1 = async () => {
+    if (integrityThrows) throw new Error('trusted archive integrity unavailable');
+    return {
+      schema: 'h2o.savedChatArchiveIntegrity', schemaVersion: 1,
+      complete, blockers: [],
+      observed: { byConstructionFamily: { v1: 0, v2: 0, v3: 0 } },
+      liveGenerationFamily: 'v3',
+      occupants: packages.concat(extraOccupants),
+    };
   };
   if (projection) ing.probeCurrentSavedChatProjectionV1 = async () => projection;
   vm.runInContext(readRepo(MODULE_REL), sandbox, { filename: MODULE_REL });
@@ -123,7 +141,7 @@ async function main() {
     assert.equal(r.covered, true);
     assert.equal(r.fresh.length, 2, 'physical representation differences must not alter logical coverage');
     assert.notEqual(identity.snapshotPhysicalSha256, gzip.snapshotPhysicalSha256);
-    assert.equal(identity.hashChecks.expectedContentHash, gzip.hashChecks.expectedContentHash);
+    assert.equal(identity.contentHash, gzip.contentHash, 'both representations share one logical contentHash');
   });
 
   await checkAsync('2. complete scan + authoritative projection + no equal package ⇒ not covered', async () => {
@@ -163,7 +181,7 @@ async function main() {
   await checkAsync('5. a corrupt sibling does not erase a valid FRESH sibling', async () => {
     const describe = load({
       packages: [
-        pkg({ dir: 'bad.h2ochat', status: 'blocked', blockers: ['content-hash-mismatch'], contentHash: HASH_B }),
+        pkg({ dir: `${CHAT}.gbad.h2ochat`, status: 'blocked', blockers: ['generation-content-hash-mismatch'], contentHash: HASH_B }),
         pkg({ dir: 'good.h2ochat', contentHash: HASH_A }),
       ],
       projection: okProjection(HASH_A),
@@ -172,7 +190,7 @@ async function main() {
     assert.equal(r.covered, true, 'the corrupt sibling must not remove coverage');
     assert.equal(r.fresh.length, 1);
     assert.equal(r.unusable.length, 1, 'and the corrupt one is surfaced, not hidden');
-    assert.equal(r.unusable[0].packageDirName, 'bad.h2ochat');
+    assert.equal(r.unusable[0].packageDirName, `${CHAT}.gbad.h2ochat`);
   });
 
   await checkAsync('6. manifest contentHash tampering cannot manufacture freshness', async () => {
@@ -294,13 +312,58 @@ async function main() {
 
   await checkAsync('a mismatched name is unusable even when its manifest claims the current hash', async () => {
     const describe = load({
-      packages: [pkg({ dir: 'weird.h2ochat', classification: 'mismatch', contentHash: HASH_A, status: 'blocked', blockers: ['package-name-identity-mismatch'] })],
+      packages: [pkg({ dir: `${CHAT}.gweird.h2ochat`, status: 'blocked', reason: 'identity-mismatch', contentHash: HASH_A, blockers: [] })],
       projection: okProjection(HASH_A),
     });
     const r = await describe({ chatId: CHAT });
     assert.equal(r.covered, false, 'a mismatched package may not provide coverage');
     assert.equal(r.unusable.length, 1);
     assert.equal(r.fresh.length, 0);
+  });
+
+  await checkAsync('M10 P3.5a: reserved infrastructure and strays are excluded by the canonical partition', async () => {
+    const describe = load({
+      packages: [pkg({ dir: `${CHAT}.g1.h2ochat`, contentHash: HASH_A })],
+      extraOccupants: [reservedOccupant(), strayOccupant()],
+      projection: okProjection(HASH_A),
+    });
+    const r = await describe({ chatId: CHAT });
+    assert.equal(r.covered, true);
+    assert.equal(r.fresh.length, 1);
+    assert.equal(r.unusable.length, 0, 'neither infrastructure nor a stray is a package');
+    assert.equal(r.legacy.length + r.generations.length, 1);
+  });
+
+  await checkAsync('M10 P3.5a: an incomplete trusted scan never concludes absence', async () => {
+    const empty = load({ packages: [], complete: false, projection: okProjection(HASH_A) });
+    const r = await empty({ chatId: CHAT });
+    assert.equal(r.complete, false);
+    assert.equal(r.preserved, null, 'incomplete discovery may not prove absence');
+    assert.equal(r.covered, null);
+    assert.equal(r.reason, 'discovery-incomplete');
+
+    /* A positive stays valid even under an incomplete scan. */
+    const found = load({ packages: [pkg({ dir: `${CHAT}.g1.h2ochat`, contentHash: HASH_A })], complete: false, projection: okProjection(HASH_A) });
+    const r2 = await found({ chatId: CHAT });
+    assert.equal(r2.complete, false);
+    assert.equal(r2.preserved, true, 'a verified package in hand is a positive fact');
+    assert.equal(r2.covered, true);
+  });
+
+  await checkAsync('M10 P3.5a: a trusted-path failure fails CLOSED with no legacy fallback', async () => {
+    const describe = load({ integrityThrows: true, projection: okProjection(HASH_A) });
+    const r = await describe({ chatId: CHAT });
+    assert.equal(r.reason, 'archive-integrity-unavailable');
+    assert.equal(r.complete, false);
+    assert.equal(r.preserved, null);
+    assert.equal(r.covered, null);
+    /* And the engine no longer references the legacy archive verifier at all. */
+    const src = readRepo(MODULE_REL);
+    for (const forbidden of ['listSavedChatArchivePackagesV1', 'validateSavedChatPackageV1']) {
+      assert.ok(!src.includes(forbidden), `Coverage must not reference ${forbidden}`);
+    }
+    assert.ok(src.includes('readSavedChatArchiveIntegrityV1'), 'Coverage consumes the trusted client');
+    assert.ok(src.includes('partitionOccupants'), 'Coverage reuses the canonical partition');
   });
 
   await checkAsync('a package belonging to another verified chatId is ignored', async () => {

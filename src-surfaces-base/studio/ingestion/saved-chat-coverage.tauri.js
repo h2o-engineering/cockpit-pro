@@ -2,9 +2,16 @@
  *
  * Composes three EXISTING authorities and adds none of its own:
  *
- *   1. complete archive discovery      (G1 listSavedChatArchivePackagesV1)
- *   2. governed package validation     (G1 validateSavedChatPackageV1)
+ *   1. trusted archive enumeration + package validity
+ *                                      (M10 readSavedChatArchiveIntegrityV1)
+ *   2. canonical occupant partition    (M10 archiveHealthMapping.partitionOccupants)
  *   3. current Desktop projection      (Phase 2.1 probe)
+ *
+ * M10 P3.5a: archive package validity moved from the legacy JavaScript verifier
+ * to the trusted Rust authority. Coverage reads the trusted envelope DIRECTLY —
+ * not through the Archive Health facade — because it needs package truth, not
+ * Health aggregation, DB drift or renderer hygiene. A trusted-path failure fails
+ * closed; there is no fallback to the legacy verifier.
  *
  * It is stateless: no persistent index, no mutable current pointer, no second
  * package validator, no second contentHash implementation. Every verdict is
@@ -80,22 +87,52 @@
     return ah < bh ? -1 : 1;
   }
 
-  function entryFrom(diag) {
-    var d = safeObject(diag);
+  /* M10 P3.5a: contentHash REPRESENTATION normalization only.
+   *
+   * The trusted archive envelope carries a bare lowercase hex digest; the
+   * current-projection probe and the legacy validator both carry the
+   * `sha256-<hex>` form. Comparing the two representations directly would make
+   * every package read stale, so both sides are normalized to bare hex before
+   * comparison. The freshness RULE is unchanged — trusted recomputed
+   * contentHash == current projection contentHash — and nothing is recomputed
+   * here. */
+  function bareHash(value) {
+    var text = cleanString(value).toLowerCase();
+    return text.indexOf('sha256-') === 0 ? text.slice(7) : text;
+  }
+
+  /* The canonical version triple, as the publisher's own gate established it.
+   * V1 carries no payloadVersion at all; V2 and V3 carry theirs. Derived from
+   * the trusted construction family rather than re-read from bytes. */
+  var SCHEMA_VERSION_BY_FAMILY = { v1: 1, v2: 2, v3: 3 };
+  var PAYLOAD_VERSION_BY_FAMILY = { v1: null, v2: 2, v3: 3 };
+
+  /* M10 P3.5a: built from a TRUSTED occupant. Archive package validity is
+   * decided by Rust; this maps already-established facts and derives nothing
+   * about integrity. */
+  function entryFromOccupant(occupant) {
+    var o = safeObject(occupant);
+    var klass = cleanString(o.class);
+    var family = cleanString(o.constructionFamily);
+    var classification = klass === 'verified-generation' ? 'generation'
+      : (klass === 'legacy-package' ? 'legacy' : 'unclassified');
     return {
-      packagePath: cleanString(d.packagePath),
-      packageDirName: cleanString(d.packageDirName),
-      classification: cleanString(d.nameClassification) || 'unclassified',
-      chatId: cleanString(d.chatId),
-      snapshotId: cleanString(d.snapshotId),
-      schemaVersion: typeof d.schemaVersion === 'number' ? d.schemaVersion : null,
-      payloadVersion: typeof d.payloadVersion === 'number' ? d.payloadVersion : null,
-      /* RECOMPUTED from stored bytes by the governed validator — the only
-       * value freshness may be compared against. */
-      contentHash: cleanString(safeObject(d.hashChecks).expectedContentHash),
-      savedAt: cleanString(d.savedAt),
-      status: cleanString(d.status),
-      blockers: asArray(d.blockers).map(function (b) { return cleanString(b && b.code); }).filter(Boolean),
+      packagePath: cleanString(o.path),
+      packageDirName: cleanString(o.name),
+      classification: classification,
+      chatId: cleanString(o.chatId),
+      snapshotId: cleanString(o.snapshotId),
+      schemaVersion: Object.prototype.hasOwnProperty.call(SCHEMA_VERSION_BY_FAMILY, family)
+        ? SCHEMA_VERSION_BY_FAMILY[family] : null,
+      /* Still read by the archive materializer's recovery record, so it is
+       * retained and derived from the trusted family rather than dropped. */
+      payloadVersion: Object.prototype.hasOwnProperty.call(PAYLOAD_VERSION_BY_FAMILY, family)
+        ? PAYLOAD_VERSION_BY_FAMILY[family] : null,
+      /* RECOMPUTED by the trusted verifier from the stored bytes. */
+      contentHash: bareHash(o.contentHash),
+      savedAt: cleanString(o.savedAt),
+      status: classification === 'unclassified' ? 'blocked' : 'ok',
+      blockers: asArray(o.blockers).map(function (b) { return cleanString(b && b.code); }).filter(Boolean),
     };
   }
 
@@ -122,9 +159,13 @@
     };
 
     if (!chatId) { result.reason = 'chat-id-required'; return result; }
-    if (typeof ing.listSavedChatArchivePackagesV1 !== 'function'
-      || typeof ing.validateSavedChatPackageV1 !== 'function') {
-      result.reason = 'archive-diagnostics-unavailable';
+    /* M10 P3.5a: archive package validity now comes from the trusted Rust
+     * authority. Coverage deliberately does NOT go through the Health facade —
+     * it needs package truth, not Health aggregation, DB drift or hygiene. */
+    var mapping = (H2O.Studio && H2O.Studio.archiveHealthMapping) || null;
+    if (typeof ing.readSavedChatArchiveIntegrityV1 !== 'function'
+      || !mapping || typeof mapping.partitionOccupants !== 'function') {
+      result.reason = 'archive-integrity-unavailable';
       return result;
     }
 
@@ -148,42 +189,48 @@
     };
     var projectionOk = result.projection.status === 'ok' && !!result.projection.contentHash;
 
-    /* ── 2. Archive discovery (G1, complete by default) ─────────────────── */
-    var listed;
+    /* ── 2. Trusted archive facts (one read, complete by construction) ──── */
+    var envelope;
     try {
-      listed = safeObject(await ing.listSavedChatArchivePackagesV1({}));
+      envelope = safeObject(await ing.readSavedChatArchiveIntegrityV1());
     } catch (err) {
-      result.reason = 'discovery-failed';
+      /* Fail closed. There is deliberately no fallback to the legacy archive
+       * verifier: a trusted-path failure must never be answered by a weaker
+       * second opinion. */
+      result.reason = 'archive-integrity-unavailable';
       return result;
     }
     /* Absence of an explicit `complete` flag is treated as INCOMPLETE: a
      * missing signal is not evidence of completeness. */
-    var discoveryComplete = listed.complete === true
-      && listed.truncated !== true
-      && asArray(listed.blockers).length === 0;
+    var discoveryComplete = envelope.complete === true;
     result.complete = discoveryComplete;
 
-    /* ── 3. Governed validation of every candidate ──────────────────────── */
-    var candidates = asArray(listed.packages);
-    for (var i = 0; i < candidates.length; i += 1) {
-      var packagePath = cleanString(safeObject(candidates[i]).packagePath);
-      if (!packagePath) continue;
-      var diag;
-      try {
-        diag = await ing.validateSavedChatPackageV1({
-          packagePath: packagePath,
-          /* A self-contained package's validity must not be redefined by
-           * mutable state OUTSIDE it: a missing DB row or an evicted CAS
-           * object says nothing about whether these bytes verify. */
-          includeDbChecks: false,
-          includeCasChecks: false,
-        });
-      } catch (err) {
-        continue;
-      }
-      var entry = entryFrom(diag);
-      /* Verified identity decides ownership — never the basename. */
-      if (entry.chatId !== chatId) continue;
+    /* ── 3. Canonical partition (shared, never re-implemented) ──────────── */
+    var partition;
+    try {
+      partition = mapping.partitionOccupants(envelope.occupants);
+    } catch (err) {
+      result.complete = false;
+      result.reason = 'archive-integrity-unavailable';
+      return result;
+    }
+    /* Reserved infrastructure and non-package strays are excluded by the
+     * partition itself; only package-class occupants reach Coverage. */
+    var packageOccupants = asArray(partition && partition.packageOccupants);
+    for (var i = 0; i < packageOccupants.length; i += 1) {
+      var entry = entryFromOccupant(packageOccupants[i]);
+      /* Verified identity decides ownership for any package that can CONFER
+       * coverage — never the basename, so a lying filename cannot claim one.
+       *
+       * An occupant trusted integrity REFUSED has no proven identity at all, so
+       * the archive's own naming convention is the only signal that it belongs
+       * to this chat. Using it here is safe precisely because such an entry can
+       * only ever land in `unusable`: it is gated out of legacy/generations
+       * below and can never establish preserved, covered or fresh. */
+      var owns = entry.chatId
+        ? entry.chatId === chatId
+        : entry.packageDirName.indexOf(chatId + '.') === 0;
+      if (!owns) continue;
 
       var valid = entry.status === 'ok' && !!entry.contentHash
         && (entry.classification === 'legacy' || entry.classification === 'generation');
@@ -215,7 +262,7 @@
         ? 'no-current-snapshot'
         : 'projection-' + (result.projection.status || 'indeterminate');
     } else {
-      var currentHash = result.projection.contentHash;
+      var currentHash = bareHash(result.projection.contentHash);
       var liveFamily = constructionFamily(result.projection.schemaVersion);
       for (var j = 0; j < validEntries.length; j += 1) {
         var e = validEntries[j];

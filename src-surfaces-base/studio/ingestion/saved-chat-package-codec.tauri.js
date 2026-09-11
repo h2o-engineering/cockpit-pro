@@ -500,6 +500,7 @@
       __version: MODULE_VERSION,
       LOGICAL_SNAPSHOT_CAP_BYTES: LOGICAL_SNAPSHOT_CAP_BYTES,
       gzipEncodeBytes: gzipEncodeBytes,
+      decodeGzipBounded: decodeGzipBounded,
       sha256PrefixedBytes: sha256PrefixedBytes,
       verifyPackageMemberBytes: verifyPackageMemberBytes,
       readBoundedPackageMemberBytes: readBoundedPackageMemberBytes,

@@ -27,6 +27,7 @@ fn generation_in(
         name: format!("{chat}.g{h}.h2ochat"),
         class: OccupantClass::VerifiedGeneration(VerifiedPackage {
             chat_id: chat.to_string(),
+            snapshot_id: "snap-fixture".to_string(),
             content_hash: h,
             construction_family,
             snapshot_encoding: "identity".into(),
@@ -59,6 +60,7 @@ fn unorderable(chat: &str, tag: u8) -> ClassifiedOccupant {
         name: format!("{chat}.g{h}.h2ochat"),
         class: OccupantClass::VerifiedGeneration(VerifiedPackage {
             chat_id: chat.to_string(),
+            snapshot_id: "snap-fixture".to_string(),
             content_hash: h,
             construction_family: ConstructionFamily::V1,
             snapshot_encoding: "identity".into(),
@@ -82,6 +84,7 @@ fn legacy(chat: &str, tag: u8, saved_at: &str) -> ClassifiedOccupant {
         name: format!("{chat}.h2ochat"),
         class: OccupantClass::LegacyPackage(VerifiedPackage {
             chat_id: chat.to_string(),
+            snapshot_id: "snap-fixture".to_string(),
             content_hash: h,
             construction_family: ConstructionFamily::V1,
             snapshot_encoding: "identity".into(),
@@ -102,7 +105,10 @@ fn indeterminate(name: &str, reason: IndeterminateReason) -> ClassifiedOccupant 
     ClassifiedOccupant {
         path: format!("archive/packages/{name}"),
         name: name.to_string(),
-        class: OccupantClass::Indeterminate { reason },
+        class: OccupantClass::Indeterminate {
+            reason,
+            verifier_blocker: None,
+        },
     }
 }
 
@@ -1038,4 +1044,58 @@ impl ReclamationPlan {
             .iter()
             .any(|d| matches!(d.decision, Decision::Candidate { .. }))
     }
+}
+
+/// M10 P1 §21B — the additive `verifier_blocker` is DIAGNOSTIC ONLY: the
+/// destructive retention decision is identical whether or not a canonical
+/// verifier blocker is present.
+///
+/// Compared as whole plans, so no field of the destructive output — candidacy,
+/// exclusion, protection, the floor, the remedy hint or the CAS reference
+/// evidence — can differ on the strength of a diagnostic string.
+#[test]
+fn a_verifier_blocker_cannot_change_any_retention_decision() {
+    let with_blocker = |name: &str, reason: IndeterminateReason| ClassifiedOccupant {
+        path: format!("archive/packages/{name}"),
+        name: name.to_string(),
+        class: OccupantClass::Indeterminate {
+            reason,
+            verifier_blocker: Some("generation-destination-corrupt"),
+        },
+    };
+
+    let damaged = [
+        ("chat_x.gaa.h2ochat", IndeterminateReason::Corrupt),
+        ("chat_y.gbb.h2ochat", IndeterminateReason::IdentityMismatch),
+        ("stray.txt", IndeterminateReason::NotAPackageName),
+        ("chat_z.gcc.h2ochat", IndeterminateReason::Unreadable),
+        ("chat_w.gdd.h2ochat", IndeterminateReason::Partial),
+        ("chat_v.gee.h2ochat", IndeterminateReason::UnexpectedOutcome),
+    ];
+
+    let mut bare = five_generations("chat_a");
+    let mut blocked = five_generations("chat_a");
+    for (name, reason) in damaged {
+        bare.push(indeterminate(name, reason.clone()));
+        blocked.push(with_blocker(name, reason));
+    }
+    bare.push(reserved(".h2o-archive.lock"));
+    blocked.push(reserved(".h2o-archive.lock"));
+
+    let projections = verdicts(&[("chat_a", &hash(5))]);
+    let probe = db(vec![], vec![]);
+    let bare_plan = run(&scan(bare), &probe, projections.clone());
+    let blocked_plan = run(&scan(blocked), &probe, projections);
+
+    assert_eq!(
+        bare_plan, blocked_plan,
+        "the destructive plan must not observe the diagnostic blocker at all"
+    );
+
+    /* And the decision source never reads the field. */
+    let plan_src = include_str!("../archive_retention_plan.rs");
+    assert!(
+        !plan_src.contains("verifier_blocker"),
+        "retention must not name the diagnostic blocker field"
+    );
 }

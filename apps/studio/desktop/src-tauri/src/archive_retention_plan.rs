@@ -342,7 +342,9 @@ pub(crate) fn plan_with_floor_for_live_family(
                 // Reserved infrastructure is never an operator remedy target.
                 occupant_remedy: None,
             }),
-            OccupantClass::Indeterminate { reason } => {
+            // `..` is deliberate: M06 reads ONLY `reason`. The additive
+            // diagnostic blocker field must never reach a destructive decision.
+            OccupantClass::Indeterminate { reason, .. } => {
                 // An occupant we could not classify may hold CAS references we
                 // cannot see, so the reference view is no longer complete.
                 cas_reference_evidence_incomplete = true;

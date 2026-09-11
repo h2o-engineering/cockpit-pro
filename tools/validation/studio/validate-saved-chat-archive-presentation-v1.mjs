@@ -122,6 +122,47 @@ check('3. a preserved stale generation is historical, not current', () => {
   assert.equal(out.preservedLabel, 'Preserved');
 });
 
+/* ── Proof 3c — the TWO REPRESENTATIONS the engine actually emits ─────────
+ *
+ * Every other fixture in this file spells both sides of the comparison in the
+ * pre-M10 `sha256-<hex>` form, so none of them can see a representation skew.
+ * The shipping engine no longer does that: M10 P3.5a moved package identity to
+ * the trusted Rust authority, whose wire carries a BARE lowercase digest, while
+ * the current-projection probe still carries the writer's prefixed form. So the
+ * real coverage result arrives with a bare entry hash and a prefixed projection
+ * hash, and an adapter that compares them literally reports the exact inversion
+ * this validator exists to prevent: a genuinely current package rendered as
+ * "Historical (content changed)".
+ *
+ * This fixture is written in the representations the engine emits TODAY. */
+const BARE_CUR = 'c'.repeat(64);
+check('3c. a bare trusted digest still matches the prefixed projection hash', () => {
+  const live = entry({ contentHash: BARE_CUR });
+  const out = describeSavedChatArchiveStateV1(coverage({
+    projection: { status: 'ok', contentHash: 'sha256-' + BARE_CUR },
+    generations: [live], fresh: [live], selected: live, covered: true,
+  }));
+  assert.equal(out.selected.freshness, 'fresh',
+    'a current package read as ' + out.selected.freshness + ' because of hash REPRESENTATION alone');
+  assert.equal(out.selected.freshnessLabel, 'Current');
+  assert.equal(out.selected.isCurrent, true);
+  assert.equal(out.selected.isHistoricalOnly, false);
+});
+
+/* NEGATIVE CONTROL for 3c: normalization must not make everything match. A
+ * blanket "strip and compare loosely" repair would pass 3c and destroy the
+ * freshness rule; a genuinely different digest must still be stale in BOTH
+ * representations. */
+check('3c-neg. NEGATIVE CONTROL — normalization did not make every hash match', () => {
+  for (const wrong of ['0'.repeat(64), 'sha256-' + '0'.repeat(64)]) {
+    const p = savedChatArchivePresentationV1.entryPresentation(
+      entry({ contentHash: wrong, staleKind: 'content-stale' }),
+      coverage({ projection: { status: 'ok', contentHash: 'sha256-' + BARE_CUR } }));
+    assert.equal(p.isCurrent, false, `digest ${wrong} was presented as current`);
+    assert.equal(p.freshness, 'content-stale');
+  }
+});
+
 /* NEGATIVE CONTROL for proof 3: if the adapter fell back to "assume fresh"
  * when a hash did not match, this fixture would report current. */
 check('3b. NEGATIVE CONTROL — a non-matching hash can never yield isCurrent', () => {
@@ -276,19 +317,92 @@ check('9. recorded result metadata is marked history, not present-tense truth', 
 });
 
 /* ── Proof 7 — the Inspector uses the recomputed verified contentHash ────── */
-check('7. Inspector identity uses the recomputed hash, not the manifest claim', () => {
+/* The identity object literal that actually ships — selected by the field that
+ * only the real one carries, so the blank template literal cannot satisfy it. */
+function shippedIdentityBlock(src) {
+  let from = 0;
+  for (;;) {
+    const i = src.indexOf('identity: {', from);
+    if (i < 0) return '';
+    let depth = 0;
+    for (let k = src.indexOf('{', i); k < src.length; k += 1) {
+      if (src[k] === '{') depth += 1;
+      else if (src[k] === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          const block = src.slice(i, k + 1);
+          if (block.includes('manifestClaimedContentHash')) return block;
+          from = k + 1;
+          break;
+        }
+      }
+    }
+  }
+}
+/* The right-hand side of one field inside an object literal. */
+function fieldValue(block, field) {
+  const m = new RegExp('(?:^|[\\s{,])' + field + '\\s*:').exec(block);
+  if (!m) return '';
+  const rest = block.slice(m.index + m[0].length);
+  let depth = 0;
+  for (let k = 0; k < rest.length; k += 1) {
+    const ch = rest[k];
+    if (ch === '(' || ch === '{' || ch === '[') depth += 1;
+    else if (ch === ')' || ch === '}' || ch === ']') { if (depth === 0) return rest.slice(0, k).trim(); depth -= 1; }
+    else if (ch === ',' && depth === 0) return rest.slice(0, k).trim();
+  }
+  return rest.trim();
+}
+
+check('7. Inspector identity uses the VERIFIED hash, not the manifest claim', () => {
   const src = readRepo(INSPECTOR_REL);
-  // The identity's contentHash must be sourced from the governed validator's
-  // recomputation; the manifest's own claim must be a separate, labelled field.
-  assert.ok(/contentHash:\s*cleanString\(hashChecks\.expectedContentHash\)/.test(src),
-    'identity.contentHash is not the recomputed hashChecks.expectedContentHash');
-  assert.ok(/manifestClaimedContentHash:\s*cleanString\(m\.contentHash\)/.test(src),
-    'the manifest claim is not surfaced separately');
-  assert.ok(/contentHashVerified:\s*hashChecks\.contentHashOk\s*===\s*true/.test(src),
-    'verification state is not surfaced');
-  // And it must not fall back to the claim when recomputation is empty.
-  assert.ok(!/expectedContentHash\)\s*\|\|\s*cleanString\(m\.contentHash\)/.test(src),
-    'identity.contentHash falls back to the manifest claim');
+  const block = shippedIdentityBlock(src);
+  assert.ok(block, 'the shipped Inspector identity literal was not found');
+
+  /* The guarded contract is unchanged: identity.contentHash is the VERIFIED
+   * hash, never the package's own claim, with the claim surfaced separately and
+   * no fallback between them.
+   *
+   * What changed is where the verified hash comes from. This check once pinned
+   * the JS recomputation spelling, cleanString(hashChecks.expectedContentHash).
+   * M10 retired that JS recomputation entirely — the trusted native verifier
+   * now owns the digest and the Inspector consumes the trusted occupant's
+   * contentHash. Pinning the retired spelling asserted an implementation that
+   * the accepted authority deliberately removed, so the contract is asserted
+   * against the authority SOURCE instead of against a spelling. */
+  const hashValue = fieldValue(block, 'contentHash');
+  const claimValue = fieldValue(block, 'manifestClaimedContentHash');
+  assert.ok(hashValue, 'identity.contentHash is not assigned');
+  assert.ok(claimValue, 'the manifest claim is not surfaced separately');
+
+  /* The manifest object is `m`; the trusted occupant is `d`. The verified hash
+   * must not be read from the manifest, and must not fall back to it. */
+  assert.ok(!/\bm\s*\./.test(hashValue),
+    `identity.contentHash reads the manifest claim: ${hashValue}`);
+  assert.ok(!hashValue.includes('||'),
+    `identity.contentHash falls back to another source: ${hashValue}`);
+  assert.ok(/\bm\s*\.\s*contentHash\b/.test(claimValue),
+    'manifestClaimedContentHash is not the manifest\'s own claim');
+  assert.notEqual(hashValue, claimValue,
+    'the verified hash and the manifest claim are the same expression');
+
+  /* Follow the assigned symbol to its definition and require it to derive from
+   * the TRUSTED occupant, so renaming the variable cannot silently detach the
+   * identity from trusted authority. */
+  if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(hashValue)) {
+    const def = new RegExp('var\\s+' + hashValue + '\\s*=\\s*([^;]+);').exec(src);
+    assert.ok(def, `identity.contentHash symbol ${hashValue} has no definition`);
+    assert.ok(/\bd\s*\.\s*contentHash\b/.test(def[1]),
+      `identity.contentHash does not derive from the trusted occupant: ${def[1].trim()}`);
+    assert.ok(!/\bm\s*\./.test(def[1]),
+      `identity.contentHash derivation reads the manifest: ${def[1].trim()}`);
+  }
+
+  /* Verification state stays surfaced, and stays tied to the verified hash. */
+  const verifiedValue = fieldValue(block, 'contentHashVerified');
+  assert.ok(verifiedValue, 'verification state is not surfaced');
+  assert.ok(!/\bm\s*\./.test(verifiedValue),
+    `contentHashVerified is derived from the manifest: ${verifiedValue}`);
 });
 
 check('7b. Inspector renders divergence between recomputed and claimed hash', () => {

@@ -2969,3 +2969,94 @@ fn v3_commit_never_replaces_invalid_or_wrong_type_final_occupants() {
         assert_eq!(winner, b"winner bytes");
     }
 }
+
+/// M10 P1.2 §17 — the COARSE admission contract is byte-for-byte unchanged by
+/// the widened failure payload.
+///
+/// Every current consumer — publication, the M06 scanner's broad classification
+/// and the M07 handoff — reads only `.0` and `.1`. The granular third element
+/// is additive evidence and may vary; these two may not.
+#[test]
+fn the_coarse_admission_outcome_and_code_are_unchanged_by_granular_evidence() {
+    let p = publisher("coarse-admission");
+    let dir = p.root.join(PACKAGES_DIR);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // (A) a genuine saved_chat_package_verify RULE failure.
+    let mut broken = zero_asset_v3();
+    let mut snapshot: serde_json::Value =
+        serde_json::from_slice(broken.snapshot.as_ref().unwrap()).unwrap();
+    snapshot["messages"] = serde_json::json!({"not": "an array"});
+    broken.snapshot = Some(serde_json::to_vec(&snapshot).unwrap());
+    let sha = format!(
+        "sha256-{}",
+        crate::archive_durable_write::sha256_hex(broken.snapshot.as_ref().unwrap())
+    );
+    let len = broken.snapshot.as_ref().unwrap().len() as u64;
+    let content_hash =
+        crate::saved_chat_package_verify::derive_content_hash_v3(&sha, &[]).unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_slice(&broken.manifest).unwrap();
+    manifest["files"]["snapshot"]["sha256"] = sha.into();
+    manifest["files"]["snapshot"]["byteLength"] = len.into();
+    manifest["contentHash"] = content_hash.clone().into();
+    broken.manifest = serde_json::to_vec(&manifest).unwrap();
+    let rule_name = generation_basename(
+        &broken.chat_id,
+        content_hash.strip_prefix("sha256-").unwrap(),
+    );
+    install_package_dir(&dir, &rule_name, &broken);
+
+    // (B) PARTIAL: a required member is absent.
+    let partial_name = generation_basename("chat_partial", &"a".repeat(64));
+    std::fs::create_dir_all(dir.join(&partial_name)).unwrap();
+
+    // (C) UNREADABLE: a symlink is never followed.
+    let unreadable_name = generation_basename("chat_unreadable", &"b".repeat(64));
+    std::os::unix::fs::symlink(dir.join(&rule_name), dir.join(&unreadable_name)).unwrap();
+
+    let packages = confined::Dir::open_root(&dir).unwrap();
+    let admission = |name: &str| match verify_occupant_all_supported(&packages, name.as_bytes()) {
+        Err(failure) => failure,
+        Ok(_) => panic!("{name} must not verify"),
+    };
+
+    // (A) coarse pair EXACTLY as before; granular evidence additionally present.
+    let (outcome, code, granular) = admission(&rule_name);
+    assert_eq!(outcome, Outcome::GenerationDestinationCorrupt);
+    assert_eq!(code, "generation-destination-corrupt");
+    assert_eq!(granular, Some("generation-v3-snapshot-messages-invalid"));
+    assert_ne!(granular, Some(code), "granular must add information");
+
+    // (B) partial: unchanged coarse pair, and no granular code is invented for a
+    // failure that never reached the package verifier.
+    let (outcome, code, granular) = admission(&partial_name);
+    assert_eq!(outcome, Outcome::GenerationPartial);
+    assert_eq!(code, "generation-partial");
+    assert_eq!(granular, None);
+
+    // (C) unreadable: likewise.
+    let (outcome, code, granular) = admission(&unreadable_name);
+    assert_eq!(outcome, Outcome::GenerationOccupantUnreadable);
+    assert_eq!(code, "generation-occupant-unreadable");
+    assert_eq!(granular, None);
+
+    /* The admission consumer inside this module reads only the coarse pair. */
+    let src = include_str!("../archive_generation_publish.rs");
+    assert!(
+        src.contains("Err((outcome, code, _granular)) => return (outcome, code, Vec::new()),"),
+        "classification explicitly discards the granular evidence",
+    );
+
+    let _ = std::fs::remove_dir_all(p.root.parent().unwrap());
+}
+
+/// Minimal on-disk installer for a package fixture, so a DAMAGED occupant can
+/// exist without asking the publisher to create an invalid one.
+fn install_package_dir(packages: &std::path::Path, name: &str, package: &OwnedPackage) {
+    let path = packages.join(name);
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(path.join("manifest.json"), &package.manifest).unwrap();
+    if let Some(snapshot) = &package.snapshot {
+        std::fs::write(path.join("snapshot.json"), snapshot).unwrap();
+    }
+}

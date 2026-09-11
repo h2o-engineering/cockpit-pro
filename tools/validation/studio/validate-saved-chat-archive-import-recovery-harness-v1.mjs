@@ -59,7 +59,13 @@ const STORE_MODULES = [
   /* M03 T04: the governed saved-chat package codec must load before
    * diagnostics/inspector, mirroring the product order in studio.html. */
   'ingestion/saved-chat-package-codec.tauri.js',
+  /* M10 P3.5: the Inspector reads archive integrity from the TRUSTED native
+   * authority and partitions occupants through the canonical archive-health
+   * mapping. Both must register before it, exactly as studio.html loads them
+   * (codec -> integrity client -> diagnostics -> mapping -> inspector). */
+  'ingestion/saved-chat-archive-integrity.tauri.js',
   'ingestion/saved-chat-archive-diagnostics.tauri.js',
+  'ingestion/saved-chat-archive-health-mapping.js',
   'ingestion/saved-chat-archive-inspector.studio.js',
   'ingestion/saved-chat-archive-importer.studio.js',
   'ingestion/saved-chat-archive-restore.studio.js',
@@ -360,6 +366,13 @@ async function runHarness() {
   const appDir = path.join(tmp, 'app');
   const pkgRoot = path.join(appDir, 'archive', 'packages');
   const writes = [];
+  /* G01: the exact bound parameters of every attempted mutation, captured
+   * BEFORE execution. A write-verb count cannot see WHAT was written, so a
+   * substitution proof needs the payload itself. */
+  const sqlPayloads = [];
+  /* G01: every package member actually read, so a binding failure can be
+   * proven to refuse BEFORE the member read rather than after it. */
+  const fileReads = [];
   let db = null;
   const liveBefore = fs.existsSync(LIVE_DB) ? fs.statSync(LIVE_DB) : null;
 
@@ -373,11 +386,118 @@ async function runHarness() {
     db.prepare('INSERT INTO snapshots (id, chat_id, title, digest, message_count, meta_json) VALUES (?, ?, ?, ?, ?, ?)')
       .run(SRC_SNAP, SRC_CHAT, 'I-Harness source', SRC_DIGEST, SRC_MSGS, '{}');
 
+    /* ── Trusted native integrity: SCENARIO DECLARATIONS ──────────────────
+     * This harness owns DOWNSTREAM behaviour (Inspector consumption, import /
+     * restore / relink, DB deltas). It does NOT own package-byte validity:
+     * since M10 P3.5 that belongs exclusively to the trusted Rust verifier and
+     * scanner.
+     *
+     * So each scenario DECLARES the trusted outcome the native boundary is
+     * independently proven to return, and the declaration below is replayed by
+     * the `h2o_saved_chat_archive_integrity` test double. Nothing here inspects
+     * bytes, hashes anything, decodes gzip, or calls a JS verifier to decide
+     * validity — a declaration is an input to this harness, never a discovery.
+     *
+     * Every declared outcome traces to Rust coverage:
+     *   verified-generation / legacy-package
+     *     -> saved_chat_package_verify::tests::
+     *          permanent_identity_and_gzip_fixtures_verify_to_one_js_identity
+     *   indeterminate / corrupt (malformed or truncated gzip, false descriptors)
+     *     -> archive_package_scan::tests::
+     *          scanner_refuses_v3_renderer_members_malformed_gzip_and_false_logical_descriptor
+     *        (asserts Indeterminate with Corrupt | Partial — no granular
+     *         blocker code, which is why none is declared or asserted here)
+     *     -> saved_chat_package_verify::tests::
+     *          v3_rejects_gzip_logical_descriptor_and_bounded_decode_failures
+     *   indeterminate / identity-mismatch (generation name vs proven identity)
+     *     -> archive_package_scan.rs NameShape::Generation arm
+     */
+    const trustedDeclarations = new Map();
+    /* G01: each trusted enumeration is an INDEPENDENT native call, and
+     * nothing guarantees the archive stood still between the inspection read
+     * and the binding read. A scenario may therefore declare what the
+     * enumeration observed on each successive call. Still a declaration: the
+     * double discovers nothing and verifies nothing. */
+    let integrityCallSeq = 0;
+    let onIntegrityCall = null;
+    const ARCHIVE_PREFIX = 'archive/packages/';
+    function declareTrusted(dirName, facts) {
+      trustedDeclarations.set(ARCHIVE_PREFIX + dirName, Object.assign({
+        path: ARCHIVE_PREFIX + dirName,
+      }, facts));
+    }
+    /* Reads the package's own DECLARED manifest identity for the envelope's
+     * identity fields. This is transcription of a fixture fact, not
+     * verification: the trusted CLASS is always supplied by the caller. */
+    function manifestIdentity(dirName) {
+      const mp = path.join(pkgRoot, dirName, 'manifest.json');
+      const m = JSON.parse(fs.readFileSync(mp, 'utf8'));
+      const bare = (v) => String(v || '').toLowerCase().replace(/^sha256-/, '');
+      /* The trusted scanner MEASURES the snapshot member it examined and
+       * publishes those measurements on the occupant. The consumers bind their
+       * reads to them precisely so a package can never describe itself, so this
+       * double must carry them or every archive-path read refuses.
+       *
+       * Physical facts are measured from the fixture's own bytes on disk — the
+       * same thing Rust does — rather than transcribed from the manifest, so a
+       * fixture whose manifest lies about its bytes produces an occupant that
+       * disagrees with those bytes, exactly as the real scanner would. Logical
+       * facts equal the physical ones for `identity`, and for `gzip` come from
+       * the descriptor the fixture builder itself wrote. */
+      const snapAbs = path.join(pkgRoot, dirName, 'snapshot.json');
+      const snapBytes = fs.existsSync(snapAbs) ? fs.readFileSync(snapAbs) : Buffer.alloc(0);
+      const physicalSha = 'sha256-' + crypto.createHash('sha256').update(snapBytes).digest('hex');
+      const desc = (m.files && m.files.snapshot) || {};
+      const encoding = desc.encoding || 'identity';
+      const logicalSha = encoding === 'gzip'
+        ? String(desc.contentSha256 || '')
+        : physicalSha;
+      const logicalLen = encoding === 'gzip'
+        ? Number(desc.contentByteLength)
+        : snapBytes.length;
+      return {
+        chatId: m.chatId,
+        snapshotId: m.snapshotId,
+        contentHash: bare(m.contentHash),
+        constructionFamily: 'v' + m.schemaVersion,
+        assetShas: (m.assets || []).map((a) => bare(a.sha256)).sort(),
+        snapshotEncoding: encoding,
+        snapshotPhysicalSha256: physicalSha,
+        snapshotPhysicalByteLength: snapBytes.length,
+        logicalSnapshotSha256: logicalSha,
+        logicalSnapshotByteLength: logicalLen,
+      };
+    }
+    function declareValidPackage(dirName) {
+      const id = manifestIdentity(dirName);
+      /* M05 §D: a generation basename is a CLAIM the trusted scanner only
+       * admits when the proven identity matches it. */
+      const gen = /\.g([0-9a-f]{64})\.h2ochat$/.exec(dirName);
+      if (gen && gen[1] !== id.contentHash) {
+        declareTrusted(dirName, Object.assign({}, id, {
+          class: 'indeterminate', reason: 'identity-mismatch',
+        }));
+        return;
+      }
+      declareTrusted(dirName, Object.assign({}, id, {
+        class: gen ? 'verified-generation' : 'legacy-package',
+      }));
+    }
+    function declareRefusedPackage(dirName, reason) {
+      let id = {};
+      try { id = manifestIdentity(dirName); } catch (_) { id = {}; }
+      declareTrusted(dirName, Object.assign({}, id, {
+        class: 'indeterminate', reason: reason,
+      }));
+    }
+
     // stage fixtures under temp AppLocalData
     fs.mkdirSync(pkgRoot, { recursive: true });
     const srcAbs = path.join(REPO_ROOT, FIXTURE_PKG_REL);
     fs.cpSync(srcAbs, path.join(pkgRoot, 'i-harness-source.h2ochat'), { recursive: true });
+    declareValidPackage('i-harness-source.h2ochat');
     generateConflictFreeFixture(srcAbs, path.join(pkgRoot, 'i-harness-import-ready-chat.h2ochat'), RDY_CHAT, RDY_SNAP);
+    declareValidPackage('i-harness-import-ready-chat.h2ochat');
     const restorePackages = {
       ready: { chat: 'k3-restore-ready-chat', snap: 'snap_k3_restore_ready' },
       confirm: { chat: 'k3-confirm-gate-chat', snap: 'snap_k3_confirm_gate' },
@@ -387,6 +507,7 @@ async function runHarness() {
     };
     for (const info of Object.values(restorePackages)) {
       generateConflictFreeFixture(srcAbs, path.join(pkgRoot, info.chat + '.h2ochat'), info.chat, info.snap);
+      declareValidPackage(info.chat + '.h2ochat');
     }
     const relinkPackages = {
       ready: { chat: 'k4-relink-package-chat', snap: 'snap_k4_relink_package' },
@@ -396,6 +517,7 @@ async function runHarness() {
     };
     for (const info of Object.values(relinkPackages)) {
       generateConflictFreeFixture(srcAbs, path.join(pkgRoot, info.chat + '.h2ochat'), info.chat, info.snap);
+      declareValidPackage(info.chat + '.h2ochat');
     }
 
     /* M05 Phase 4 (proofs 11–13): two packages for the SAME chat with different
@@ -410,12 +532,29 @@ async function runHarness() {
     };
     for (const info of Object.values(siblingPackages)) {
       generateConflictFreeFixture(srcAbs, path.join(pkgRoot, info.dir), SIB_CHAT, info.snap);
+      declareValidPackage(info.dir);
     }
 
     // wire globals + load real modules
     const mockInvoke = (cmd, a) => {
       const j = (p) => path.join(appDir, String(p || ''));
       try {
+        /* TEST DOUBLE for the EXISTING native command. It replays the trusted
+         * outcomes each scenario declared above in the canonical wire shape.
+         * It is not a verifier: it runs no verification algorithm, decodes
+         * nothing, hashes nothing, and never consults a JS package validator
+         * to decide validity. Rust owns that proof. */
+        if (cmd === 'h2o_saved_chat_archive_integrity') {
+          integrityCallSeq += 1;
+          if (typeof onIntegrityCall === 'function') onIntegrityCall(integrityCallSeq);
+          return Promise.resolve({
+            schema: 'h2o.savedChatArchiveIntegrity',
+            schemaVersion: 1,
+            complete: true,
+            blockers: [],
+            occupants: [...trustedDeclarations.values()],
+          });
+        }
         if (cmd === 'plugin:fs|exists') return Promise.resolve(fs.existsSync(j(a.path)));
         if (cmd === 'plugin:fs|lstat') {
           /* Real metadata from the harness's own temp filesystem: no hard-coded
@@ -423,12 +562,13 @@ async function runHarness() {
           const st = fs.lstatSync(j(a.path));
           return Promise.resolve({ isFile: st.isFile(), isDirectory: st.isDirectory(), isSymlink: st.isSymbolicLink(), size: st.size });
         }
-        if (cmd === 'plugin:fs|read_file') return Promise.resolve(Array.from(fs.readFileSync(j(a.path))));
+        if (cmd === 'plugin:fs|read_file') { fileReads.push(String((a && a.path) || '')); return Promise.resolve(Array.from(fs.readFileSync(j(a.path)))); }
         if (cmd === 'plugin:fs|read_dir') return Promise.resolve(fs.existsSync(j(a.path)) ? fs.readdirSync(j(a.path), { withFileTypes: true }).map((e) => ({ name: e.name, isDirectory: e.isDirectory(), isFile: e.isFile() })) : []);
         if (cmd === 'plugin:sql|select') return Promise.resolve(db.prepare(a.query).all(...(a.values || [])).map(normRow));
         if (cmd === 'plugin:sql|execute') {
           const verb = String(a.query).trim().split(/\s+/)[0].toUpperCase();
           const tbl = (String(a.query).match(/(?:INTO|UPDATE|FROM)\s+([a-z_]+)/i) || [])[1] || '';
+          sqlPayloads.push(JSON.stringify({ query: String(a.query), values: (a.values || []) }));
           const r = db.prepare(a.query).run(...(a.values || []));
           writes.push(verb + ' ' + tbl + ' (' + r.changes + ')');
           return Promise.resolve([Number(r.changes), Number(r.lastInsertRowid)]);
@@ -470,7 +610,15 @@ async function runHarness() {
     const v3GzipSrc = path.join(REPO_ROOT, V3_GZIP_FIXTURE_PKG_REL);
     const v3PermanentGzipBytes = fs.readFileSync(path.join(v3GzipSrc, 'snapshot.json'));
     const v3PermanentGzipManifest = JSON.parse(fs.readFileSync(path.join(v3GzipSrc, 'manifest.json'), 'utf8'));
-    const writeV3 = (encoding, snapshotBytesOverride) => {
+    /* Every writeV3 caller states the trusted outcome the native boundary is
+     * proven to return for the bytes it is about to write. There is no default:
+     * a scenario that does not declare its trusted result cannot run. */
+    const V3_VALID = { valid: true };
+    const V3_REFUSED_CORRUPT = { valid: false, reason: 'corrupt' };
+    const writeV3 = (encoding, snapshotBytesOverride, trusted) => {
+      if (!trusted || typeof trusted.valid !== 'boolean') {
+        throw new Error('writeV3 requires an explicit trusted outcome declaration');
+      }
       fs.rmSync(v3Abs, { recursive: true, force: true });
       fs.mkdirSync(v3Abs, { recursive: true });
       const m = JSON.parse(JSON.stringify(v3BaseManifest));
@@ -495,16 +643,18 @@ async function runHarness() {
       }
       fs.writeFileSync(path.join(v3Abs, 'snapshot.json'), storedBytes);
       fs.writeFileSync(path.join(v3Abs, 'manifest.json'), JSON.stringify(m, null, 2) + '\n');
+      if (trusted.valid) declareValidPackage(V3_DIR);
+      else declareRefusedPackage(V3_DIR, trusted.reason);
       return m;
     };
-    const v3GzipManifest = writeV3('gzip');
+    const v3GzipManifest = writeV3('gzip', undefined, V3_VALID);
     const v3GzipInspect = await inspector.inspectPackage({ packagePath: V3_REL });
     const gzipStored = fs.readFileSync(path.join(v3Abs, 'snapshot.json'));
-    writeV3('identity');
+    writeV3('identity', undefined, V3_VALID);
     const v3IdentityInspect = await inspector.inspectPackage({ packagePath: V3_REL });
     /* Negative: valid physical descriptor over a corrupted gzip stream. */
     const corrupt = Buffer.from(zlib.gzipSync(v3LogicalBytes)); corrupt[Math.floor(corrupt.length / 2)] ^= 0xff;
-    writeV3('gzip', corrupt);
+    writeV3('gzip', corrupt, V3_REFUSED_CORRUPT);
     const v3CorruptInspect = await inspector.inspectPackage({ packagePath: V3_REL });
 
     /* ── M03 T04 Importer: v3 gzip / identity import + no-mutation negatives ──
@@ -520,26 +670,26 @@ async function runHarness() {
       return { title: snap && snap.title, messageCount: snap && snap.message_count, turns };
     };
 
-    writeV3('gzip');
+    writeV3('gzip', undefined, V3_VALID);
     const v3GzipPre = importSnapshotState();
     const v3GzipImport = await importer.importVerifiedPackage({ packagePath: V3_REL, mode: 'import-as-new' });
     const v3GzipRows = importedRows(v3GzipImport);
 
-    writeV3('identity');
+    writeV3('identity', undefined, V3_VALID);
     const v3IdImport = await importer.importVerifiedPackage({ packagePath: V3_REL, mode: 'import-as-new' });
     const v3IdRows = importedRows(v3IdImport);
 
     /* Negative matrix — each must refuse with zero persistent mutation. */
     const gzipBase = zlib.gzipSync(v3LogicalBytes);
     const negCases = [
-      ['corrupt gzip', () => { const c = Buffer.from(gzipBase); c[Math.floor(c.length / 2)] ^= 0xff; writeV3('gzip', c); }],
-      ['truncated gzip', () => writeV3('gzip', Buffer.from(gzipBase.subarray(0, Math.max(1, gzipBase.length - 6))))],
-      ['physical sha mismatch', () => { writeV3('gzip'); const mp = path.join(v3Abs, 'manifest.json'); const m = JSON.parse(fs.readFileSync(mp, 'utf8')); m.files.snapshot.sha256 = 'sha256-' + '1'.repeat(64); fs.writeFileSync(mp, JSON.stringify(m, null, 2) + '\n'); }],
-      ['physical byteLength mismatch', () => { writeV3('gzip'); const mp = path.join(v3Abs, 'manifest.json'); const m = JSON.parse(fs.readFileSync(mp, 'utf8')); m.files.snapshot.byteLength = 999999; fs.writeFileSync(mp, JSON.stringify(m, null, 2) + '\n'); }],
-      ['logical sha mismatch', () => { writeV3('gzip'); const mp = path.join(v3Abs, 'manifest.json'); const m = JSON.parse(fs.readFileSync(mp, 'utf8')); m.files.snapshot.contentSha256 = 'sha256-' + '2'.repeat(64); fs.writeFileSync(mp, JSON.stringify(m, null, 2) + '\n'); }],
-      ['logical length below actual (bomb guard)', () => { writeV3('gzip'); const mp = path.join(v3Abs, 'manifest.json'); const m = JSON.parse(fs.readFileSync(mp, 'utf8')); m.files.snapshot.contentByteLength = m.files.snapshot.contentByteLength - 1; fs.writeFileSync(mp, JSON.stringify(m, null, 2) + '\n'); }],
-      ['unsupported encoding', () => { writeV3('gzip'); const mp = path.join(v3Abs, 'manifest.json'); const m = JSON.parse(fs.readFileSync(mp, 'utf8')); m.files.snapshot.encoding = 'deflate'; fs.writeFileSync(mp, JSON.stringify(m, null, 2) + '\n'); }],
-      ['malformed logical JSON', () => { const bad = Buffer.from('{ not json'); writeV3('gzip', zlib.gzipSync(bad)); const mp = path.join(v3Abs, 'manifest.json'); const m = JSON.parse(fs.readFileSync(mp, 'utf8')); const gz = fs.readFileSync(path.join(v3Abs, 'snapshot.json')); m.files.snapshot.sha256 = 'sha256-' + crypto.createHash('sha256').update(gz).digest('hex'); m.files.snapshot.byteLength = gz.length; m.files.snapshot.contentSha256 = 'sha256-' + crypto.createHash('sha256').update(bad).digest('hex'); m.files.snapshot.contentByteLength = bad.length; fs.writeFileSync(mp, JSON.stringify(m, null, 2) + '\n'); }],
+      ['corrupt gzip', () => { const c = Buffer.from(gzipBase); c[Math.floor(c.length / 2)] ^= 0xff; writeV3('gzip', c, V3_REFUSED_CORRUPT); }],
+      ['truncated gzip', () => writeV3('gzip', Buffer.from(gzipBase.subarray(0, Math.max(1, gzipBase.length - 6))), V3_REFUSED_CORRUPT)],
+      ['physical sha mismatch', () => { writeV3('gzip', undefined, V3_REFUSED_CORRUPT); const mp = path.join(v3Abs, 'manifest.json'); const m = JSON.parse(fs.readFileSync(mp, 'utf8')); m.files.snapshot.sha256 = 'sha256-' + '1'.repeat(64); fs.writeFileSync(mp, JSON.stringify(m, null, 2) + '\n'); }],
+      ['physical byteLength mismatch', () => { writeV3('gzip', undefined, V3_REFUSED_CORRUPT); const mp = path.join(v3Abs, 'manifest.json'); const m = JSON.parse(fs.readFileSync(mp, 'utf8')); m.files.snapshot.byteLength = 999999; fs.writeFileSync(mp, JSON.stringify(m, null, 2) + '\n'); }],
+      ['logical sha mismatch', () => { writeV3('gzip', undefined, V3_REFUSED_CORRUPT); const mp = path.join(v3Abs, 'manifest.json'); const m = JSON.parse(fs.readFileSync(mp, 'utf8')); m.files.snapshot.contentSha256 = 'sha256-' + '2'.repeat(64); fs.writeFileSync(mp, JSON.stringify(m, null, 2) + '\n'); }],
+      ['logical length below actual (bomb guard)', () => { writeV3('gzip', undefined, V3_REFUSED_CORRUPT); const mp = path.join(v3Abs, 'manifest.json'); const m = JSON.parse(fs.readFileSync(mp, 'utf8')); m.files.snapshot.contentByteLength = m.files.snapshot.contentByteLength - 1; fs.writeFileSync(mp, JSON.stringify(m, null, 2) + '\n'); }],
+      ['unsupported encoding', () => { writeV3('gzip', undefined, V3_REFUSED_CORRUPT); const mp = path.join(v3Abs, 'manifest.json'); const m = JSON.parse(fs.readFileSync(mp, 'utf8')); m.files.snapshot.encoding = 'deflate'; fs.writeFileSync(mp, JSON.stringify(m, null, 2) + '\n'); }],
+      ['malformed logical JSON', () => { const bad = Buffer.from('{ not json'); writeV3('gzip', zlib.gzipSync(bad), V3_REFUSED_CORRUPT); const mp = path.join(v3Abs, 'manifest.json'); const m = JSON.parse(fs.readFileSync(mp, 'utf8')); const gz = fs.readFileSync(path.join(v3Abs, 'snapshot.json')); m.files.snapshot.sha256 = 'sha256-' + crypto.createHash('sha256').update(gz).digest('hex'); m.files.snapshot.byteLength = gz.length; m.files.snapshot.contentSha256 = 'sha256-' + crypto.createHash('sha256').update(bad).digest('hex'); m.files.snapshot.contentByteLength = bad.length; fs.writeFileSync(mp, JSON.stringify(m, null, 2) + '\n'); }],
     ];
     const v3Negatives = [];
     for (const [label, build] of negCases) {
@@ -570,7 +720,7 @@ async function runHarness() {
       ? db.prepare('SELECT turn_idx, role, text, outer_html FROM snapshot_turns WHERE snapshot_id=? ORDER BY turn_idx').all(snapId)
       : [];
 
-    writeV3('gzip');
+    writeV3('gzip', undefined, V3_VALID);
     const v3RelinkGzip = await relink.relinkVerifiedPackage({ packagePath: V3_REL, targetChatId: V3_RELINK_TARGET, confirm: v3RelinkToken });
     const v3RelinkNewSnapId = v3RelinkGzip.relinked && v3RelinkGzip.relinked.newSnapshotId;
     const v3RelinkNewSnapRow = v3RelinkNewSnapId ? db.prepare('SELECT id, chat_id, message_count FROM snapshots WHERE id=?').get(v3RelinkNewSnapId) : null;
@@ -581,7 +731,7 @@ async function runHarness() {
     const v3RelinkOriginalSnapId = JSON.parse(v3LogicalBytes.toString('utf8')).snapshotId;
     const v3RelinkOriginalAbsent = !db.prepare('SELECT id FROM snapshots WHERE id=?').get(v3RelinkOriginalSnapId);
 
-    writeV3('identity');
+    writeV3('identity', undefined, V3_VALID);
     const v3RelinkIdentityAgain = await relink.relinkVerifiedPackage({ packagePath: V3_REL, targetChatId: V3_RELINK_TARGET, confirm: v3RelinkToken });
 
     const v3RelinkNegatives = [];
@@ -607,7 +757,7 @@ async function runHarness() {
      * variant of the SAME logical package must then be refused as a conflict —
      * which exercises the real state-authority rules rather than bypassing them. */
     const v3RestorePre = importSnapshotState();
-    writeV3('gzip');
+    writeV3('gzip', undefined, V3_VALID);
     const v3RestoreGzip = await restore.restoreVerifiedPackage({ packagePath: V3_REL, mode: 'restore-original-ids', confirm: true });
     const v3RestoredSnapId = JSON.parse(v3LogicalBytes.toString('utf8')).snapshotId;
     const v3RestoredRows = (() => {
@@ -619,7 +769,7 @@ async function runHarness() {
      * defines, computed through the same shared mapping the product uses. */
     const v3ExpectedTurns = importer.buildTurnsFromPackageSnapshot(JSON.parse(v3LogicalBytes.toString('utf8')));
 
-    writeV3('identity');
+    writeV3('identity', undefined, V3_VALID);
     const v3RestoreIdentityConflict = await restore.restoreVerifiedPackage({ packagePath: V3_REL, mode: 'restore-original-ids', confirm: true });
 
     const v3RestoreNegatives = [];
@@ -841,6 +991,288 @@ async function runHarness() {
     }
     const siblingWrites = writes.length - wSib;
 
+    /* ══ G01 — DURABLE ARCHIVE-RECOVERY BINDING PROOFS ═══════════════════════
+     * Permanent behavioural coverage for the archive-path read binding. Every
+     * case drives the REAL importer and restore modules through their real
+     * public entry points — dry-run AND execution — and records the decision,
+     * the execution status, the write count, the row delta, whether any
+     * substituted byte reached a write payload, and whether the snapshot member
+     * was read at all. Nothing here asserts source text and nothing asserts a
+     * helper's return value.
+     *
+     * THE ORDER IS THE POINT. Each package is written with ALPHA bytes and
+     * DECLARED — the trusted occupant's member measurements are taken from the
+     * ALPHA bytes at that moment, exactly as the real scanner measures the
+     * member it examined. Only afterwards are BETA bytes written, and the
+     * declaration is deliberately NOT refreshed. The trusted facts then
+     * describe a package state that no longer exists on disk: the TOCTOU window
+     * a package read after its trusted ruling must never be allowed to close
+     * for itself.
+     *
+     * Every substituted package is INTERNALLY COHERENT unless its case says
+     * otherwise — it restates its own manifest for the bytes it now holds — so
+     * no refusal here can be explained by the package merely disagreeing with
+     * itself. */
+    const BETA_MARK = 'BETA-ATTACKER-CONTENT';
+    const ALPHA_V1_TEXT = 'Deterministic fixture reply. No real user data.';
+    const ALPHA_V3_TEXT = 'Second synthetic fixture turn.';
+    const betaOfLength = (n) => (BETA_MARK + ' substituted after the trusted ruling.' + ' '.repeat(Math.max(0, n))).slice(0, n);
+    assert.ok(betaOfLength(ALPHA_V1_TEXT.length).includes(BETA_MARK) && betaOfLength(ALPHA_V3_TEXT.length).includes(BETA_MARK),
+      'BETA substitution text must stay detectable at every fixture length');
+
+    const g01Dir = (key) => 'g01-' + key + '.h2ochat';
+    const g01Rel = (key) => ARCHIVE_PREFIX + g01Dir(key);
+    const g01ChatId = (key) => 'g01-' + key + '-chat';
+    const g01SnapId = (key) => 'snap_g01_' + key.replace(/-/g, '_');
+
+    /* ALPHA v1/v2 package through the EXISTING fixture generator, then declared. */
+    const stageV1Alpha = (key) => {
+      generateConflictFreeFixture(srcAbs, path.join(pkgRoot, g01Dir(key)), g01ChatId(key), g01SnapId(key));
+      declareValidPackage(g01Dir(key));
+      return { key: key, dir: g01Dir(key), rel: g01Rel(key), chatId: g01ChatId(key), snapId: g01SnapId(key), family: 'v1' };
+    };
+
+    /* ALPHA v3 package (identity or gzip) at its own directory, reusing the
+     * committed v3 fixture bytes and the same id-rewrite technique the v1
+     * generator uses. Fresh ids are required: the v3 block above already
+     * restored the committed fixture's ORIGINAL ids, so a control reusing them
+     * would return already-present instead of exercising the success path. */
+    const stageV3Alpha = (key, encoding) => {
+      const dir = g01Dir(key), abs = path.join(pkgRoot, dir);
+      const chatId = g01ChatId(key), snapId = g01SnapId(key);
+      fs.rmSync(abs, { recursive: true, force: true });
+      fs.mkdirSync(abs, { recursive: true });
+      const logical = Buffer.from(v3LogicalBytes.toString('utf8')
+        .split(v3BaseManifest.chatId).join(chatId)
+        .split(v3BaseManifest.snapshotId).join(snapId), 'utf8');
+      const stored = encoding === 'gzip' ? zlib.gzipSync(logical) : logical;
+      const m = JSON.parse(JSON.stringify(v3BaseManifest));
+      m.chatId = chatId; m.snapshotId = snapId; m.contentHash = sha256Pfx(logical);
+      const d = { path: 'snapshot.json', sha256: sha256Pfx(stored), byteLength: stored.length, encoding: encoding };
+      if (encoding === 'gzip') { d.contentSha256 = sha256Pfx(logical); d.contentByteLength = logical.length; }
+      m.files = Object.assign({}, m.files, { snapshot: d });
+      for (const a of (m.assets || [])) {
+        const src = path.join(v3Src, a.path);
+        if (fs.existsSync(src)) { fs.mkdirSync(path.join(abs, path.dirname(a.path)), { recursive: true }); fs.copyFileSync(src, path.join(abs, a.path)); }
+      }
+      fs.writeFileSync(path.join(abs, 'snapshot.json'), stored);
+      fs.writeFileSync(path.join(abs, 'manifest.json'), JSON.stringify(m, null, 2) + '\n');
+      declareValidPackage(dir);
+      return { key: key, dir: dir, rel: g01Rel(key), chatId: chatId, snapId: snapId, family: 'v3', encoding: encoding, logical: logical };
+    };
+
+    /* Substitute BETA bytes into an ALREADY-DECLARED v1/v2 package. */
+    const substituteV1Beta = (pkg, opts) => {
+      const o = opts || {};
+      const snapAbs = path.join(pkgRoot, pkg.dir, 'snapshot.json');
+      const alphaText = fs.readFileSync(snapAbs, 'utf8');
+      const alphaLen = fs.statSync(snapAbs).size;
+      const replacement = o.sameLength
+        ? betaOfLength(ALPHA_V1_TEXT.length)
+        : betaOfLength(ALPHA_V1_TEXT.length) + ' Extra bytes so the physical LENGTH differs too.';
+      const betaBytes = Buffer.from(alphaText.split(ALPHA_V1_TEXT).join(replacement), 'utf8');
+      assert.ok(betaBytes.toString('utf8') !== alphaText, 'BETA substitution changed nothing in ' + pkg.dir);
+      fs.writeFileSync(snapAbs, betaBytes);
+      if (!o.copyClaim) {
+        const mp = path.join(pkgRoot, pkg.dir, 'manifest.json');
+        const m = JSON.parse(fs.readFileSync(mp, 'utf8'));
+        m.files.snapshot.sha256 = sha256Prefixed(betaBytes);
+        m.files.snapshot.byteLength = betaBytes.length;
+        m.contentHash = sha256Prefixed(betaBytes);
+        fs.writeFileSync(mp, JSON.stringify(m, null, 2) + '\n');
+      }
+      return { alphaByteLength: alphaLen, betaByteLength: betaBytes.length };
+    };
+
+    /* Substitute BETA bytes into an ALREADY-DECLARED v3 package. The BETA
+     * logical payload is the same physical size as ALPHA, so for the identity
+     * representation only the digest can distinguish them. */
+    const substituteV3Beta = (pkg, opts) => {
+      const o = opts || {};
+      const abs = path.join(pkgRoot, pkg.dir);
+      const betaLogical = Buffer.from(pkg.logical.toString('utf8')
+        .split(ALPHA_V3_TEXT).join(betaOfLength(ALPHA_V3_TEXT.length)), 'utf8');
+      assert.ok(betaLogical.toString('utf8') !== pkg.logical.toString('utf8'), 'BETA v3 substitution changed nothing in ' + pkg.dir);
+      const betaStored = pkg.encoding === 'gzip' ? zlib.gzipSync(betaLogical) : betaLogical;
+      fs.writeFileSync(path.join(abs, 'snapshot.json'), betaStored);
+      const mp = path.join(abs, 'manifest.json');
+      const m = JSON.parse(fs.readFileSync(mp, 'utf8'));
+      if (o.claimSchemaVersion1) {
+        /* Downgrade attempt: the substituted package claims a family that has
+         * no governed logical descriptor at all. Only the TRUSTED family may
+         * choose the read regime. */
+        m.schemaVersion = 1; m.payloadVersion = 1;
+        delete m.files.snapshot.encoding;
+        delete m.files.snapshot.contentSha256;
+        delete m.files.snapshot.contentByteLength;
+      }
+      if (o.dropDescriptor) delete m.files.snapshot;
+      if (!o.copyClaim) {
+        if (m.files && m.files.snapshot) {
+          m.files.snapshot.sha256 = sha256Pfx(betaStored);
+          m.files.snapshot.byteLength = betaStored.length;
+          if (pkg.encoding === 'gzip' && !o.claimSchemaVersion1) {
+            m.files.snapshot.contentSha256 = sha256Pfx(betaLogical);
+            m.files.snapshot.contentByteLength = betaLogical.length;
+          }
+        }
+        m.contentHash = sha256Pfx(betaLogical);
+      }
+      fs.writeFileSync(mp, JSON.stringify(m, null, 2) + '\n');
+      return { alphaByteLength: pkg.encoding === 'gzip' ? zlib.gzipSync(pkg.logical).length : pkg.logical.length, betaByteLength: betaStored.length };
+    };
+
+    /* Declares what the trusted enumeration observed on each successive call.
+     * The two trusted reads are INDEPENDENT native calls — odd calls are the
+     * inspection read, even calls the binding read, and execution repeats the
+     * pair at the write gate. Nothing guarantees the archive stood still
+     * between them, so a scenario may declare each call separately. It is still
+     * a declaration: the double discovers nothing and verifies nothing. */
+    const withDeclarationPerCall = async (dir, factsForCall, run) => {
+      const key = ARCHIVE_PREFIX + dir;
+      const original = Object.assign({}, trustedDeclarations.get(key));
+      integrityCallSeq = 0;
+      onIntegrityCall = (n) => { trustedDeclarations.set(key, factsForCall(n, Object.assign({}, original))); };
+      try { return await run(); }
+      finally { onIntegrityCall = null; trustedDeclarations.set(key, original); }
+    };
+    const withoutField = (o, f) => { const c = Object.assign({}, o); delete c[f]; return c; };
+
+    /* One observation shape for every case: real entry points, real counters. */
+    const observeRecovery = async (pkg, op) => {
+      const before = counts();
+      const w0 = writes.length, p0 = sqlPayloads.length, r0 = fileReads.length, c0 = integrityCallSeq;
+      let dry = null, exec = null;
+      if (op === 'restore') {
+        dry = await restore.dryRunRestorePackage({ packagePath: pkg.rel });
+        exec = await restore.restoreVerifiedPackage({ packagePath: pkg.rel, mode: 'restore-original-ids', confirm: true });
+      } else {
+        dry = await importer.dryRunImportPackage({ packagePath: pkg.rel });
+        exec = await importer.importVerifiedPackage({ packagePath: pkg.rel, mode: 'import-as-new' });
+      }
+      const after = counts();
+      const payloads = sqlPayloads.slice(p0);
+      const reads = fileReads.slice(r0);
+      const recovered = (exec && (exec.recovered || exec.restored)) || null;
+      return {
+        key: pkg.key, op: op, family: pkg.family, encoding: pkg.encoding || 'identity',
+        dryDecision: String((dry && dry.decision) || ''),
+        execStatus: String((exec && exec.status) || ''),
+        writes: writes.length - w0,
+        delta: { chats: after.chats - before.chats, snapshots: after.snapshots - before.snapshots, turns: after.turns - before.turns },
+        betaInWrites: payloads.some((p) => p.indexOf(BETA_MARK) >= 0),
+        snapshotMemberReads: reads.filter((p) => p === pkg.rel + '/snapshot.json').length,
+        recoveredId: recovered ? String(recovered.newSnapshotId || recovered.snapshotId || '') : '',
+        originalIdsPresent: {
+          chat: !!db.prepare('SELECT id FROM chats WHERE id=?').get(pkg.chatId),
+          snapshot: !!db.prepare('SELECT id FROM snapshots WHERE id=?').get(pkg.snapId),
+        },
+        provenanceRows: db.prepare('SELECT count(*) c FROM snapshots WHERE meta_json LIKE ?').get('%' + pkg.snapId + '%').c,
+        integrityCalls: integrityCallSeq - c0,
+        dryRunCalled: !!dry, executionCalled: !!exec,
+      };
+    };
+
+    const bindingCases = [];
+    /* ── Substitution family: ALPHA declared, BETA written, no re-declaration ── */
+    const substitutionSpecs = [
+      { key: 'sub-v12', family: 'v1', label: 'v1/v2 substitution', build: (p) => substituteV1Beta(p, {}) },
+      { key: 'sub-v12-samelen', family: 'v1', label: 'v1/v2 substitution at IDENTICAL physical byte length', sameLength: true, build: (p) => substituteV1Beta(p, { sameLength: true }) },
+      { key: 'sub-v12-claim', family: 'v1', label: 'v1/v2 substitution keeping the ALPHA contentHash claim', build: (p) => substituteV1Beta(p, { copyClaim: true }) },
+      { key: 'sub-v3-id', family: 'v3', encoding: 'identity', label: 'v3 identity substitution (coherent BETA manifest)', build: (p) => substituteV3Beta(p, {}) },
+      { key: 'sub-v3-gz', family: 'v3', encoding: 'gzip', label: 'v3 gzip substitution (coherent BETA manifest + descriptor)', build: (p) => substituteV3Beta(p, {}) },
+      { key: 'sub-v3-claim', family: 'v3', encoding: 'identity', label: 'v3 substitution keeping the ALPHA contentHash claim', build: (p) => substituteV3Beta(p, { copyClaim: true }) },
+      { key: 'dgr-schema1', family: 'v3', encoding: 'identity', label: 'v3 substitution claiming schemaVersion 1 (downgrade)', downgrade: true, build: (p) => substituteV3Beta(p, { claimSchemaVersion1: true }) },
+      { key: 'dgr-nodesc', family: 'v3', encoding: 'gzip', label: 'v3 substitution with the member descriptor removed (downgrade)', downgrade: true, build: (p) => substituteV3Beta(p, { dropDescriptor: true }) },
+    ];
+    for (const spec of substitutionSpecs) {
+      for (const op of ['restore', 'import']) {
+        const key = spec.key + '-' + (op === 'restore' ? 'r' : 'i');
+        const pkg = spec.family === 'v3' ? stageV3Alpha(key, spec.encoding) : stageV1Alpha(key);
+        const sizes = spec.build(pkg);
+        const rec = await observeRecovery(pkg, op);
+        bindingCases.push(Object.assign(rec, {
+          group: spec.downgrade ? 'downgrade' : 'substitution',
+          label: spec.label, sameLength: spec.sameLength === true,
+          alphaByteLength: sizes.alphaByteLength, betaByteLength: sizes.betaByteLength,
+        }));
+      }
+    }
+
+    /* ── Identity-binding family: the package is VALID and untouched; only the
+     * trusted identity available to each read varies. A build that ignored the
+     * identity agreement would recover these packages normally. ── */
+    const identitySpecs = [
+      { key: 'idb-occ-absent', label: 'inspection identity present, binding occupant identity absent', facts: (n, base) => (n % 2 === 1 ? base : withoutField(base, 'contentHash')) },
+      { key: 'idb-insp-absent', label: 'binding occupant identity present, inspection identity absent', facts: (n, base) => (n % 2 === 1 ? withoutField(base, 'contentHash') : base) },
+      { key: 'idb-both-absent', label: 'BOTH trusted identities absent (two empty values must never bind)', facts: (n, base) => withoutField(base, 'contentHash') },
+      { key: 'idb-disagree', label: 'the two trusted reads report different identities', facts: (n, base) => (n % 2 === 1 ? base : Object.assign({}, base, { contentHash: 'f'.repeat(64) })) },
+    ];
+    for (const spec of identitySpecs) {
+      for (const op of ['restore', 'import']) {
+        const key = spec.key + '-' + (op === 'restore' ? 'r' : 'i');
+        const pkg = stageV1Alpha(key);
+        const rec = await withDeclarationPerCall(pkg.dir, spec.facts, () => observeRecovery(pkg, op));
+        bindingCases.push(Object.assign(rec, { group: 'identity', label: spec.label, sameLength: false }));
+      }
+    }
+
+    /* ── Partial-anchor family: a VALID v3 package whose trusted occupant is
+     * missing exactly one member measurement. Run on v3 on purpose — a build
+     * that degraded instead of failing closed would fall through to the weaker
+     * v1/v2 read, and these packages would recover normally.
+     *
+     * BOTH v3 representations are covered. A gzip-only matrix would be weak
+     * evidence: a fall-through weak read of a gzip member fails to parse as
+     * JSON and is refused for that unrelated reason, so the identity variant is
+     * the one that can actually observe a downgraded read succeeding. ── */
+    const anchorFields = ['snapshotPhysicalSha256', 'snapshotPhysicalByteLength', 'logicalSnapshotSha256', 'logicalSnapshotByteLength', 'snapshotEncoding'];
+    for (const field of anchorFields) {
+      for (const encoding of ['identity', 'gzip']) {
+        for (const op of ['restore', 'import']) {
+          const key = 'anc-' + field.toLowerCase().slice(0, 18) + '-' + (encoding === 'gzip' ? 'gz' : 'id') + '-' + (op === 'restore' ? 'r' : 'i');
+          const pkg = stageV3Alpha(key, encoding);
+          const rec = await withDeclarationPerCall(pkg.dir, (n, base) => withoutField(base, field), () => observeRecovery(pkg, op));
+          bindingCases.push(Object.assign(rec, { group: 'anchors', label: 'trusted occupant missing ' + field + ' (' + encoding + ')', missingAnchor: field, sameLength: false }));
+        }
+      }
+    }
+
+    /* ── Valid controls: the same code path, nothing substituted, nothing
+     * withheld. A refusal proof means nothing if the success path is
+     * unreachable. ── */
+    const controlSpecs = [
+      { key: 'ctl-v12', family: 'v1', encoding: 'identity', alphaText: ALPHA_V1_TEXT },
+      { key: 'ctl-v3-id', family: 'v3', encoding: 'identity', alphaText: ALPHA_V3_TEXT },
+      { key: 'ctl-v3-gz', family: 'v3', encoding: 'gzip', alphaText: ALPHA_V3_TEXT },
+    ];
+    const turnsTextFor = (snapId) => db.prepare('SELECT text FROM snapshot_turns WHERE snapshot_id=? ORDER BY turn_idx').all(snapId).map((r) => String(r.text || ''));
+    const bindingControls = [];
+    for (const spec of controlSpecs) {
+      for (const op of ['restore', 'import']) {
+        const key = spec.key + '-' + (op === 'restore' ? 'r' : 'i');
+        const pkg = spec.family === 'v3' ? stageV3Alpha(key, spec.encoding) : stageV1Alpha(key);
+        const rec = await observeRecovery(pkg, op);
+        const persistedSnapId = op === 'restore' ? pkg.snapId : rec.recoveredId;
+        bindingControls.push(Object.assign(rec, {
+          group: 'control', label: 'valid ' + spec.family + '/' + spec.encoding + ' ' + op,
+          persistedSnapId: persistedSnapId,
+          persistedTurns: persistedSnapId ? turnsTextFor(persistedSnapId) : [],
+          alphaText: spec.alphaText,
+          freshId: op === 'import' ? (!!rec.recoveredId && rec.recoveredId !== pkg.snapId) : true,
+        }));
+      }
+    }
+
+    /* Global witness: no substituted byte survives anywhere in the store. */
+    const betaRowCount = db.prepare(
+      'SELECT count(*) c FROM snapshot_turns WHERE text LIKE ? OR outer_html LIKE ? OR meta_json LIKE ?'
+    ).get('%' + BETA_MARK + '%', '%' + BETA_MARK + '%', '%' + BETA_MARK + '%').c
+      + db.prepare('SELECT count(*) c FROM snapshots WHERE title LIKE ? OR meta_json LIKE ?').get('%' + BETA_MARK + '%', '%' + BETA_MARK + '%').c
+      + db.prepare('SELECT count(*) c FROM chats WHERE title LIKE ? OR meta_json LIKE ?').get('%' + BETA_MARK + '%', '%' + BETA_MARK + '%').c;
+    const betaPayloadCount = sqlPayloads.filter((p) => p.indexOf(BETA_MARK) >= 0).length;
+    const g01Binding = { cases: bindingCases, controls: bindingControls, betaRows: betaRowCount, betaPayloads: betaPayloadCount, betaMark: BETA_MARK };
+
     const readyFilesAfter = dirSig(readyDir);
     const srcChatSigAfter = rowSig('chats', SRC_CHAT), srcSnapSigAfter = rowSig('snapshots', SRC_SNAP);
     const liveAfter = fs.existsSync(LIVE_DB) ? fs.statSync(LIVE_DB) : null;
@@ -850,6 +1282,7 @@ async function runHarness() {
 
     return {
       ok: true,
+      binding: g01Binding,
       sibling: Object.assign({ chat: SIB_CHAT, writes: siblingWrites }, sibling),
       pkg: { readyChat: RDY_CHAT, readySnap: RDY_SNAP, srcChat: SRC_CHAT, srcSnap: SRC_SNAP, srcMsgs: SRC_MSGS },
       inspect: { status: insp.status, ok: insp.ok, contentHashOk: insp.checks && insp.checks.contentHashOk, blockers: insp.blockers },
@@ -1355,10 +1788,17 @@ check('[M03 T04] Inspector v3 identity and gzip are semantically equivalent', ()
 
 check('[M03 T04] Inspector fails closed on a corrupt gzip v3 member', () => {
   assert.ok(H, 'no harness');
+  /* M10 P3.5: Rust owns the byte-level corrupt-gzip proof — the scanner test
+   * `scanner_refuses_v3_renderer_members_malformed_gzip_and_false_logical_descriptor`
+   * asserts only `Indeterminate` with `Corrupt | Partial` and deliberately
+   * fabricates no blocker code. This test therefore verifies DOWNSTREAM
+   * behaviour given that trusted refusal: the Inspector must fail closed and
+   * must not present the package as verified. Asserting a granular blocker here
+   * would demand specificity the trusted boundary does not guarantee. */
   const c = H.v3Inspect.corrupt;
-  assert.notEqual(c.status, 'verified');
+  assert.equal(c.status, 'corrupted');
   assert.equal(c.ok, false);
-  assert.ok((c.blockers || []).length > 0, 'corrupt gzip must report blockers');
+  assert.notEqual(c.status, 'verified');
   /* Unverified payload never reaches semantic JSON parsing. */
   assert.ok(!(c.blockers || []).includes('snapshot-json-invalid'));
 });
@@ -1712,6 +2152,171 @@ check('[P4.12-13] explicit-selection flows cannot enumerate sibling packages', (
       assert.ok(!code.includes(token), rel + ' enumerates the packages directory: ' + token);
     }
   }
+});
+
+/* ── G01 — durable archive-recovery binding proofs ────────────────────────────
+ * Behavioural regression coverage for the trusted-state binding of archive-path
+ * recovery reads. These run the REAL importer and restore modules against real
+ * packages whose bytes were substituted AFTER the trusted enumeration measured
+ * them, and assert decisions, execution statuses, write counters, row deltas and
+ * write payloads — never source text. They are the behavioural half of the G01
+ * protection; the source-level anti-reintroduction invariant lives in
+ * validate-saved-chat-archive-recovery-import-export-v1.mjs and neither replaces
+ * the other. */
+const G01_READY = { restore: 'restore-ready', import: 'import-ready' };
+const G01_SUCCESS = { restore: 'restored', import: 'imported' };
+function g01() {
+  assert.ok(H && H.binding, 'the G01 binding proofs did not run');
+  return H.binding;
+}
+function g01Cases(group, op) {
+  return g01().cases.filter((c) => c.group === group && (!op || c.op === op));
+}
+function g01Refused(c) {
+  const at = c.group + '/' + c.key + ' [' + c.op + ' — ' + c.label + ']';
+  assert.ok(c.dryRunCalled && c.executionCalled, at + ': both the dry-run AND the execution API must be exercised');
+  assert.ok(c.integrityCalls >= 2, at + ': fewer than two trusted enumerations — the read was not independently bound');
+  assert.notEqual(c.dryDecision, G01_READY[c.op], at + ': dry-run reported ready for content that cannot be bound to trusted state');
+  assert.notEqual(c.execStatus, G01_SUCCESS[c.op], at + ': EXECUTION SUCCEEDED on content that cannot be bound to trusted state');
+  assert.equal(c.writes, 0, at + ': refusal performed ' + c.writes + ' write(s)');
+  assert.deepEqual(c.delta, { chats: 0, snapshots: 0, turns: 0 }, at + ': refusal changed row counts');
+  assert.equal(c.betaInWrites, false, at + ': SUBSTITUTED CONTENT REACHED A WRITE PAYLOAD');
+  assert.equal(c.recoveredId, '', at + ': a recovered/restored id was issued for a refused package');
+  assert.equal(c.provenanceRows, 0, at + ': a stored row recorded provenance for a refused package');
+  assert.equal(c.originalIdsPresent.chat, false, at + ': the refused package chatId was persisted');
+  assert.equal(c.originalIdsPresent.snapshot, false, at + ': the refused package snapshotId was persisted');
+}
+
+check('[G01] restore refuses every post-enumeration snapshot substitution, at dry-run AND execution, with zero writes', () => {
+  const cases = g01Cases('substitution', 'restore');
+  assert.ok(cases.length >= 6, 'expected the full restore substitution matrix, saw ' + cases.length);
+  for (const c of cases) g01Refused(c);
+});
+
+check('[G01] importer refuses every post-enumeration snapshot substitution, at dry-run AND execution, with zero writes', () => {
+  const cases = g01Cases('substitution', 'import');
+  assert.ok(cases.length >= 6, 'expected the full importer substitution matrix, saw ' + cases.length);
+  for (const c of cases) g01Refused(c);
+});
+
+check('[G01] substituted packages ARE read and then rejected — the refusal is the digest comparison, not an earlier gate', () => {
+  const cases = g01().cases.filter((c) => c.group === 'substitution' || c.group === 'downgrade');
+  assert.ok(cases.length >= 16, 'expected the full substitution + downgrade matrix, saw ' + cases.length);
+  for (const c of cases) {
+    assert.ok(c.snapshotMemberReads >= 1,
+      c.key + '/' + c.op + ': the snapshot member was never read, so this case cannot prove the bound read refuses it');
+  }
+});
+
+check('[G01] a substitution at IDENTICAL physical byte length is refused — byte length alone cannot explain it', () => {
+  const cases = g01().cases.filter((c) => c.sameLength === true);
+  assert.equal(cases.length, 2, 'expected one same-length case per module, saw ' + cases.length);
+  assert.deepEqual(cases.map((c) => c.op).sort(), ['import', 'restore']);
+  for (const c of cases) {
+    assert.equal(c.alphaByteLength, c.betaByteLength,
+      c.op + ': the same-length case is not same-length (' + c.alphaByteLength + ' vs ' + c.betaByteLength + ') — it would pass on the length check alone');
+    g01Refused(c);
+  }
+});
+
+check('[G01] a trusted v3 package cannot be diverted to the weaker read by package-controlled metadata', () => {
+  const cases = g01Cases('downgrade');
+  assert.equal(cases.length, 4, 'expected two downgrade attempts per module, saw ' + cases.length);
+  for (const c of cases) {
+    assert.equal(c.family, 'v3', c.key + ': the downgrade proof must start from a TRUSTED v3 occupant');
+    g01Refused(c);
+  }
+});
+
+check('[G01] trusted identity binding fails closed in both directions, on disagreement, and when BOTH sides are absent', () => {
+  const cases = g01Cases('identity');
+  assert.equal(cases.length, 8, 'expected four identity cases per module, saw ' + cases.length);
+  const keys = new Set(cases.map((c) => c.key.replace(/-[ri]$/, '')));
+  for (const required of ['idb-occ-absent', 'idb-insp-absent', 'idb-both-absent', 'idb-disagree']) {
+    assert.ok(keys.has(required), 'missing mandatory identity case: ' + required);
+  }
+  for (const c of cases) g01Refused(c);
+});
+
+check('[G01] partial trusted member anchors fail closed — no downgrade, no weak-read fallback', () => {
+  const cases = g01Cases('anchors');
+  assert.equal(cases.length, 20, 'expected five anchor fields x two v3 representations x two modules, saw ' + cases.length);
+  for (const field of ['snapshotPhysicalSha256', 'snapshotPhysicalByteLength', 'logicalSnapshotSha256', 'logicalSnapshotByteLength', 'snapshotEncoding']) {
+    const forField = cases.filter((c) => c.missingAnchor === field);
+    assert.equal(forField.length, 4, 'anchor ' + field + ' is not covered for both representations in both modules');
+    assert.deepEqual([...new Set(forField.map((c) => c.encoding))].sort(), ['gzip', 'identity'],
+      'anchor ' + field + ' must be withheld from an identity package too — a gzip-only case can be refused by JSON parse failure instead of by the anchor gate');
+  }
+  for (const c of cases) g01Refused(c);
+});
+
+check('[G01] a binding failure refuses BEFORE the snapshot member is read at all', () => {
+  const cases = g01().cases.filter((c) => c.group === 'identity' || c.group === 'anchors');
+  assert.ok(cases.length >= 28, 'expected the identity + anchor matrix, saw ' + cases.length);
+  for (const c of cases) {
+    assert.equal(c.snapshotMemberReads, 0,
+      c.key + '/' + c.op + ': the snapshot member was read despite an unbindable trusted state');
+  }
+});
+
+check('[G01] no substituted byte reached a write payload or survived anywhere in the store', () => {
+  const b = g01();
+  assert.equal(b.betaPayloads, 0, b.betaPayloads + ' SQL payload(s) carried substituted content');
+  assert.equal(b.betaRows, 0, b.betaRows + ' stored row(s) carry substituted content');
+});
+
+check('[G01] valid RESTORE controls still reach restore-ready → restored for v1/v2, v3 identity and v3 gzip', () => {
+  const controls = g01().controls.filter((c) => c.op === 'restore');
+  assert.equal(controls.length, 3, 'expected three restore controls, saw ' + controls.length);
+  assert.deepEqual(controls.map((c) => c.encoding).sort(), ['gzip', 'identity', 'identity']);
+  for (const c of controls) {
+    assert.equal(c.dryDecision, 'restore-ready', c.label + ': the valid control never reached restore-ready — every refusal proof beside it would be vacuous');
+    assert.equal(c.execStatus, 'restored', c.label + ': the valid control did not restore');
+    assert.equal(c.delta.chats, 1, c.label + ': restore control chat delta');
+    assert.equal(c.delta.snapshots, 1, c.label + ': restore control snapshot delta');
+    assert.ok(c.delta.turns > 0, c.label + ': restore control inserted no turns');
+    assert.equal(c.originalIdsPresent.snapshot, true, c.label + ': restore did not persist the ORIGINAL snapshot id');
+  }
+});
+
+check('[G01] valid IMPORT controls still reach import-ready → imported under FRESH recovered ids', () => {
+  const controls = g01().controls.filter((c) => c.op === 'import');
+  assert.equal(controls.length, 3, 'expected three import controls, saw ' + controls.length);
+  assert.deepEqual(controls.map((c) => c.encoding).sort(), ['gzip', 'identity', 'identity']);
+  for (const c of controls) {
+    assert.equal(c.dryDecision, 'import-ready', c.label + ': the valid control never reached import-ready — every refusal proof beside it would be vacuous');
+    assert.equal(c.execStatus, 'imported', c.label + ': the valid control did not import');
+    assert.equal(c.delta.chats, 1, c.label + ': import control chat delta');
+    assert.equal(c.delta.snapshots, 1, c.label + ': import control snapshot delta');
+    assert.ok(c.delta.turns > 0, c.label + ': import control inserted no turns');
+    assert.equal(c.freshId, true, c.label + ': import reused the package original snapshot id');
+    assert.equal(c.originalIdsPresent.chat, false, c.label + ': import-as-new created the package ORIGINAL chat id');
+  }
+});
+
+check('[G01] both recovery controls persisted the ALPHA payload, and no control carries substituted text', () => {
+  const b = g01();
+  for (const c of b.controls) {
+    assert.ok(c.persistedSnapId, c.label + ': no persisted snapshot to read back');
+    assert.ok(c.persistedTurns.length > 0, c.label + ': persisted snapshot has no turns');
+    assert.ok(c.persistedTurns.some((t) => t.includes(c.alphaText)),
+      c.label + ': the persisted turns do not carry the ALPHA payload — the control proves nothing about content');
+    assert.ok(!c.persistedTurns.some((t) => t.includes(b.betaMark)),
+      c.label + ': a control persisted substituted content');
+  }
+});
+
+check('[G01] every binding scenario drove the real dry-run and execution entry points of the real modules', () => {
+  const b = g01();
+  const all = b.cases.concat(b.controls);
+  assert.ok(all.length >= 50, 'expected the full permanent binding matrix, saw ' + all.length);
+  for (const c of all) {
+    assert.ok(c.dryRunCalled && c.executionCalled, c.key + '/' + c.op + ': a scenario skipped an entry point');
+    assert.ok(c.integrityCalls >= 2, c.key + '/' + c.op + ': fewer than two trusted enumerations were performed');
+  }
+  assert.deepEqual(
+    [...new Set(all.map((c) => c.op))].sort(), ['import', 'restore'],
+    'the permanent matrix must cover BOTH governed modules');
 });
 
 console.log('');

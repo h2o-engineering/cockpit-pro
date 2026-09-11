@@ -26,6 +26,23 @@ const PACK_REL = 'tools/product/studio/pack-studio.mjs';
 const STUDIO_DIR_REL = 'src-surfaces-base/studio';
 
 const RESTORE_ENTRY_NAMES = ['H2O.Studio.archiveRestore', 'dryRunRestorePackage', 'restoreVerifiedPackage'];
+/* The restore entry points are CALLER-CONFINED. They were confined to the
+ * restore module alone; the Recovery Center is now the one admitted caller,
+ * because T05 wires Restore-Original-Identity through exactly these governed
+ * entry points rather than acquiring write authority of its own.
+ *
+ * This is a topology change, not an authority change, so the allowlist is an
+ * exact path set with a pinned size — a third caller cannot appear silently —
+ * and the admitted caller is additionally pinned to the exact restore symbols
+ * it may name. Relink confinement is untouched: it stays module-only. */
+const RECOVERY_CENTER_REL = 'src-surfaces-base/studio/ingestion/saved-chat-recovery-center-ui.studio.js';
+const RESTORE_ENTRY_CALLERS = new Set([RESTORE_REL, RECOVERY_CENTER_REL]);
+/* Everything the Recovery Center may name on the restore module: the two T05
+ * entry points and nothing else. */
+const RECOVERY_CENTER_RESTORE_SYMBOLS = new Set([
+  'dryRunRestorePackage',
+  'restoreVerifiedPackage',
+]);
 const RELINK_FORBIDDEN_NAMES = ['archiveRelink', 'dryRunRelinkPackage', 'relinkVerifiedPackage'];
 const FORBIDDEN_RESTORE_MUTATIONS = [
   'libraryIndex',
@@ -179,14 +196,48 @@ check('[INVARIANT] relink runtime is confined to the separate relink module', ()
   }
 });
 
-check('[INVARIANT] restore entry points are confined to the restore module', () => {
+check('[INVARIANT] restore entry points are confined to the restore module and its ONE admitted caller', () => {
+  const observedCallers = [];
   for (const abs of walkJs(path.join(REPO_ROOT, STUDIO_DIR_REL))) {
     const rel = path.relative(REPO_ROOT, abs);
     const code = stripComments(fs.readFileSync(abs, 'utf8'));
-    if (rel === RESTORE_REL) continue;
-    for (const name of RESTORE_ENTRY_NAMES) {
-      assert.ok(!code.includes(name), 'restore entry point leaked outside restore module: ' + name + ' in ' + rel);
+    const names = RESTORE_ENTRY_NAMES.filter((name) => code.includes(name));
+    if (names.length) observedCallers.push(rel);
+    if (RESTORE_ENTRY_CALLERS.has(rel)) continue;
+    for (const name of names) {
+      assert.ok(false, 'restore entry point leaked outside the admitted callers: ' + name + ' in ' + rel);
     }
+  }
+  /* The allowlist is EXACTLY two paths and cannot grow silently. */
+  assert.equal(RESTORE_ENTRY_CALLERS.size, 2, 'the admitted restore-caller set changed size');
+  assert.ok(RESTORE_ENTRY_CALLERS.has(RESTORE_REL), 'the restore module itself must remain admitted');
+  assert.ok(RESTORE_ENTRY_CALLERS.has(RECOVERY_CENTER_REL), 'the Recovery Center must be the only other admitted caller');
+  assert.equal(RESTORE_ENTRY_CALLERS.has('src-surfaces-base/studio/ingestion/saved-chat-archive-relink.studio.js'), false,
+    'the relink module must never be an admitted restore caller');
+  for (const rel of [RESTORE_REL, RECOVERY_CENTER_REL]) {
+    assert.ok(fs.existsSync(path.join(REPO_ROOT, rel)), 'an admitted caller does not exist: ' + rel);
+  }
+  /* Both admitted callers must actually be observed, so the allowlist can never
+   * quietly carry a path that no longer participates. */
+  assert.deepEqual(observedCallers.slice().sort(), [RESTORE_REL, RECOVERY_CENTER_REL].slice().sort(),
+    'observed restore-entry callers differ from the admitted set: ' + observedCallers.join(', '));
+
+  /* The admitted caller may name ONLY the two governed T05 entry points. A third
+   * restore symbol in the Recovery Center would be new reach into that module
+   * regardless of what it is called. */
+  const rcCode = stripComments(fs.readFileSync(path.join(REPO_ROOT, RECOVERY_CENTER_REL), 'utf8'));
+  const rcSymbols = new Set(
+    (rcCode.match(/archiveRestore\s*\)?\s*\.\s*([A-Za-z0-9_$]+)/g) || [])
+      .map((m) => m.split('.').pop().trim()),
+  );
+  assert.ok(rcSymbols.size > 0, 'the Recovery Center names no restore symbol at all — the pin would pass vacuously');
+  for (const sym of rcSymbols) {
+    assert.ok(RECOVERY_CENTER_RESTORE_SYMBOLS.has(sym),
+      'Recovery Center names a non-admitted restore symbol: archiveRestore.' + sym);
+  }
+  assert.equal(RECOVERY_CENTER_RESTORE_SYMBOLS.size, 2, 'the admitted Recovery Center restore symbol set changed size');
+  for (const sym of RECOVERY_CENTER_RESTORE_SYMBOLS) {
+    assert.ok(rcSymbols.has(sym), 'an admitted restore symbol is not actually used: ' + sym);
   }
 });
 

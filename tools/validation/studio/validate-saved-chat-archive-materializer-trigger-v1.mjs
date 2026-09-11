@@ -36,6 +36,8 @@ const S0F1J_REL = 'src-surfaces-base/studio/S0F1j. 🎬 Library Actions - Studio
 const ACTION_REL = 'src-surfaces-base/studio/ingestion/saved-chat-archive-materializer-action.studio.js';
 
 const MATERIALIZE_API = 'materializeSavedChatArchiveRequestV1';
+/* The governed active-family writer boundary the materializer must publish through. */
+const ACTIVE_WRITER_API = 'writeSavedChatPackageForLiveGenerationFamily';
 // The Desktop scanner the operator action must NOT auto-invoke.
 const SCANNER_API = 'scanSavedChatArchiveRequestInboxV1';
 // Chrome intent / read-back / badge APIs the Desktop materializer must never call.
@@ -132,16 +134,43 @@ check('[INVARIANT] full materializer result-status vocabulary is present', () =>
 
 // --- C. Writer boundary -----------------------------------------------------
 
-check('[INVARIANT] writeSavedChatPackageV1 is the only writer, called once, with snapshotId + overwrite:false, no content leak', () => {
-  const callMatch = matCode.match(/writeSavedChatPackageV1\s*\(\s*\{[^}]*\}\s*\)/);
-  assert.ok(callMatch, 'writer call not found');
-  const callArgs = callMatch[0];
+check('[INVARIANT] the governed active-family writer is the only writer, called once, with snapshotId + policy token + overwrite:false, no content leak', () => {
+  /* The writer moved behind the policy-governed active-family boundary
+     (`saved-chat-generation-policy.tauri.js`), which forbids overwrite outright,
+     requires an unforgeable policy token, and publishes through the trusted
+     native generation publisher. The invariant is unchanged — ONE governed
+     writer call, carrying only the resolved snapshotId — so it is asserted
+     against that boundary rather than the retired literal spelling. */
+  const callMatch = matCode.match(
+    new RegExp(ACTIVE_WRITER_API + '\\s*\\(\\s*(\\{[\\s\\S]*?\\})\\s*,\\s*([A-Za-z_$][\\w$]*)\\s*,?\\s*\\)'),
+  );
+  assert.ok(callMatch, 'governed active-family writer call not found');
+  const callArgs = callMatch[1];
   assert.match(callArgs, /snapshotId\s*:/);
   assert.match(callArgs, /overwrite\s*:\s*false/);
   for (const banned of ['targetDir', 'targetFolder', 'packagePath', 'manifest', 'contentHash', 'html', 'assets', 'envelope', 'request:', 'payload', 'normalized']) {
     assert.ok(!callArgs.includes(banned), `writer call leaked a non-authoritative source field: ${banned}`);
   }
-  assert.equal((matCode.match(/writeSavedChatPackageV1\s*\(/g) || []).length, 1, 'writer must be called exactly once');
+  /* The family is selected by the trusted policy token, never by the renderer:
+     the second argument must be the token read from the policy command. */
+  assert.equal(callMatch[2], 'policyToken', 'the writer must receive the trusted policy token');
+  assert.match(matCode, /readSavedChatGenerationPolicy\s*\(/, 'the policy token is read, not synthesized');
+  assert.equal(
+    (matCode.match(new RegExp(ACTIVE_WRITER_API + '\\s*\\(', 'g')) || []).length, 1,
+    'writer must be called exactly once',
+  );
+  /* And nothing bypasses that boundary: no retired direct writer, no direct
+     publisher, and no raw native archive write command. */
+  for (const bypass of [
+    'writeSavedChatPackageV1',
+    'publishBuiltSavedChatGeneration',
+    'h2o_archive_generation_begin',
+    'h2o_archive_generation_write_member',
+    'h2o_archive_generation_commit',
+    'h2o_archive_durable_write',
+  ]) {
+    assert.ok(!matCode.includes(bypass), `materializer bypasses the governed writer boundary: ${bypass}`);
+  }
 });
 
 check('[INVARIANT] overwrite defaults false in the trigger API surface', () => {

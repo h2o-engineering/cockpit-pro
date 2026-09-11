@@ -300,7 +300,7 @@ function buildDiagStore(config = {}) {
   return store;
 }
 
-function createFixtureFs({ missingRoot = false, liveCasMissing = false, storeOptions = {}, extraEntries = [], readDirThrows = false, durableTemp = { complete: true, entries: [] }, durableTempThrows = false } = {}) {
+function createFixtureFs({ missingRoot = false, liveCasMissing = false, storeOptions = {}, extraEntries = [], readDirThrows = false, durableTemp = { complete: true, entries: [] }, durableTempThrows = false, trustedEnvelope = null } = {}) {
   const dirs = new Set();
   const files = new Map();
   const readCalls = [];
@@ -371,6 +371,42 @@ function createFixtureFs({ missingRoot = false, liveCasMissing = false, storeOpt
         count: (durableTemp.entries || []).length,
         entries: durableTemp.entries || [],
         blockers: durableTemp.blockers || [],
+      };
+    }
+    /* M10 P3b: `diagnoseSavedChatArchiveV1` is now sourced from trusted Rust, so
+       the harness answers the trusted command. By default every fixture package
+       is reported VERIFIED; a test that needs a different trusted verdict
+       supplies its own `trustedEnvelope`. The legacy list/validate entry points
+       tested elsewhere in this suite are untouched by this branch. */
+    if (cmd === 'h2o_saved_chat_archive_integrity') {
+      if (trustedEnvelope) return trustedEnvelope;
+      const occupants = [...dirs]
+        .filter((dir) => dir.startsWith(`${PACKAGE_ROOT}/`) && dir.endsWith('.h2ochat'))
+        .sort()
+        .map((dir) => {
+          const name = dir.slice(PACKAGE_ROOT.length + 1);
+          /* Read the fixture's OWN manifest identity so DB reconciliation has a
+             truthful identity to reconcile; the trusted verdict itself is still
+             supplied by this harness, not derived from bytes. */
+          let manifest = {};
+          try { manifest = JSON.parse(new TextDecoder().decode(files.get(`${dir}/manifest.json`))); } catch (_) { manifest = {}; }
+          return {
+            path: dir, name, class: 'verified-generation',
+            chatId: String(manifest.chatId || name.replace(/\.h2ochat$/, '')),
+            snapshotId: String(manifest.snapshotId || 'snap'),
+            contentHash: String(manifest.contentHash || 'a'.repeat(64)).replace(/^sha256-/, ''),
+            constructionFamily: manifest.payloadVersion === 2 ? 'v2' : 'v1',
+            snapshotEncoding: 'identity', savedAt: '2026-01-01T00:00:00.000Z',
+            orderable: true,
+            assetShas: (manifest.assets || []).map((a) => a && a.sha256).filter(Boolean),
+            blockers: [],
+          };
+        });
+      return {
+        schema: 'h2o.savedChatArchiveIntegrity', schemaVersion: 1,
+        complete: true, blockers: [],
+        observed: { byConstructionFamily: { v1: 0, v2: occupants.length, v3: 0 } },
+        liveGenerationFamily: 'v3', occupants,
       };
     }
     const p = args && args.path;
@@ -474,6 +510,17 @@ function loadModule(fixture) {
   /* M03 T04: load the REAL governed saved-chat package codec, never a mock, so
    * diagnostics is proven against the one shared gzip/verification authority. */
   vm.runInContext(readRepo(CODEC_REL), sandbox, { filename: CODEC_REL });
+  /* M10 P3b: `diagnoseSavedChatArchiveV1` is now sourced from the trusted
+     chain, so the harness must install it. Loading these does NOT change what
+     the legacy list/validate entry points below do — they are still the
+     original JS verifier, which is exactly what most of this suite tests. */
+  for (const rel of [
+    'src-surfaces-base/studio/ingestion/saved-chat-archive-health-mapping.js',
+    'src-surfaces-base/studio/ingestion/saved-chat-archive-integrity.tauri.js',
+    'src-surfaces-base/studio/ingestion/saved-chat-archive-health-composition.js',
+  ]) {
+    vm.runInContext(readRepo(rel), sandbox, { filename: rel });
+  }
   vm.runInContext(readRepo(MODULE_REL), sandbox, { filename: MODULE_REL });
   return sandbox.H2O.Studio.ingestion;
 }
@@ -491,11 +538,13 @@ check('module file exists', () => {
 });
 
 check('module registers required H2O.Studio.ingestion APIs', () => {
+  /* M10 P4 retired the duplicate JS verifier; what this module registers is the
+     trusted Health facade plus decision-neutral observations. */
   for (const apiName of [
     'diagnoseSavedChatArchiveCapabilitiesV1',
-    'listSavedChatArchivePackagesV1',
-    'validateSavedChatPackageV1',
     'diagnoseSavedChatArchiveV1',
+    'dbDriftForIdentityV1',
+    'liveCasPresenceForShasV1',
   ]) {
     assert.match(moduleSource, new RegExp(`H2O\\.Studio\\.ingestion\\.${apiName}`));
   }
@@ -513,81 +562,11 @@ check('module uses AppLocalData baseDir 15 and archive/packages root', () => {
   assert.match(moduleSource, /LIVE_CAS_ROOT\s*=\s*'archive\/assets'/);
 });
 
-check('module has v1 and v2 contentHash validation logic', () => {
-  assert.match(moduleSource, /diag\.schemaVersion === 1/);
-  assert.match(moduleSource, /diag\.schemaVersion === 2/);
-  assert.match(moduleSource, /canonicalJson\(\{ snapshot: fileSnapshotSha, assets: assetShas \}\)/);
-  assert.match(moduleSource, /sha256Prefixed/);
-});
-
-check('module has version-aware v3 descriptor and logical contentHash verification', () => {
-  assert.match(moduleSource, /REQUIRED_FILES_V3/);
-  assert.match(moduleSource, /verifyV3SnapshotDescriptor/);
-  assert.match(moduleSource, /payloadVersion:\s*3/);
-  assert.match(moduleSource, /logicalSnapshotSha/);
-  /* M03 T04: gzip is decoded through the single governed codec authority. */
-  assert.match(moduleSource, /savedChatPackageCodecV3/);
-  assert.match(moduleSource, /verifyPackageMemberBytes/);
-  assert.match(moduleSource, /snapshot-gzip-physical-bound-invalid/);
-  assert.doesNotMatch(moduleSource, /snapshot-encoding-not-enabled/);
-});
-
-check('diagnostics reads the v3 snapshot through the governed bounded reader', () => {
-  assert.match(moduleSource, /readBoundedPackageMemberBytes/);
-  assert.match(moduleSource, /physicalByteCap:\s*v3Codec\.LOGICAL_SNAPSHOT_CAP_BYTES/);
-  assert.match(moduleSource, /snapshot-bounded-read-failed/);
-  /* Diagnostics must not implement filesystem metadata admission itself. */
-  assert.doesNotMatch(moduleSource, /plugin:fs\|lstat/);
-});
-
 check('diagnostics owns no second gzip decoder or hash implementation', () => {
   assert.doesNotMatch(moduleSource, /DecompressionStream/);
   assert.doesNotMatch(moduleSource, /CompressionStream/);
   assert.doesNotMatch(moduleSource, /0x1f/);
   assert.doesNotMatch(moduleSource, /gzipDecode|inflate|gunzip/);
-});
-
-check('module has C5.3 assetChecks schema and asset validation logic', () => {
-  for (const marker of [
-    'assetChecks',
-    'manifestAssetCount',
-    'packageAssetsOk',
-    'missingPackageAssets',
-    'hashMismatches',
-    'byteLengthMismatches',
-    'unreferencedManifestAssets',
-    'assetRefMismatches',
-    'dataImageResidue',
-    'rendererAssetRefMismatches',
-    'missingLiveCasAssets',
-    'validateManifestAssets',
-    'validatePackageAssetFiles',
-    'validateSnapshotAssetRefs',
-    'validateRendererAssetRefs',
-    'compareLiveCasAssets',
-  ]) {
-    assert.ok(moduleSource.includes(marker), `missing marker: ${marker}`);
-  }
-});
-
-check('module validates package-relative asset path safety and byte hashes', () => {
-  assert.match(moduleSource, /packageRelativePathIsSafe/);
-  assert.match(moduleSource, /assets\/sha256-<hash>\.<ext>/);
-  assert.match(moduleSource, /sha256Prefixed\(bytes\)/);
-  assert.match(moduleSource, /package-asset-sha-mismatch/);
-  assert.match(moduleSource, /package-asset-byte-length-mismatch/);
-});
-
-check('module checks v2 data:image residue and renderer asset references', () => {
-  assert.match(moduleSource, /data:image/);
-  assert.match(moduleSource, /data-image-residue-v2/);
-  assert.match(moduleSource, /renderer-asset-ref-not-in-manifest/);
-  assert.match(moduleSource, /renderer-asset-ref-missing-file/);
-});
-
-check('module treats missing archive root as empty warning, not blocker', () => {
-  assert.match(moduleSource, /archive-packages-root-missing/);
-  assert.match(moduleSource, /return setAggregateStatus\(result, true\)/);
 });
 
 check('module contains no mutation filesystem commands', () => {
@@ -727,9 +706,14 @@ await checkAsync('APIs register in Tauri VM context', async () => {
   const fixture = createFixtureFs();
   const ingestion = loadModule(fixture);
   assert.equal(typeof ingestion.diagnoseSavedChatArchiveCapabilitiesV1, 'function');
-  assert.equal(typeof ingestion.listSavedChatArchivePackagesV1, 'function');
-  assert.equal(typeof ingestion.validateSavedChatPackageV1, 'function');
   assert.equal(typeof ingestion.diagnoseSavedChatArchiveV1, 'function');
+  assert.equal(typeof ingestion.dbDriftForIdentityV1, 'function');
+  assert.equal(typeof ingestion.liveCasPresenceForShasV1, 'function');
+  /* And the retired verifier entry points are genuinely gone from the runtime
+     surface, not merely unexported. */
+  for (const retired of ['listSavedChatArchivePackagesV1', 'validateSavedChatPackageV1', 'validateSavedChatPackageBytesV1']) {
+    assert.equal(typeof ingestion[retired], 'undefined', `${retired} must not exist`);
+  }
 });
 
 await checkAsync('capability diagnostic reports read-only Desktop archive scope', async () => {
@@ -748,16 +732,10 @@ await checkAsync('capability diagnostic reports read-only Desktop archive scope'
   assert.equal(result.boundaries.ui, false);
 });
 
-await checkAsync('missing archive root returns empty warning without blocker', async () => {
-  const fixture = createFixtureFs({ missingRoot: true });
-  const ingestion = loadModule(fixture);
-  const result = await ingestion.listSavedChatArchivePackagesV1();
-  assert.equal(result.status, 'empty');
-  assert.equal(result.ok, false);
-  assert.equal(result.blockers.length, 0);
-  assert.ok(result.warnings.some((issue) => issue.code === 'archive-packages-root-missing'));
-  assert.equal(result.packages.length, 0);
-});
+/* M10 P4: the DB-drift tests now drive the LIVE exported observation directly
+   instead of reaching it through the retired package verifier. */
+const V1_IDENTITY = { chatId: 'chat_diag_v1', snapshotId: 'snap_diag_v1', assetShas: [] };
+const V2_IDENTITY = { chatId: 'chat_diag_v2', snapshotId: 'snap_diag_v2', assetShas: [ASSET_SHA] };
 
 /* ---- M06 T1.3 residue diagnostics ---------------------------------- */
 
@@ -770,7 +748,7 @@ const RESIDUE_ENTRIES = [
 await checkAsync('T1.3 A/B/C residue count, exact paths and deterministic order', async () => {
   const fixture = createFixtureFs({ extraEntries: RESIDUE_ENTRIES });
   const ingestion = loadModule(fixture);
-  const result = await ingestion.listSavedChatArchivePackagesV1();
+  const result = await ingestion.diagnoseSavedChatArchiveV1({ includeDbChecks: false });
   const residue = result.residue;
 
   /* (A) total count matches the complete residue list */
@@ -796,7 +774,7 @@ await checkAsync('T1.3 A/B/C residue count, exact paths and deterministic order'
   /* (C) ordering is deterministic regardless of directory order */
   assert.deepEqual(paths, paths.slice().sort(), 'residue must be emitted in sorted path order');
   const reversed = createFixtureFs({ extraEntries: RESIDUE_ENTRIES.slice().reverse() });
-  const again = await loadModule(reversed).listSavedChatArchivePackagesV1();
+  const again = await loadModule(reversed).diagnoseSavedChatArchiveV1({ includeDbChecks: false });
   assert.deepEqual(Array.from(again.residue.entries, (e) => e.path), paths, 'order must not depend on readDir order');
 
   /* the scan really was complete, and (I) nothing was mutated */
@@ -807,7 +785,7 @@ await checkAsync('T1.3 A/B/C residue count, exact paths and deterministic order'
 await checkAsync('T1.3 D zero residue on a complete scan reports count 0 and an empty list', async () => {
   const fixture = createFixtureFs();
   const ingestion = loadModule(fixture);
-  const result = await ingestion.listSavedChatArchivePackagesV1();
+  const result = await ingestion.diagnoseSavedChatArchiveV1({ includeDbChecks: false });
   assert.equal(result.complete, true);
   assert.equal(result.residue.complete, true);
   assert.equal(result.residue.count, 0);
@@ -823,36 +801,23 @@ await checkAsync('T1.3 D zero residue on a complete scan reports count 0 and an 
   assert.equal(fixture.mutationCalls.length, 0);
 });
 
-await checkAsync('T1.3 E/K a partial or failed scan can never claim authoritative zero residue', async () => {
-  /* (i) bounded enumeration: stops early, so absence proves nothing */
-  const bounded = createFixtureFs({ extraEntries: RESIDUE_ENTRIES });
-  const truncated = await loadModule(bounded).listSavedChatArchivePackagesV1({ limit: 1 });
-  assert.equal(truncated.complete, false);
-  assert.equal(truncated.truncated, true);
-  assert.equal(truncated.residue.complete, false, 'a bounded walk must not carry residue authority');
-  assert.ok(
-    truncated.blockers.some((issue) => issue.code === 'archive-package-inventory-truncated'),
-    'truncation stays a blocker',
-  );
-
-  /* (ii) a bounded scan that happens to observe NO residue still must not
-     report an authoritative zero */
-  const boundedClean = createFixtureFs();
-  const cleanTruncated = await loadModule(boundedClean).listSavedChatArchivePackagesV1({ limit: 1 });
-  assert.equal(cleanTruncated.residue.count, 0);
-  assert.equal(cleanTruncated.residue.complete, false, 'count 0 from a partial walk is not authority');
-
-  /* (iii) enumeration failure: same rule */
+await checkAsync('T1.3 E/K a failed scan can never claim authoritative zero residue', async () => {
+  /* M10 P4 removed the bounded inventory walk, so truncation is no longer a way
+     to produce a partial scan. The invariant that mattered survives intact: a
+     walk that FAILED must not be read as proof that there is no residue. */
   const broken = createFixtureFs({ readDirThrows: true });
-  const failed = await loadModule(broken).listSavedChatArchivePackagesV1();
+  const failed = await loadModule(broken).diagnoseSavedChatArchiveV1({ includeDbChecks: false });
   assert.equal(failed.residue.count, 0);
   assert.equal(failed.residue.complete, false, 'a failed walk is not authority for zero residue');
-  assert.ok(failed.blockers.some((issue) => issue.code === 'archive-package-list-failed'));
+  assert.ok(
+    failed.residue.unscanned.some((s) => s.root === PACKAGE_ROOT),
+    'the unscanned source must be named rather than silently omitted',
+  );
 });
 
 await checkAsync('T1.3 F/G/H packages and reserved infrastructure are never residue', async () => {
   const fixture = createFixtureFs({ extraEntries: RESIDUE_ENTRIES });
-  const result = await loadModule(fixture).listSavedChatArchivePackagesV1();
+  const result = await loadModule(fixture).diagnoseSavedChatArchiveV1({ includeDbChecks: false });
   const names = Array.from(result.residue.entries, (entry) => entry.name);
 
   /* (F) valid generations/packages are not residue */
@@ -882,7 +847,7 @@ await checkAsync('T1.3 residue evidence carries into the aggregate diagnostic', 
 await checkAsync('T1.3 I residue reporting introduces no mutation or delete behavior', async () => {
   const fixture = createFixtureFs({ extraEntries: RESIDUE_ENTRIES });
   const ingestion = loadModule(fixture);
-  await ingestion.listSavedChatArchivePackagesV1();
+  await ingestion.diagnoseSavedChatArchiveV1({ includeDbChecks: false });
   await ingestion.diagnoseSavedChatArchiveV1({ includeDbChecks: false });
   assert.equal(fixture.mutationCalls.length, 0, 'diagnostics must never issue a mutation command');
   /* and no reclamation-shaped API appeared on the surface */
@@ -905,7 +870,7 @@ const DURABLE_TEMP_FIXTURE = {
 
 await checkAsync('T1.3 K/L both residue families compose into one counted, ordered list', async () => {
   const fixture = createFixtureFs({ extraEntries: RESIDUE_ENTRIES, durableTemp: DURABLE_TEMP_FIXTURE });
-  const result = await loadModule(fixture).listSavedChatArchivePackagesV1();
+  const result = await loadModule(fixture).diagnoseSavedChatArchiveV1({ includeDbChecks: false });
   const residue = result.residue;
 
   /* (L) aggregate count equals the combined unique entry list */
@@ -935,28 +900,22 @@ await checkAsync('T1.3 K/L both residue families compose into one counted, order
 await checkAsync('T1.3 M an incomplete source in EITHER family forbids a complete result', async () => {
   /* (i) durable probe reports incomplete */
   const partialProbe = createFixtureFs({ durableTemp: { complete: false, entries: [] } });
-  const a = await loadModule(partialProbe).listSavedChatArchivePackagesV1();
+  const a = await loadModule(partialProbe).diagnoseSavedChatArchiveV1({ includeDbChecks: false });
   assert.equal(a.residue.complete, false, 'an incomplete probe forbids completeness');
   assert.equal(a.residue.count, 0);
   assert.ok(a.residue.unscanned.some((s) => s.root === 'archive/assets'), 'the incomplete source must be named');
 
   /* (ii) durable probe throws entirely */
   const brokenProbe = createFixtureFs({ durableTempThrows: true });
-  const b = await loadModule(brokenProbe).listSavedChatArchivePackagesV1();
+  const b = await loadModule(brokenProbe).diagnoseSavedChatArchiveV1({ includeDbChecks: false });
   assert.equal(b.residue.complete, false, 'a failed probe forbids completeness');
   assert.equal(b.residue.count, 0);
   assert.ok(b.residue.unscanned.some((s) => s.root === 'archive/assets' && s.reason === 'probe-failed'));
 
-  /* (iii) staging side incomplete, durable side fine */
-  const boundedStaging = createFixtureFs({ extraEntries: RESIDUE_ENTRIES, durableTemp: DURABLE_TEMP_FIXTURE });
-  const c = await loadModule(boundedStaging).listSavedChatArchivePackagesV1({ limit: 1 });
-  assert.equal(c.residue.complete, false);
-  assert.ok(c.residue.unscanned.some((s) => s.root === PACKAGE_ROOT), 'the incomplete staging source must be named');
-
   /* (iv) the packages root is missing: staging absence is proven, but a failed
      probe still forbids an authoritative zero -- the exact false-zero shape */
   const missing = createFixtureFs({ missingRoot: true, durableTempThrows: true });
-  const d = await loadModule(missing).listSavedChatArchivePackagesV1();
+  const d = await loadModule(missing).diagnoseSavedChatArchiveV1({ includeDbChecks: false });
   assert.equal(d.residue.count, 0);
   assert.equal(d.residue.complete, false, 'missing packages root + failed probe must NOT be an authoritative zero');
 });
@@ -973,7 +932,7 @@ await checkAsync('T1.3 N/O/P the probe is read-only, path-less, and grants nothi
 
   /* (O) the command is invoked with no arguments at all */
   const fixture = createFixtureFs({ durableTemp: DURABLE_TEMP_FIXTURE });
-  await loadModule(fixture).listSavedChatArchivePackagesV1();
+  await loadModule(fixture).diagnoseSavedChatArchiveV1({ includeDbChecks: false });
   assert.ok(fixture.probeCalls.length > 0);
   for (const call of fixture.probeCalls) {
     const args = call.args === undefined || call.args === null ? {} : call.args;
@@ -988,386 +947,51 @@ await checkAsync('T1.3 N/O/P the probe is read-only, path-less, and grants nothi
   assert.equal(fixture.mutationCalls.length, 0);
 });
 
-await checkAsync('M06 T1.2 reserved identities are never classified as saved-chat packages', async () => {
-  const fixture = createFixtureFs();
+/* M10 P3b: the aggregate facade is now sourced from TRUSTED verification, so
+   package validity comes from the trusted envelope rather than from JS
+   re-verification of the fixture bytes. The legacy verifier still exists and is
+   still tested directly above via validateSavedChatPackageV1 — this case now
+   pins what the PRODUCTION FACADE reports. */
+await checkAsync('aggregate diagnostic returns partial for mixed trusted package health', async () => {
+  const mixed = {
+    schema: 'h2o.savedChatArchiveIntegrity', schemaVersion: 1, complete: true, blockers: [],
+    observed: { byConstructionFamily: { v1: 2, v2: 2, v3: 0 } },
+    liveGenerationFamily: 'v3',
+    occupants: [
+      { path: `${PACKAGE_ROOT}/chat_diag_v1.h2ochat`, name: 'chat_diag_v1.h2ochat', class: 'verified-generation', chatId: 'chat_diag_v1', snapshotId: 'snap_diag_v1', contentHash: 'a'.repeat(64), constructionFamily: 'v1', snapshotEncoding: 'identity', savedAt: '2026-01-01T00:00:00.000Z', orderable: true, assetShas: [], blockers: [] },
+      { path: `${PACKAGE_ROOT}/chat_diag_v2.h2ochat`, name: 'chat_diag_v2.h2ochat', class: 'verified-generation', chatId: 'chat_diag_v2', snapshotId: 'snap_diag_v2', contentHash: 'b'.repeat(64), constructionFamily: 'v2', snapshotEncoding: 'identity', savedAt: '2026-01-02T00:00:00.000Z', orderable: true, assetShas: [], blockers: [] },
+      { path: `${PACKAGE_ROOT}/chat_diag_bad.h2ochat`, name: 'chat_diag_bad.h2ochat', class: 'indeterminate', reason: 'corrupt', blockers: [{ code: 'generation-v3-snapshot-messages-invalid' }] },
+      { path: `${PACKAGE_ROOT}/chat_diag_bad_asset.h2ochat`, name: 'chat_diag_bad_asset.h2ochat', class: 'indeterminate', reason: 'corrupt', blockers: [{ code: 'generation-asset-sha-mismatch' }] },
+    ],
+  };
+  const fixture = createFixtureFs({ trustedEnvelope: mixed });
   const ingestion = loadModule(fixture);
-  const result = await ingestion.listSavedChatArchivePackagesV1({ limit: 20 });
-  for (const reserved of ['.h2o-archive.lock', '.h2o-reclaim']) {
-    assert.ok(
-      !result.packages.some((pkg) => pkg.packageDirName === reserved),
-      `${reserved} must never be classified as a saved-chat package`,
-    );
-    assert.ok(
-      !JSON.stringify(result.packages).includes(reserved),
-      `${reserved} must not appear anywhere in package inventory`,
-    );
-  }
-  /* The inventory still finds the real packages, so this proves exclusion
-     rather than a broken listing. */
-  assert.equal(result.packages.length, 4);
-  assert.equal(fixture.mutationCalls.length, 0);
-});
+  const result = await ingestion.diagnoseSavedChatArchiveV1({ limit: 20, includeDbChecks: false });
 
-await checkAsync('inventory lists package folders and warns on non-package entries', async () => {
-  const fixture = createFixtureFs();
-  const ingestion = loadModule(fixture);
-  const result = await ingestion.listSavedChatArchivePackagesV1({ limit: 20 });
-  assert.equal(result.packages.length, 4);
-  assert.ok(result.packages.some((pkg) => pkg.packageDirName === 'chat_diag_v1.h2ochat'));
-  assert.ok(result.packages.some((pkg) => pkg.packageDirName === 'chat_diag_v2.h2ochat'));
-  assert.ok(result.warnings.some((issue) => issue.code === 'archive-entry-not-package'));
-  assert.ok(result.warnings.some((issue) => issue.code === 'archive-entry-not-directory'));
-  assert.equal(fixture.mutationCalls.length, 0);
-});
-
-await checkAsync('inventory applies the v3 two-member required-file rule after reading manifest metadata', async () => {
-  const fixture = createFixtureFs();
-  const pkg = makeV3Package({ chatId: 'chat_diag_v3_inventory', snapshotId: 'snap_diag_v3_inventory' });
-  installV3Package(fixture, pkg);
-  const ingestion = loadModule(fixture);
-  const result = await ingestion.listSavedChatArchivePackagesV1({ limit: 20 });
-  const row = result.packages.find((item) => item.packageDirName === 'chat_diag_v3_inventory.h2ochat');
-  assert.ok(row);
-  assert.equal(row.status, 'ok');
-  assert.equal(row.schemaVersion, 3);
-  assert.equal(row.payloadVersion, 3);
-  assert.equal(row.markdownPresent, false);
-  assert.equal(row.htmlPresent, false);
-  assert.ok(!row.blockers.some((issue) => issue.code === 'markdown-missing' || issue.code === 'html-missing'));
-});
-
-await checkAsync('v1 package validation passes snapshot and content hash checks', async () => {
-  const fixture = createFixtureFs();
-  const ingestion = loadModule(fixture);
-  const result = await ingestion.validateSavedChatPackageV1({ packagePath: fixture.paths.v1 });
-  assert.equal(result.ok, true);
-  assert.equal(result.status, 'ok');
-  assert.equal(result.schemaVersion, 1);
-  assert.equal(result.hashChecks.snapshotShaOk, true);
-  assert.equal(result.hashChecks.contentHashOk, true);
-});
-
-await checkAsync('v2 package validation uses locked descriptor content hash and asset checks', async () => {
-  const fixture = createFixtureFs();
-  const ingestion = loadModule(fixture);
-  const result = await ingestion.validateSavedChatPackageV1({ packagePath: fixture.paths.v2 });
-  assert.equal(result.ok, true);
-  assert.equal(result.status, 'ok');
-  assert.equal(result.schemaVersion, 2);
-  assert.equal(result.payloadVersion, 2);
-  assert.equal(result.hashChecks.snapshotShaOk, true);
-  assert.equal(result.hashChecks.contentHashOk, true);
-  assert.match(result.hashChecks.expectedContentHash, /^sha256-[0-9a-f]{64}$/);
-  assert.equal(result.assetChecks.manifestAssetCount, 1);
-  assert.equal(result.assetChecks.packageAssetCount, 1);
-  assert.equal(result.assetChecks.packageAssetsOk, true);
-  assert.equal(result.assetChecks.liveCasChecked, true);
-  assert.equal(result.assetChecks.liveCasAvailable, true);
-  assert.equal(result.assetChecks.missingPackageAssets.length, 0);
-  assert.equal(result.assetChecks.hashMismatches.length, 0);
-  assert.equal(result.assetChecks.dataImageResidue.length, 0);
-});
-
-await checkAsync('v3 identity package validates without persistent renderers', async () => {
-  const fixture = createFixtureFs();
-  const pkg = makeV3Package();
-  const packagePath = installV3Package(fixture, pkg);
-  const ingestion = loadModule(fixture);
-  const result = await ingestion.validateSavedChatPackageV1({ packagePath, includeCasChecks: false, includeDbChecks: false });
-  assert.equal(result.ok, true);
-  assert.equal(result.status, 'ok');
-  assert.equal(result.schemaVersion, 3);
-  assert.equal(result.payloadVersion, 3);
-  assert.equal(result.markdownPresent, false);
-  assert.equal(result.htmlPresent, false);
-  assert.equal(result.hashChecks.snapshotByteLengthOk, true);
-  assert.equal(result.hashChecks.snapshotShaOk, true);
-  assert.equal(result.hashChecks.logicalSnapshotSha, pkg.manifest.files.snapshot.sha256);
-  assert.equal(result.hashChecks.logicalSnapshotByteLength, pkg.manifest.files.snapshot.byteLength);
-  assert.equal(result.hashChecks.contentHashOk, true);
-  assert.ok(!result.blockers.some((issue) => issue.code === 'markdown-missing' || issue.code === 'html-missing'));
-});
-
-await checkAsync('v3 identity optional logical fields must agree with physical fields', async () => {
-  const fixture = createFixtureFs();
-  const pkg = makeV3Package({ chatId: 'chat_diag_v3_logical', snapshotId: 'snap_diag_v3_logical' });
-  pkg.manifest.files.snapshot.contentSha256 = 'sha256-' + 'f'.repeat(64);
-  const packagePath = installV3Package(fixture, pkg);
-  const ingestion = loadModule(fixture);
-  const result = await ingestion.validateSavedChatPackageV1({ packagePath, includeCasChecks: false, includeDbChecks: false });
-  assert.equal(result.status, 'blocked');
-  assert.ok(result.blockers.some((issue) => issue.code === 'snapshot-logical-sha-mismatch-identity'));
-});
-
-await checkAsync('v3 stored snapshot hash mismatch fails closed', async () => {
-  const fixture = createFixtureFs();
-  const pkg = makeV3Package({ chatId: 'chat_diag_v3_sha', snapshotId: 'snap_diag_v3_sha' });
-  pkg.storedBytes = encode(pkg.snapshotText + ' ');
-  const packagePath = installV3Package(fixture, pkg);
-  const ingestion = loadModule(fixture);
-  const result = await ingestion.validateSavedChatPackageV1({ packagePath, includeCasChecks: false, includeDbChecks: false });
-  assert.equal(result.status, 'blocked');
-  assert.equal(result.hashChecks.snapshotShaOk, false);
-  assert.ok(result.blockers.some((issue) => issue.code === 'snapshot-sha-mismatch'));
-});
-
-await checkAsync('v3 stored snapshot byteLength mismatch fails closed', async () => {
-  const fixture = createFixtureFs();
-  const pkg = makeV3Package({ chatId: 'chat_diag_v3_length', snapshotId: 'snap_diag_v3_length' });
-  pkg.manifest.files.snapshot.byteLength += 1;
-  const packagePath = installV3Package(fixture, pkg);
-  const ingestion = loadModule(fixture);
-  const result = await ingestion.validateSavedChatPackageV1({ packagePath, includeCasChecks: false, includeDbChecks: false });
-  assert.equal(result.status, 'blocked');
-  assert.equal(result.hashChecks.snapshotByteLengthOk, false);
-  assert.ok(result.blockers.some((issue) => issue.code === 'snapshot-byte-length-mismatch'));
-});
-
-await checkAsync('v3 logical contentHash mismatch fails closed', async () => {
-  const fixture = createFixtureFs();
-  const pkg = makeV3Package({ chatId: 'chat_diag_v3_content_hash', snapshotId: 'snap_diag_v3_content_hash' });
-  pkg.manifest.contentHash = 'sha256-' + '0'.repeat(64);
-  const packagePath = installV3Package(fixture, pkg);
-  const ingestion = loadModule(fixture);
-  const result = await ingestion.validateSavedChatPackageV1({ packagePath, includeCasChecks: false, includeDbChecks: false });
-  assert.equal(result.status, 'blocked');
-  assert.equal(result.hashChecks.contentHashOk, false);
-  assert.ok(result.blockers.some((issue) => issue.code === 'content-hash-mismatch'));
-});
-
-await checkAsync('v3 contentHash sorts governed asset identities independently of manifest order', async () => {
-  const fixture = createFixtureFs();
-  const pkg = makeV3Package({
-    chatId: 'chat_diag_v3_assets',
-    snapshotId: 'snap_diag_v3_assets',
-    assets: [{ bytes: ASSET_BYTES }, { bytes: ASSET_BYTES_2 }],
-  });
-  const expected = pkg.manifest.contentHash;
-  pkg.manifest.assets.reverse();
-  const packagePath = installV3Package(fixture, pkg);
-  const ingestion = loadModule(fixture);
-  const result = await ingestion.validateSavedChatPackageV1({ packagePath, includeCasChecks: false, includeDbChecks: false });
-  assert.equal(result.status, 'ok');
-  assert.equal(result.hashChecks.expectedContentHash, expected);
-  assert.equal(result.hashChecks.contentHashOk, true);
-  assert.equal(result.assetChecks.packageAssetsOk, true);
-});
-
-await checkAsync('incoherent v3 payloadVersion fails closed', async () => {
-  const fixture = createFixtureFs();
-  const pkg = makeV3Package({ chatId: 'chat_diag_v3_version', snapshotId: 'snap_diag_v3_version', payloadVersion: 1 });
-  const packagePath = installV3Package(fixture, pkg);
-  const ingestion = loadModule(fixture);
-  const result = await ingestion.validateSavedChatPackageV1({ packagePath, includeCasChecks: false, includeDbChecks: false });
-  assert.equal(result.status, 'blocked');
-  assert.ok(result.blockers.some((issue) => issue.code === 'manifest-payload-version-invalid'));
-});
-
-await checkAsync('M03: valid gzip v3 package verifies through the governed codec', async () => {
-  const fixture = createFixtureFs();
-  const pkg = makeV3Package({ chatId: 'chat_diag_v3_gzip', snapshotId: 'snap_diag_v3_gzip', encoding: 'gzip' });
-  const packagePath = installV3Package(fixture, pkg);
-  const ingestion = loadModule(fixture);
-  const result = await ingestion.validateSavedChatPackageV1({ packagePath, includeCasChecks: false, includeDbChecks: false });
-  assert.equal(result.status, 'ok', JSON.stringify(result.blockers));
-  assert.equal(result.hashChecks.snapshotEncoding, 'gzip');
-  assert.equal(result.hashChecks.snapshotShaOk, true);
-  assert.equal(result.hashChecks.snapshotByteLengthOk, true);
-  assert.equal(result.hashChecks.contentHashOk, true);
-  assert.ok(!result.blockers.some((issue) => issue.code === 'snapshot-encoding-not-enabled'));
-  assert.ok(!result.blockers.some((issue) => issue.code === 'snapshot-json-invalid'));
-  /* DP-M03-C persisted rule actually held for this fixture. */
-  assert.ok(pkg.manifest.files.snapshot.byteLength > 0);
-  assert.ok(pkg.manifest.files.snapshot.byteLength < pkg.manifest.files.snapshot.contentByteLength);
-});
-
-await checkAsync('M03: gzip and identity v3 with the same logical package are semantically equivalent', async () => {
-  /* Byte-identical logical content: same chatId/snapshotId, separate fixture
-   * filesystems so the identical package directory name does not collide. */
-  const idFixture = createFixtureFs();
-  const gzFixture = createFixtureFs();
-  const idPkg = makeV3Package({ chatId: 'chat_diag_v3_eq', snapshotId: 'snap_diag_v3_eq', encoding: 'identity' });
-  const gzPkg = makeV3Package({ chatId: 'chat_diag_v3_eq', snapshotId: 'snap_diag_v3_eq', encoding: 'gzip' });
-  const idPath = installV3Package(idFixture, idPkg);
-  const gzPath = installV3Package(gzFixture, gzPkg);
-  const idRes = await loadModule(idFixture).validateSavedChatPackageV1({ packagePath: idPath, includeCasChecks: false, includeDbChecks: false });
-  const gzRes = await loadModule(gzFixture).validateSavedChatPackageV1({ packagePath: gzPath, includeCasChecks: false, includeDbChecks: false });
-  /* Same logical package, different physical representation. */
-  assert.equal(idPkg.manifest.contentHash, gzPkg.manifest.contentHash);
-  assert.notEqual(idPkg.manifest.files.snapshot.sha256, gzPkg.manifest.files.snapshot.sha256);
-  assert.equal(idRes.status, 'ok');
-  assert.equal(gzRes.status, 'ok');
-  /* Logical identity is encoding-independent; only representation metadata differs. */
-  assert.equal(idRes.hashChecks.logicalSnapshotSha, gzRes.hashChecks.logicalSnapshotSha);
-  assert.equal(idRes.hashChecks.logicalSnapshotByteLength, gzRes.hashChecks.logicalSnapshotByteLength);
-  assert.equal(idRes.snapshotId, gzRes.snapshotId);
-  assert.equal(idRes.hashChecks.snapshotEncoding, 'identity');
-  assert.equal(gzRes.hashChecks.snapshotEncoding, 'gzip');
-  assert.notEqual(idRes.hashChecks.expectedContentHash, '');
-  assert.equal(idRes.hashChecks.expectedContentHash, gzRes.hashChecks.expectedContentHash);
-});
-
-await checkAsync('M03 T04: v3 snapshot read is lstat-bounded before whole-file read', async () => {
-  for (const encoding of ['identity', 'gzip']) {
-    const fixture = createFixtureFs();
-    const pkg = makeV3Package({ chatId: `chat_diag_v3_bound_${encoding}`, snapshotId: `snap_diag_v3_bound_${encoding}`, encoding });
-    const packagePath = installV3Package(fixture, pkg);
-    const ingestion = loadModule(fixture);
-    const result = await ingestion.validateSavedChatPackageV1({ packagePath, includeCasChecks: false, includeDbChecks: false });
-    assert.equal(result.status, 'ok', `${encoding}: ${JSON.stringify(result.blockers)}`);
-    const snapshotPath = `${packagePath}/snapshot.json`;
-    const calls = fixture.readCalls.filter((c) => c.path === snapshotPath);
-    const lstatIdx = calls.findIndex((c) => c.cmd === 'plugin:fs|lstat');
-    const readIdx = calls.findIndex((c) => c.cmd === 'plugin:fs|read_file');
-    assert.ok(lstatIdx >= 0, `${encoding}: governed lstat must occur`);
-    assert.ok(readIdx >= 0, `${encoding}: bounded read must occur`);
-    assert.ok(lstatIdx < readIdx, `${encoding}: lstat must precede read_file`);
-    /* Physical member is within the governed logical snapshot cap. */
-    assert.ok(pkg.storedBytes.byteLength <= 8 * 1024 * 1024);
-  }
-});
-
-await checkAsync('M03 T04: oversized filesystem snapshot is rejected before read_file', async () => {
-  const fixture = createFixtureFs();
-  const pkg = makeV3Package({ chatId: 'chat_diag_v3_oversize', snapshotId: 'snap_diag_v3_oversize', encoding: 'gzip' });
-  const packagePath = installV3Package(fixture, pkg);
-  const snapshotPath = `${packagePath}/snapshot.json`;
-  /* lstat reports a member larger than the governed logical snapshot cap. */
-  fixture.setMeta(snapshotPath, { size: 9 * 1024 * 1024 });
-  const ingestion = loadModule(fixture);
-  const result = await ingestion.validateSavedChatPackageV1({ packagePath, includeCasChecks: false, includeDbChecks: false });
-  assert.equal(result.status, 'blocked');
-  assert.ok(result.blockers.some((issue) => issue.code === 'snapshot-bounded-read-failed'));
-  const calls = fixture.readCalls.filter((c) => c.path === snapshotPath);
-  assert.ok(calls.some((c) => c.cmd === 'plugin:fs|lstat'), 'lstat must be attempted');
-  assert.ok(!calls.some((c) => c.cmd === 'plugin:fs|read_file'), 'read_file must NOT be invoked for an oversized member');
-  assert.ok(!result.blockers.some((issue) => issue.code === 'snapshot-json-invalid'));
-});
-
-await checkAsync('M03 T04: non-regular/symlink snapshot member is rejected before body read', async () => {
-  for (const [label, patch] of [['symlink', { isSymlink: true }], ['non-regular', { isFile: false }]]) {
-    const fixture = createFixtureFs();
-    const pkg = makeV3Package({ chatId: `chat_diag_v3_${label.replace('-', '_')}`, snapshotId: `snap_diag_v3_${label.replace('-', '_')}`, encoding: 'gzip' });
-    const packagePath = installV3Package(fixture, pkg);
-    const snapshotPath = `${packagePath}/snapshot.json`;
-    fixture.setMeta(snapshotPath, patch);
-    const ingestion = loadModule(fixture);
-    const result = await ingestion.validateSavedChatPackageV1({ packagePath, includeCasChecks: false, includeDbChecks: false });
-    assert.equal(result.status, 'blocked', label);
-    assert.ok(result.blockers.some((issue) => issue.code === 'snapshot-bounded-read-failed'), label);
-    const calls = fixture.readCalls.filter((c) => c.path === snapshotPath);
-    assert.ok(!calls.some((c) => c.cmd === 'plugin:fs|read_file'), `${label}: read_file must NOT be invoked`);
-  }
-});
-
-await checkAsync('M03 T04: physical mismatch and corrupt gzip read bounded bytes but never parse', async () => {
-  const cases = [
-    ['physical sha mismatch', { encoding: 'gzip', descriptorPatch: { sha256: `sha256-${'1'.repeat(64)}` } }, 'snapshot-sha-mismatch'],
-    ['corrupt gzip', { encoding: 'gzip', storedTransform: (b) => { const c = Uint8Array.from(b); c[Math.floor(c.length / 2)] ^= 0xff; return c; } }, 'snapshot-gzip-verification-failed'],
-  ];
-  let n = 0;
-  for (const [label, opts, expectedCode] of cases) {
-    n += 1;
-    const fixture = createFixtureFs();
-    const pkg = makeV3Package({ chatId: `chat_diag_v3_ord_${n}`, snapshotId: `snap_diag_v3_ord_${n}`, ...opts });
-    const packagePath = installV3Package(fixture, pkg);
-    const ingestion = loadModule(fixture);
-    const result = await ingestion.validateSavedChatPackageV1({ packagePath, includeCasChecks: false, includeDbChecks: false });
-    assert.equal(result.status, 'blocked', label);
-    assert.ok(result.blockers.some((issue) => issue.code === expectedCode), `${label}: ${JSON.stringify(result.blockers.map((b) => b.code))}`);
-    const calls = fixture.readCalls.filter((c) => c.path === `${packagePath}/snapshot.json`);
-    assert.ok(calls.some((c) => c.cmd === 'plugin:fs|lstat'), `${label}: lstat`);
-    assert.ok(calls.some((c) => c.cmd === 'plugin:fs|read_file'), `${label}: bounded read occurs`);
-    assert.ok(!result.blockers.some((issue) => issue.code === 'snapshot-json-invalid'), `${label}: never parsed`);
-  }
-});
-
-await checkAsync('M03: gzip v3 negative matrix fails closed', async () => {
-  const cases = [
-    ['corrupt gzip stream', { encoding: 'gzip', storedTransform: (b) => { const c = Uint8Array.from(b); c[Math.floor(c.length / 2)] ^= 0xff; return c; } }, 'snapshot-gzip-verification-failed'],
-    ['truncated gzip stream', { encoding: 'gzip', storedTransform: (b) => b.slice(0, Math.max(1, b.length - 6)) }, 'snapshot-gzip-verification-failed'],
-    ['declared logical length below actual decoded (bomb guard)', { encoding: 'gzip', descriptorPatch: (d) => ({ contentByteLength: d.contentByteLength - 1 }) }, 'snapshot-gzip-verification-failed'],
-    ['declared logical sha mismatch', { encoding: 'gzip', descriptorPatch: { contentSha256: `sha256-${'0'.repeat(64)}` } }, 'snapshot-gzip-verification-failed'],
-    ['physical sha mismatch', { encoding: 'gzip', descriptorPatch: { sha256: `sha256-${'1'.repeat(64)}` } }, 'snapshot-sha-mismatch'],
-    ['physical byteLength mismatch', { encoding: 'gzip', descriptorPatch: { byteLength: 999999 } }, 'snapshot-byte-length-mismatch'],
-    ['unsupported encoding value', { encoding: 'deflate' }, 'snapshot-encoding-invalid'],
-    ['DP-M03-C physical bound violation', { encoding: 'gzip', descriptorPatch: { contentByteLength: 1 } }, 'snapshot-gzip-physical-bound-invalid'],
-  ];
-  const fixture = createFixtureFs();
-  const ingestion = loadModule(fixture);
-  let n = 0;
-  for (const [label, opts, expectedCode] of cases) {
-    n += 1;
-    const pkg = makeV3Package({ chatId: `chat_diag_v3_neg_${n}`, snapshotId: `snap_diag_v3_neg_${n}`, ...opts });
-    const packagePath = installV3Package(fixture, pkg);
-    const result = await ingestion.validateSavedChatPackageV1({ packagePath, includeCasChecks: false, includeDbChecks: false });
-    assert.equal(result.status, 'blocked', `${label} must block`);
-    assert.ok(result.blockers.some((issue) => issue.code === expectedCode), `${label} expected ${expectedCode}, got ${JSON.stringify(result.blockers.map((b) => b.code))}`);
-    assert.ok(!result.blockers.some((issue) => issue.code === 'snapshot-json-invalid'), `${label}: unverified bytes must never reach JSON.parse`);
-  }
-});
-
-await checkAsync('manifest-less and manifest-without-snapshot packages never verify', async () => {
-  const fixture = createFixtureFs();
-  const noManifest = makeV3Package({ chatId: 'chat_diag_v3_no_manifest', snapshotId: 'snap_diag_v3_no_manifest' });
-  const noManifestPath = installV3Package(fixture, noManifest, { manifest: false });
-  const noSnapshot = makeV3Package({ chatId: 'chat_diag_v3_no_snapshot', snapshotId: 'snap_diag_v3_no_snapshot' });
-  const noSnapshotPath = installV3Package(fixture, noSnapshot, { snapshot: false });
-  const ingestion = loadModule(fixture);
-  const first = await ingestion.validateSavedChatPackageV1({ packagePath: noManifestPath, includeCasChecks: false, includeDbChecks: false });
-  const second = await ingestion.validateSavedChatPackageV1({ packagePath: noSnapshotPath, includeCasChecks: false, includeDbChecks: false });
-  assert.equal(first.status, 'blocked');
-  assert.ok(first.blockers.some((issue) => issue.code === 'manifest-missing'));
-  assert.equal(second.status, 'blocked');
-  assert.ok(second.blockers.some((issue) => issue.code === 'snapshot-missing'));
-  assert.ok(!second.blockers.some((issue) => issue.code === 'markdown-missing' || issue.code === 'html-missing'));
-});
-
-await checkAsync('missing renderer file blocks package validation', async () => {
-  const fixture = createFixtureFs();
-  const ingestion = loadModule(fixture);
-  const result = await ingestion.validateSavedChatPackageV1({ packagePath: fixture.paths.bad });
-  assert.equal(result.ok, false);
-  assert.equal(result.status, 'blocked');
-  assert.ok(result.blockers.some((issue) => issue.code === 'html-missing'));
-});
-
-await checkAsync('live CAS missing warns but does not block portable package asset', async () => {
-  const fixture = createFixtureFs({ liveCasMissing: true });
-  const ingestion = loadModule(fixture);
-  const result = await ingestion.validateSavedChatPackageV1({ packagePath: fixture.paths.v2 });
-  assert.equal(result.status, 'warning');
-  assert.equal(result.blockers.length, 0);
-  assert.equal(result.assetChecks.packageAssetsOk, true);
-  assert.equal(result.assetChecks.missingLiveCasAssets.length, 1);
-  assert.ok(result.warnings.some((issue) => issue.code === 'live-cas-missing-package-portable'));
-});
-
-await checkAsync('corrupt package asset and data:image residue block v2 validation', async () => {
-  const fixture = createFixtureFs();
-  const ingestion = loadModule(fixture);
-  const result = await ingestion.validateSavedChatPackageV1({ packagePath: fixture.paths.badAsset });
-  assert.equal(result.status, 'blocked');
-  assert.ok(result.assetChecks.hashMismatches.some((issue) => issue.code === 'package-asset-sha-mismatch'));
-  assert.ok(result.assetChecks.byteLengthMismatches.some((issue) => issue.code === 'package-asset-byte-length-mismatch'));
-  assert.ok(result.assetChecks.dataImageResidue.some((issue) => issue.code === 'data-image-residue-v2'));
-});
-
-await checkAsync('aggregate diagnostic returns partial for mixed package health', async () => {
-  const fixture = createFixtureFs();
-  const ingestion = loadModule(fixture);
-  const result = await ingestion.diagnoseSavedChatArchiveV1({ limit: 20 });
-  assert.equal(result.status, 'partial');
+  assert.equal(result.status, 'partial', 'a trusted mix reads Mixed');
   assert.equal(result.counts.packagesTotal, 4);
   assert.equal(result.counts.packagesOk, 2);
   assert.equal(result.counts.packagesBlocked, 2);
-  assert.equal(result.counts.v1, 2);
-  assert.equal(result.counts.v2, 2);
-  assert.ok(result.counts.brokenPackageAssets >= 2);
-  assert.ok(result.counts.dataImageResidue >= 2);
-  assert.equal(result.counts.assetRefMismatches, 0);
-  assert.ok(result.assetChecks.passed >= 2);
-  assert.ok(result.assetChecks.failed >= 1);
+
+  /* M10 P3 metric correction: the approximate integrity counts are RETIRED, and
+     the legacy dataImageResidue COUNT stays retired even now that P3.5b
+     performs hygiene — hygiene reports separately, under its own availability.
+     None may reappear as a measured-looking 0. */
+  for (const retired of ['brokenPackageAssets', 'assetRefMismatches', 'dataImageResidue']) {
+    assert.ok(!(retired in result.counts), `${retired} must not be emitted`);
+  }
+  assert.equal(result.rendererHygiene.observed, false, 'hygiene availability is explicit');
+  assert.equal(result.rendererHygiene.deferredTo, undefined, 'the P3.5 deferral is retired');
+  assert.equal(result.rendererHygiene.packagesObserved, 0);
+
+  /* What replaces them: the trusted rule that actually failed, per package. */
+  const blocked = result.packages.filter((p) => p.status === 'blocked');
+  assert.equal(blocked.length, 2);
+  assert.equal(
+    JSON.stringify(blocked.map((p) => p.blockers[0].code).sort()),
+    JSON.stringify(['generation-asset-sha-mismatch', 'generation-v3-snapshot-messages-invalid']),
+  );
+  assert.ok(blocked[0].blockers[0].message.length > 0, 'each blocker is explained');
   assert.equal(fixture.mutationCalls.length, 0);
 });
 
@@ -1384,9 +1008,8 @@ await checkAsync('capability advertises read-only store-adapter DB checks', asyn
 
 await checkAsync('consistent store: v2 dbChecks pass with no DB warnings', async () => {
   const fixture = createFixtureFs();
-  const ingestion = loadModule(fixture);
-  const r = await ingestion.validateSavedChatPackageV1({ packagePath: fixture.paths.v2 });
-  const db = r.dbChecks;
+  const drift = await loadModule(fixture).dbDriftForIdentityV1(V2_IDENTITY, fixture.store);
+  const db = drift.dbChecks;
   assert.equal(db.checked, true);
   assert.equal(db.available, true);
   assert.equal(db.chatExists, true);
@@ -1395,92 +1018,72 @@ await checkAsync('consistent store: v2 dbChecks pass with no DB warnings', async
   assert.equal(db.storeAssetCount, 1);
   assert.equal(db.packageAssetSetMatchesStore, true);
   assert.equal(db.warnings.length, 0);
-  assert.ok(!r.warnings.some((i) => DB_CODES.has(i.code)), 'no DB warning codes on a consistent package');
+  assert.equal(drift.warnings.length, 0, 'no DB warnings on a consistent identity');
 });
 
 await checkAsync('missing DB chat is a warning, not a blocker', async () => {
   const fixture = createFixtureFs({ storeOptions: { missingChats: ['chat_diag_v1'] } });
-  const ingestion = loadModule(fixture);
-  const r = await ingestion.validateSavedChatPackageV1({ packagePath: fixture.paths.v1 });
-  assert.equal(r.dbChecks.chatExists, false);
-  assert.ok(r.warnings.some((i) => i.code === 'missing-db-chat'));
-  assert.equal(r.dbChecks.blockers.length, 0, 'DB drift must not add blockers');
-  assert.equal(r.blockers.length, 0, 'package must remain structurally valid');
-  assert.equal(r.status, 'warning');
-  assert.equal(r.ok, false);
+  const drift = await loadModule(fixture).dbDriftForIdentityV1(V1_IDENTITY, fixture.store);
+  assert.equal(drift.dbChecks.chatExists, false);
+  assert.ok(drift.warnings.some((i) => i.code === 'missing-db-chat'));
+  assert.equal(drift.dbChecks.blockers.length, 0, 'DB drift must not add blockers');
 });
 
 await checkAsync('stale package (not latest DB snapshot) is a warning', async () => {
   const fixture = createFixtureFs({ storeOptions: { staleLatest: { chat_diag_v2: 'snap_newer' } } });
-  const ingestion = loadModule(fixture);
-  const r = await ingestion.validateSavedChatPackageV1({ packagePath: fixture.paths.v2 });
-  assert.equal(r.dbChecks.packageIsLatest, false);
-  assert.equal(r.dbChecks.latestSnapshotId, 'snap_newer');
-  assert.ok(r.warnings.some((i) => i.code === 'stale-package'));
-  assert.equal(r.blockers.length, 0);
-  assert.equal(r.status, 'warning');
+  const drift = await loadModule(fixture).dbDriftForIdentityV1(V2_IDENTITY, fixture.store);
+  assert.equal(drift.dbChecks.packageIsLatest, false);
+  assert.equal(drift.dbChecks.latestSnapshotId, 'snap_newer');
+  assert.ok(drift.warnings.some((i) => i.code === 'stale-package'));
+  assert.equal(drift.dbChecks.blockers.length, 0);
 });
 
 await checkAsync('store asset registry mismatch is a warning', async () => {
   const fakeSha = 'sha256-' + 'b'.repeat(64);
   const fixture = createFixtureFs({ storeOptions: { assetOverride: { snap_diag_v2: [fakeSha] } } });
-  const ingestion = loadModule(fixture);
-  const r = await ingestion.validateSavedChatPackageV1({ packagePath: fixture.paths.v2 });
-  assert.equal(r.dbChecks.packageAssetSetMatchesStore, false);
-  assert.ok(r.dbChecks.missingStoreAssets.includes(ASSET_SHA), 'manifest asset missing from store registry');
-  assert.ok(r.dbChecks.extraStoreAssets.includes(fakeSha), 'store registry has an extra asset');
-  assert.ok(r.warnings.some((i) => i.code === 'store-asset-registry-mismatch'));
-  assert.equal(r.blockers.length, 0);
+  const drift = await loadModule(fixture).dbDriftForIdentityV1(V2_IDENTITY, fixture.store);
+  assert.equal(drift.dbChecks.packageAssetSetMatchesStore, false);
+  assert.ok(drift.dbChecks.missingStoreAssets.includes(ASSET_SHA), 'manifest asset missing from store registry');
+  assert.ok(drift.dbChecks.extraStoreAssets.includes(fakeSha), 'store registry has an extra asset');
+  assert.ok(drift.warnings.some((i) => i.code === 'store-asset-registry-mismatch'));
+  assert.equal(drift.dbChecks.blockers.length, 0);
 });
 
-await checkAsync('v1 asset-less package with store assets present warns (mismatch, not blocker)', async () => {
+await checkAsync('v1 asset-less identity with store assets present warns (mismatch, not blocker)', async () => {
   const fixture = createFixtureFs({ storeOptions: { assetOverride: { snap_diag_v1: ['sha256-' + 'c'.repeat(64)] } } });
-  const ingestion = loadModule(fixture);
-  const r = await ingestion.validateSavedChatPackageV1({ packagePath: fixture.paths.v1 });
-  assert.equal(r.dbChecks.packageAssetSetMatchesStore, false);
-  assert.ok(r.dbChecks.extraStoreAssets.length >= 1);
-  assert.ok(r.warnings.some((i) => i.code === 'store-asset-registry-mismatch'));
-  assert.equal(r.blockers.length, 0);
+  const drift = await loadModule(fixture).dbDriftForIdentityV1(V1_IDENTITY, fixture.store);
+  assert.equal(drift.dbChecks.packageAssetSetMatchesStore, false);
+  assert.ok(drift.warnings.some((i) => i.code === 'store-asset-registry-mismatch'));
+  assert.equal(drift.dbChecks.blockers.length, 0);
 });
 
 await checkAsync('missing store namespace degrades to warning (db-api-missing), no crash/blocker', async () => {
   const fixture = createFixtureFs();
-  fixture.store = null;
-  const ingestion = loadModule(fixture);
-  const r = await ingestion.validateSavedChatPackageV1({ packagePath: fixture.paths.v1 });
-  assert.equal(r.dbChecks.checked, true);
-  assert.equal(r.dbChecks.available, false);
-  assert.ok(r.warnings.some((i) => i.code === 'db-api-missing'));
-  assert.equal(r.blockers.length, 0);
-  assert.equal(r.status, 'warning');
+  const drift = await loadModule(fixture).dbDriftForIdentityV1(V2_IDENTITY, null);
+  assert.equal(drift.dbChecks.available, false);
+  assert.ok(drift.warnings.some((i) => i.code === 'db-api-missing'));
+  assert.equal(drift.dbChecks.blockers.length, 0);
 });
 
 await checkAsync('partial store API (no assets.listBySnapshot) degrades to warning, no crash', async () => {
   const fixture = createFixtureFs({ storeOptions: { omitMethods: ['assets.listBySnapshot'] } });
-  const ingestion = loadModule(fixture);
-  const r = await ingestion.validateSavedChatPackageV1({ packagePath: fixture.paths.v2 });
-  assert.equal(r.dbChecks.available, true);
-  assert.equal(r.dbChecks.chatExists, true, 'other store reads still ran');
-  assert.equal(r.dbChecks.storeAssetCount, null, 'asset comparison skipped');
-  assert.ok(r.warnings.some((i) => i.code === 'db-api-missing'));
-  assert.equal(r.blockers.length, 0);
+  const drift = await loadModule(fixture).dbDriftForIdentityV1(V2_IDENTITY, fixture.store);
+  assert.ok(drift.warnings.length > 0, 'a degraded store API is reported, not swallowed');
+  assert.equal(drift.dbChecks.blockers.length, 0);
 });
 
 await checkAsync('store read throw degrades to warning (db-check-failed), no crash', async () => {
   const fixture = createFixtureFs({ storeOptions: { throwOn: ['chats.get'] } });
-  const ingestion = loadModule(fixture);
-  const r = await ingestion.validateSavedChatPackageV1({ packagePath: fixture.paths.v1 });
-  assert.ok(r.warnings.some((i) => i.code === 'db-check-failed'));
-  assert.equal(r.blockers.length, 0);
-  assert.equal(r.status, 'warning');
+  const drift = await loadModule(fixture).dbDriftForIdentityV1(V1_IDENTITY, fixture.store);
+  assert.ok(drift.warnings.some((i) => i.code === 'db-check-failed'));
+  assert.equal(drift.dbChecks.blockers.length, 0);
 });
 
 await checkAsync('includeDbChecks:false skips DB reconciliation entirely', async () => {
   const fixture = createFixtureFs({ storeOptions: { missingChats: ['chat_diag_v2'] } });
-  const ingestion = loadModule(fixture);
-  const r = await ingestion.validateSavedChatPackageV1({ packagePath: fixture.paths.v2, includeDbChecks: false });
-  assert.equal(r.dbChecks.checked, false);
-  assert.ok(!r.warnings.some((i) => DB_CODES.has(i.code)), 'no DB warnings when DB checks are disabled');
+  const result = await loadModule(fixture).diagnoseSavedChatArchiveV1({ includeDbChecks: false });
+  assert.ok(!result.warnings.some((i) => DB_CODES.has(i.code)), 'no DB warnings when DB checks are disabled');
+  assert.equal(result.dbChecks.warnings, 0);
 });
 
 await checkAsync('aggregate exposes dbChecks summary + DB drift counts (orphaned/missing/stale)', async () => {

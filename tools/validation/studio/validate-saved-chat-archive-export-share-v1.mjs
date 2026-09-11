@@ -27,6 +27,13 @@ const HTML_SANITIZER = 'src-surfaces-base/studio/platform/html-sanitizer.js';
 const CODEC = 'src-surfaces-base/studio/ingestion/saved-chat-package-codec.tauri.js';
 const PORTABLE_ZIP = 'src-surfaces-base/studio/ingestion/saved-chat-portable-zip.studio.js';
 const DIAGNOSTICS = 'src-surfaces-base/studio/ingestion/saved-chat-archive-diagnostics.tauri.js';
+/* M10 P3.5: the Inspector resolves these two at call time. Loading the REAL
+ * modules keeps this harness production-faithful — the alternative, stubbing
+ * inspectPackage, would stop exercising the very path M08 import depends on. */
+const TRUSTED_INTEGRITY = 'src-surfaces-base/studio/ingestion/saved-chat-archive-integrity.tauri.js';
+/* M10 P3.6a: the importer verifies portable packages through this client. */
+const PORTABLE_VERIFY = 'src-surfaces-base/studio/ingestion/saved-chat-portable-package-verification.tauri.js';
+const HEALTH_MAPPING = 'src-surfaces-base/studio/ingestion/saved-chat-archive-health-mapping.js';
 const INSPECTOR = 'src-surfaces-base/studio/ingestion/saved-chat-archive-inspector.studio.js';
 const IMPORTER = 'src-surfaces-base/studio/ingestion/saved-chat-archive-importer.studio.js';
 const FOLDER_PUBLISH_NATIVE = 'apps/studio/desktop/src-tauri/src/saved_chat_folder_publish.rs';
@@ -266,7 +273,204 @@ function createBehaviorFs(config = {}) {
       dirs.delete(entry);
     }
   }
+  /* M10 P1 trusted archive-integrity envelope, answered from the EXPLICIT
+   * fixture facts this suite already installed (the manifest each test wrote),
+   * never by running the legacy package verifier and relabelling its output.
+   * Classification is honest: a package whose manifest is absent or unparseable
+   * is reported indeterminate rather than quietly verified.
+   *
+   * The wire form for contentHash and assetShas is BARE canonical hex, matching
+   * the real Rust command; the Inspector is what re-applies the `sha256-`
+   * prefix outwardly. */
+  function trustedIntegrityEnvelope() {
+    const roots = new Set();
+    for (const entry of files.keys()) {
+      const { baseDir, path: p } = splitKey(entry);
+      if (baseDir !== APP) continue;
+      const m = /^(archive\/packages\/[^/]+)\//.exec(p);
+      if (m) roots.add(m[1]);
+    }
+    const bare = (value) => String(value || '').trim().toLowerCase().replace(/^sha256-/, '');
+    const occupants = [...roots].sort().map((root) => {
+      const name = root.slice('archive/packages/'.length);
+      const raw = files.get(key(APP, `${root}/manifest.json`));
+      let manifest = null;
+      try { manifest = raw ? JSON.parse(raw.toString('utf8')) : null; } catch { manifest = null; }
+      if (!manifest || !manifest.chatId || !manifest.contentHash) {
+        return {
+          path: root,
+          name,
+          class: 'indeterminate',
+          reason: 'corrupt',
+          blockers: [{ code: 'generation-manifest-json-invalid' }],
+        };
+      }
+      const schemaVersion = Number(manifest.schemaVersion) || 1;
+      const snapshot = (manifest.files && manifest.files.snapshot) || {};
+      return {
+        path: root,
+        name,
+        /* `.g<hash>.h2ochat` is the generation basename the publisher writes. */
+        class: /\.g[0-9a-f]{64}\.h2ochat$/.test(name) ? 'verified-generation' : 'legacy-package',
+        chatId: String(manifest.chatId),
+        snapshotId: String(manifest.snapshotId || ''),
+        contentHash: bare(manifest.contentHash),
+        constructionFamily: `v${schemaVersion}`,
+        snapshotEncoding: String(snapshot.encoding || 'identity'),
+        snapshotPhysicalByteLength: snapshot.byteLength,
+        logicalSnapshotByteLength: snapshot.contentByteLength,
+        logicalSnapshotSha256: bare(snapshot.contentSha256),
+        assetShas: (manifest.assets || []).map((a) => bare(a && a.sha256)).filter(Boolean).sort(),
+        savedAt: (manifest.provenance && manifest.provenance.generatedAt) || '',
+        orderable: true,
+      };
+    });
+    return {
+      schema: 'h2o.savedChatArchiveIntegrity',
+      schemaVersion: 1,
+      complete: true,
+      blockers: [],
+      occupants,
+    };
+  }
+
+  /* M10 P3.6a portable verification session. The importer now asks trusted
+   * native code, so this harness must answer the same five commands.
+   *
+   * The verdict is derived from the members the session actually received,
+   * checked against the manifest's own claims using THIS suite's fixture
+   * construction rule (`canonicalJson`/`sha256` above) — the same rule that
+   * built the packages. It is not a second verifier: it exists so a fixture
+   * that lies about its contentHash is refused here exactly as trusted Rust
+   * refuses it in the product. */
+  const portableSessions = new Map();
+  let portableToken = 1;
+
+  function portableVerdict(session) {
+    const refuse = (stage, code) => ({
+      schema: 'h2o.savedChatPortablePackageVerification',
+      schemaVersion: 1, verified: false, refusal: { stage, code },
+    });
+    if (session.unexpected.length) {
+      return refuse('verifier', 'generation-package-unexpected-member');
+    }
+    for (const [key, member] of session.members) {
+      if (member.received !== member.expected) return refuse('adapter', 'portable-member-incomplete');
+      if (key === undefined) return refuse('adapter', 'portable-member-incomplete');
+    }
+    const manifestBytes = session.members.get('manifest')?.bytes;
+    if (!manifestBytes) return refuse('adapter', 'portable-manifest-missing');
+    let manifest;
+    try { manifest = JSON.parse(Buffer.concat(manifestBytes).toString('utf8')); }
+    catch { return refuse('verifier', 'generation-manifest-json-invalid'); }
+
+    const stem = session.basename.replace(/\.h2ochat$/, '');
+    const beginChatId = /\.g[0-9a-f]{64}$/.test(stem) ? stem.replace(/\.g[0-9a-f]{64}$/, '') : stem;
+    if (manifest.chatId !== beginChatId) return refuse('verifier', 'generation-chat-id-mismatch');
+
+    const stored = session.members.get('snapshot');
+    if (!stored) return refuse('verifier', 'generation-snapshot-missing');
+    const storedBytes = Buffer.concat(stored.bytes);
+    const encoding = manifest.files?.snapshot?.encoding || 'identity';
+    let logical = storedBytes;
+    if (encoding === 'gzip') {
+      try { logical = zlib.gunzipSync(storedBytes); }
+      catch { return refuse('verifier', 'generation-v3-gzip-decode-failed'); }
+    }
+    const logicalSha = sha256(logical);
+    if (sha256(storedBytes) !== (manifest.files?.snapshot?.sha256 || '')) {
+      return refuse('verifier', 'generation-member-sha-mismatch');
+    }
+    /* v1/v2 carry persistent renderers whose member hashes the manifest
+     * declares; a corrupt renderer must refuse here exactly as it does in the
+     * product. */
+    for (const [memberKey, descriptorKey] of [['markdown', 'markdown'], ['html', 'html']]) {
+      const member = session.members.get(memberKey);
+      const descriptor = manifest.files?.[descriptorKey];
+      if (member && descriptor && sha256(Buffer.concat(member.bytes)) !== descriptor.sha256) {
+        return refuse('verifier', 'generation-member-sha-mismatch');
+      }
+    }
+    const assetShas = [...session.members.entries()]
+      .filter(([key]) => key.startsWith('asset:'))
+      .map(([, member]) => sha256(Buffer.concat(member.bytes)))
+      .sort();
+    const schemaVersion = Number(manifest.schemaVersion) || 1;
+    const expected = schemaVersion === 3
+      ? sha256(canonicalJson({ payloadVersion: 3, snapshot: logicalSha, assets: assetShas }))
+      : schemaVersion === 2
+        ? sha256(canonicalJson({ snapshot: logicalSha, assets: assetShas }))
+        : logicalSha;
+    if (expected !== manifest.contentHash) {
+      return refuse('verifier', 'generation-content-hash-mismatch');
+    }
+    const bare = (v) => String(v || '').replace(/^sha256-/, '');
+    return {
+      schema: 'h2o.savedChatPortablePackageVerification',
+      schemaVersion: 1,
+      verified: true,
+      packageDirName: session.basename,
+      chatId: manifest.chatId,
+      snapshotId: manifest.snapshotId,
+      contentHash: bare(manifest.contentHash),
+      constructionFamily: `v${schemaVersion}`,
+      nameClassification: /\.g[0-9a-f]{64}$/.test(stem) ? 'generation' : 'legacy',
+      assetShas: assetShas.map(bare),
+      logicalSnapshotByteLength: logical.length,
+    };
+  }
+
   async function invoke(command, body, metadata) {
+    if (command === 'h2o_saved_chat_portable_verify_begin') {
+      const request = body?.options || {};
+      const token = portableToken;
+      portableToken += 1;
+      portableSessions.set(token, {
+        basename: String(request.packageDirName || ''),
+        unexpected: Array.isArray(request.unexpectedMembers) ? request.unexpectedMembers : [],
+        members: new Map(),
+      });
+      return { schema: 'h2o.savedChatPortablePackageVerification', schemaVersion: 1, ok: true, token };
+    }
+    if (command === 'h2o_saved_chat_portable_verify_declare') {
+      const request = body?.options || {};
+      const session = portableSessions.get(request.token);
+      if (!session) return { ok: false, code: 'portable-session-unknown' };
+      if (session.members.has(request.member)) return { ok: false, code: 'portable-member-duplicate' };
+      session.members.set(request.member, { expected: request.expectedLength, received: 0, bytes: [] });
+      return { ok: true };
+    }
+    if (command === 'h2o_saved_chat_portable_verify_write') {
+      const options = JSON.parse(metadata?.headers?.options || '{}');
+      const session = portableSessions.get(options.token);
+      if (!session) return { ok: false, code: 'portable-session-unknown' };
+      const member = session.members.get(options.member);
+      if (!member) return { ok: false, code: 'portable-member-undeclared' };
+      const chunk = Buffer.from(body);
+      if (member.received + chunk.length > member.expected) return { ok: false, code: 'portable-member-overrun' };
+      member.received += chunk.length;
+      member.bytes.push(chunk);
+      return { ok: true };
+    }
+    if (command === 'h2o_saved_chat_portable_verify_finish') {
+      const token = body?.options?.token;
+      const session = portableSessions.get(token);
+      portableSessions.delete(token);
+      if (!session) {
+        return {
+          schema: 'h2o.savedChatPortablePackageVerification', schemaVersion: 1,
+          verified: false, refusal: { stage: 'adapter', code: 'portable-session-unknown' },
+        };
+      }
+      return portableVerdict(session);
+    }
+    if (command === 'h2o_saved_chat_portable_verify_abort') {
+      portableSessions.delete(body?.options?.token);
+      return { ok: true };
+    }
+    if (command === 'h2o_saved_chat_archive_integrity') {
+      return trustedIntegrityEnvelope();
+    }
     if (command === 'h2o_saved_chat_export_root_policy') {
       if (config.exportPolicyError) throw new Error(String(config.exportPolicyError));
       if (config.exportPolicyWire !== undefined) return config.exportPolicyWire;
@@ -559,7 +763,8 @@ function loadBehaviorRuntime(mem, storeOverride, cryptoOverride) {
    * mirroring the product load order in studio.html. The REAL codec source is
    * loaded here - never a mock - so this harness exercises the same single
    * gzip/verification authority that product consumers use. */
-  for (const relPath of [HTML_SANITIZER, PACKAGE_OWNER, CODEC, PORTABLE_ZIP, DIAGNOSTICS, INSPECTOR, IMPORTER, EXPORTER]) {
+  for (const relPath of [HTML_SANITIZER, PACKAGE_OWNER, CODEC, PORTABLE_ZIP, DIAGNOSTICS,
+    TRUSTED_INTEGRITY, HEALTH_MAPPING, INSPECTOR, IMPORTER, PORTABLE_VERIFY, EXPORTER]) {
     vm.runInContext(readRepo(relPath), sandbox, { filename: relPath });
   }
   return sandbox;
@@ -852,12 +1057,21 @@ check('M09 P0.3c ZIP bytes use FD-bound create-only publication from native-owne
   assert.doesNotMatch(nativeProduction, /std::fs::rename|rename_within|promote_exclusive\(/);
 });
 
-check('J.2 exporter verifies copied hashes and contentHash after copy', () => {
+check('J.2 exporter verifies copied bytes, and owns no semantic identity', () => {
+  /* Byte-faithfulness of the copy is TRANSPORT assurance and stays. */
   assertIncludes(exporterCode, 'verifyCopiedFiles');
   assertIncludes(exporterCode, 'sha256Prefixed');
-  assertIncludes(exporterCode, 'contentHashExpected');
-  assertIncludes(exporterCode, 'copied package contentHash mismatch');
   assertIncludes(exporterCode, 'copied file hash mismatch');
+  assertIncludes(exporterCode, 'copied file byteLength mismatch');
+  /* M10 P3.6c retired the exporter's private semantic contentHash authority.
+     Package identity now comes from the trusted Archive Inspector for the
+     source and from trusted native verification for the assembled portable
+     package; the exporter recomputes neither. */
+  const code = exporterCode.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/.*$/gm, ' ');
+  for (const retired of ['contentHashExpected', 'canonicalJson', 'copied package contentHash mismatch']) {
+    assert.ok(!code.includes(retired), `retired exporter identity authority: ${retired}`);
+  }
+  assertIncludes(exporterCode, 'verifySavedChatPortablePackageV1');
 });
 
 check('M02 T05 uses the sanctioned v3 renderer surface and keeps companions outside logical identity', () => {
@@ -1013,8 +1227,9 @@ checkAsync('M03 T04: behavior harness executes the real governed codec before Di
   assert.equal(typeof codec.readBoundedPackageMemberBytes, 'function');
   assert.equal(typeof codec.verifyPackageMemberBytes, 'function');
   /* Diagnostics loads after the codec and therefore resolves it rather than
-   * failing closed with snapshot-codec-unavailable. */
-  assert.equal(typeof runtime.H2O?.Studio?.ingestion?.validateSavedChatPackageV1, 'function');
+   * failing closed with snapshot-codec-unavailable. M10 P4 retired the legacy
+   * verifier, so the surviving facade is what proves the module loaded. */
+  assert.equal(typeof runtime.H2O?.Studio?.ingestion?.diagnoseSavedChatArchiveV1, 'function');
   /* The harness must never substitute its own compression path for the codec. */
   assert.doesNotMatch(readRepo(DIAGNOSTICS), /DecompressionStream|CompressionStream/);
 });
@@ -1093,9 +1308,11 @@ checkAsync('M02 T05 v3 export regenerates deterministic renderers without mutati
   const before = mem.inventory(mem.APP, sourceRoot);
   assert.ok(!mem.exists(mem.APP, `${sourceRoot}/chat.md`));
   assert.ok(!mem.exists(mem.APP, `${sourceRoot}/chat.html`));
-  const diag = await ingestion.validateSavedChatPackageV1({ packagePath: sourceRoot, includeCasChecks: false, includeDbChecks: false });
-  assert.equal(diag.status, 'ok');
-  assert.equal(diag.hashChecks.contentHashOk, true);
+  /* Pre-condition probe through the TRUSTED Inspector; M10 P4 removed the
+     legacy JS verifier this used to ask. */
+  const inspected = await runtime.H2O.Studio.archiveInspector.inspectPackage({ packagePath: sourceRoot });
+  assert.equal(inspected.status, 'verified');
+  assert.equal(inspected.identity.contentHashVerified, true);
 
   const first = await exporter.exportVerifiedPackage({ packagePath: sourceRoot, exportName: 't05-v3-first.h2ochat' });
   const second = await exporter.exportVerifiedPackage({ packagePath: sourceRoot, exportName: 't05-v3-second.h2ochat' });
@@ -1286,9 +1503,12 @@ checkAsync('M03 T04 exports a valid gzip-v3 package, preserving the durable memb
   const runtime = loadBehaviorRuntime(mem);
   const sourceBefore = mem.inventory(mem.APP, sourceRoot);
 
-  const diag = await runtime.H2O.Studio.ingestion.validateSavedChatPackageV1({ packagePath: sourceRoot, includeCasChecks: false, includeDbChecks: false });
-  assert.equal(diag.status, 'ok', JSON.stringify(diag.blockers));
-  assert.equal(diag.hashChecks.snapshotEncoding, 'gzip');
+  /* Pre-condition probe through the TRUSTED envelope; M10 P4 removed the
+     legacy JS verifier this used to ask. */
+  const envelope = await runtime.H2O.Studio.ingestion.readSavedChatArchiveIntegrityV1();
+  const occupant = envelope.occupants.find((o) => o.path === sourceRoot);
+  assert.equal(occupant.class, 'legacy-package', JSON.stringify(occupant));
+  assert.equal(occupant.snapshotEncoding, 'gzip');
 
   const result = await runtime.H2O.Studio.archiveExporter.exportVerifiedPackage({ packagePath: sourceRoot, exportName: 't04-v3-gzip.h2ochat' });
   assert.equal(result.status, 'exported', result.reason);
