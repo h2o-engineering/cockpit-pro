@@ -201,8 +201,8 @@ check('interactive top controls are protected from drag', () => {
 });
 
 check('source HTML carries current cache markers', () => {
-  assert.match(html, /@version 2\.5\.51/);
-  assert.match(html, /studio\.css\?v=2\.5\.51/);
+  assert.match(html, /@version 2\.5\.52/);
+  assert.match(html, /studio\.css\?v=2\.5\.52/);
   assert.match(html, /studio\.js\?v=2\.5\.80/);
   assert.match(html, /platform\.tauri\.js\?v=2\.5\.37/);
 });

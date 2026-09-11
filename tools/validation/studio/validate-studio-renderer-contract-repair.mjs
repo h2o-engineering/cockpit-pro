@@ -670,6 +670,7 @@ class FakeDomElement {
   }
   get firstChild() { return this.children[0] || null; }
   get childNodes() { return this.children.slice(); }
+  get childElementCount() { return this.children.filter((child) => child && child.nodeType === 1).length; }
   get textContent() { return this.children.map((child) => child.textContent ?? '').join(''); }
   appendChild(node) { return this.insertBefore(node, null); }
   insertBefore(node, ref) {
@@ -1443,8 +1444,10 @@ function validateRichShellPresentationOwnership() {
   assert.ok(css.includes(`${scope} .cgScroll.is-rich > *{`), 'rich transcript spacing keys on the is-rich mode hook');
   assert.ok(css.includes(`${scope} .wbRichRoot :where([data-message-author-role="assistant"]){`), 'assistant host skin keys on the owner role attribute');
   assert.ok(css.includes(`${scope} .wbRichRoot .cgTurn--user [data-message-author-role="user"]{`), 'user host side placement keys on the structural turn class and owner role attribute');
-  /* The stylesheet never invents hooks the JS does not emit. */
-  assert.doesNotMatch(css, /\.cgMsg--rich|\.wbTurn--edited|\.cgTurn--has-attachments|\.cgUserAttachment/, 'no stale or non-profile hooks in the profile stylesheet');
+  /* The stylesheet never invents hooks the JS does not emit (the structural
+   * attachment grid / card are Renderer-emitted and styled here since S3C
+   * slice F; the state hooks below stay unstyled). */
+  assert.doesNotMatch(css, /\.cgMsg--rich|\.wbTurn--edited|\.cgTurn--has-attachments/, 'no stale or unstyled state hooks in the profile stylesheet');
   /* Executed: the rich shells still emit exactly those hooks. */
   const seams = vm.createContext({
     document: { createElement: (tagName) => new FakeDomElement(tagName) },
@@ -1484,29 +1487,35 @@ function validateRichShellPresentationOwnership() {
  * skinned by the profile stylesheet; the rich edited-turn hook stays an
  * unstyled state hook; the temporary editing interaction (wbTurn--editing,
  * data-edit-mode, contenteditable, is-ribbon-selected) stays global. */
+/* Minimal CSS rule reader shared by the presentation-ownership checks:
+ * [{ selector (whitespace-normalized), decls }] in source order, comments
+ * stripped, @-preludes skipped (their inner rules are still read). */
+function cssRulesOf(cssRaw) {
+  const css = cssRaw.replace(/\/\*[\s\S]*?\*\//g, ' ');
+  const out = []; let buf = ''; let i = 0;
+  while (i < css.length) {
+    const ch = css[i];
+    if (ch === '{') {
+      const sel = buf.trim(); buf = '';
+      if (sel.startsWith('@')) { i += 1; continue; }
+      const end = css.indexOf('}', i);
+      out.push({ selector: sel.replace(/\s+/g, ' '), decls: css.slice(i + 1, end).split(';').map((d) => d.replace(/\s+/g, ' ').trim()).filter(Boolean) });
+      i = end + 1; continue;
+    }
+    if (ch === '}') { buf = ''; i += 1; continue; }
+    buf += ch; i += 1;
+  }
+  return out;
+}
+const cssSelectorsOf = (css) => cssRulesOf(css).map((r) => r.selector);
+const cssDeclarationsOf = (css, selector) => { const hit = cssRulesOf(css).find((r) => r.selector === selector); return hit ? hit.decls : null; };
+const cssMembersOf = (selector) => { const out = []; let depth = 0; let cur = ''; for (const ch of selector) { if (ch === '(') depth += 1; if (ch === ')') depth -= 1; if (ch === ',' && depth === 0) { out.push(cur.trim()); cur = ''; } else cur += ch; } out.push(cur.trim()); return out; };
+
 function validatePersistedEditPresentationOwnership() {
   const scope = ':where([data-h2o-presentation-profile="chatgpt-reference"])';
-  const profileCss = readRepo(PRESENTATION_CSS_REL).replace(/\/\*[\s\S]*?\*\//g, ' ');
-  const studioCss = readRepo(STUDIO_CSS_REL).replace(/\/\*[\s\S]*?\*\//g, ' ');
-  /* Minimal rule reader: [{ selector (whitespace-normalized), decls }] in source order; @-preludes are skipped. */
-  const rulesOf = (css) => {
-    const out = []; let buf = ''; let i = 0;
-    while (i < css.length) {
-      const ch = css[i];
-      if (ch === '{') {
-        const sel = buf.trim(); buf = '';
-        if (sel.startsWith('@')) { i += 1; continue; }
-        const end = css.indexOf('}', i);
-        out.push({ selector: sel.replace(/\s+/g, ' '), decls: css.slice(i + 1, end).split(';').map((d) => d.replace(/\s+/g, ' ').trim()).filter(Boolean) });
-        i = end + 1; continue;
-      }
-      if (ch === '}') { buf = ''; i += 1; continue; }
-      buf += ch; i += 1;
-    }
-    return out;
-  };
-  const selectorsOf = (css) => rulesOf(css).map((r) => r.selector);
-  const declarationsOf = (css, selector) => { const hit = rulesOf(css).find((r) => r.selector === selector); return hit ? hit.decls : null; };
+  const profileCss = readRepo(PRESENTATION_CSS_REL);
+  const studioCss = readRepo(STUDIO_CSS_REL);
+  const selectorsOf = cssSelectorsOf; const declarationsOf = cssDeclarationsOf;
   const context = vm.createContext({});
   const profile = installPresentationProfile(context).reference();
   const [messageHook] = profile.editedMessageClasses();
@@ -1524,8 +1533,7 @@ function validatePersistedEditPresentationOwnership() {
   assert.ok(profileSelectors.includes(scopedSelector), 'B: cgMsg--edited presentation lives in the profile stylesheet');
   assert.deepEqual(declarationsOf(profileCss, scopedSelector), ['border-left: 2px solid rgba(122, 182, 255, .28)', 'padding-left: 12px', 'margin-left: -14px'], 'C: declarations match the accepted baseline exactly');
   assert.equal(profileSelectors.filter((sel) => sel.includes(messageHook)).length, 1, 'D: exactly one profile rule targets the hook');
-  const members = (selector) => { const out = []; let depth = 0; let cur = ''; for (const ch of selector) { if (ch === '(') depth += 1; if (ch === ')') depth -= 1; if (ch === ',' && depth === 0) { out.push(cur.trim()); cur = ''; } else cur += ch; } out.push(cur.trim()); return out; };
-  for (const sel of profileSelectors.flatMap(members)) assert.ok(sel.startsWith(scope), `D: profile-root scoped member: ${sel}`);
+  for (const sel of profileSelectors.flatMap(cssMembersOf)) assert.ok(sel.startsWith(scope), `D: profile-root scoped member: ${sel}`);
   /* The accepted cascade order keeps the accent before the user bubble skin (equal specificity). */
   assert.ok(profileSelectors.indexOf(scopedSelector) < profileSelectors.indexOf(`${scope} .cgMsg--user`), 'C: accent ordered before the user bubble skin, as in the accepted baseline');
   assert.ok(profileSelectors.indexOf(`${scope} .cgMsg`) < profileSelectors.indexOf(scopedSelector), 'C: accent ordered after the base message skin');
@@ -1582,6 +1590,100 @@ function validatePersistedEditPresentationOwnership() {
   assert.equal(turn.className, `cgTurn cgTurn--assistant wbTurn wbTurn--rich wbTurn--assistant ${turnHook}`, 'F: edited rich turn carries the state hook beside the shell classes');
 }
 
+/* S3C slice F: attachment + image/media presentation. The attachment grid /
+ * card / has-attachments vocabulary stays Renderer structural property (never
+ * a profile hook); their presentation, the generic image rule, the provider
+ * image grid and the rich media containment live in the profile stylesheet;
+ * the Reader-route attachment alignment stays global. Attachment semantics,
+ * accessibility and image-source safety are executed through the real seams.
+ */
+function validateAttachmentPresentationOwnership() {
+  const scope = ':where([data-h2o-presentation-profile="chatgpt-reference"])';
+  const profileCss = readRepo(PRESENTATION_CSS_REL);
+  const studioCss = readRepo(STUDIO_CSS_REL);
+  const context = vm.createContext({});
+  const profile = installPresentationProfile(context).reference();
+  /* B: attachment vocabulary is not a profile hook and has no profile helper. */
+  assert.doesNotMatch(JSON.stringify(profile.hooks), /Attachment|attachments/, 'B: attachment classes are not PresentationProfile hooks');
+  assert.equal(Object.keys(profile).some((k) => /attachment/i.test(k)), false, 'B: no attachment helper on the profile');
+  assert.doesNotMatch(presentationProfileSource.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/.*$/gm, ''), /cgUserAttachment|has-attachments/, 'B: the profile module code carries no attachment vocabulary');
+  /* A + L (executed): the real grid builder and attachment seam emit the structural classes, group semantics, alt and safe sources. */
+  const seams = vm.createContext({
+    document: { createElement: (tagName) => new FakeDomElement(tagName) },
+    Element: FakeDomElement, String, Number, Set, Array, Object, URL,
+    TESTID_ATTR: 'data-testid', TURN_TESTID: 'conversation-turn', TURNS_TESTID: 'conversation-turns',
+    ROLE_ATTR: 'data-message-author-role', MESSAGE_ID_ATTR: 'data-message-id', TURN_ID_ATTR: 'data-turn-id', ROLES: roleContract,
+    stampReplayTurnMeta: () => {},
+    removeNativeUserAttachmentImages: () => {},
+  });
+  Object.assign(seams, presentationProfileGlobals(seams));
+  vm.runInContext([
+    extractFunction(rendererSource, 'activePresentationProfile'),
+    extractFunction(rendererSource, 'normalizeRole'),
+    extractFunction(rendererSource, 'getAccessibleRoleLabel'),
+    extractFunction(rendererSource, 'applyTurnAccessibility'),
+    extractFunction(rendererSource, 'claimReplayIdentity'),
+    extractFunction(rendererSource, 'buildTurnShell'),
+    extractFunction(rendererSource, 'buildMessageHost'),
+    extractFunction(rendererSource, 'normalizeSafeImageSrc'),
+    extractFunction(rendererSource, 'normalizeImageAlt'),
+    extractFunction(rendererSource, 'buildUserAttachmentGrid'),
+    extractFunction(rendererSource, 'attachUserAttachmentsToTurn'),
+    'this.api = { buildTurnShell, buildMessageHost, buildUserAttachmentGrid, attachUserAttachmentsToTurn };',
+  ].join('\n'), seams);
+  const turn = seams.api.buildTurnShell('user', 'canonical', { turnNo: 1 });
+  const host = seams.api.buildMessageHost('user', 'canonical', {}); turn.appendChild(host);
+  seams.api.attachUserAttachmentsToTurn(turn, host, [
+    { kind: 'image', thumbnailSrc: 'https://example.test/a.png', alt: 'first', captureStatus: 'linked', naturalWidth: 640, naturalHeight: 480 },
+    { kind: 'image', thumbnailSrc: 'data:image/png;base64,iVBORw0KGgo=', alt: null, captureStatus: 'captured' },
+    { kind: 'image', thumbnailSrc: 'javascript:alert(1)', alt: 'unsafe' },
+    { kind: 'image', thumbnailSrc: 'data:text/html;base64,PHN2Zz4=', alt: 'unsafe data' },
+    { kind: 'file', thumbnailSrc: 'https://example.test/not-an-image.pdf' },
+  ]);
+  assert.equal(turn.classList.contains('cgTurn--has-attachments'), true, 'A: has-attachments state hook stamped structurally');
+  assert.equal(turn.children.length, 2, 'A: grid mounts beside the host'); assert.equal(turn.children[1], host, 'A: grid precedes the host (insertion order)');
+  const grid = turn.children[0];
+  assert.equal(grid.className, 'cgUserAttachmentGrid', 'A: structural grid class');
+  assert.equal(grid.getAttribute('role'), 'group', 'L: attachment collection is a group'); assert.equal(grid.getAttribute('aria-label'), 'Attached images', 'L: group label');
+  assert.equal(grid.children.length, 2, 'L: unsafe and non-image entries are dropped; safe https + raster data: kept');
+  for (const card of grid.children) { assert.equal(card.className, 'cgUserAttachmentCard', 'A: structural card class'); assert.equal(card.children.length, 1); assert.equal(card.children[0].tagName, 'IMG'); }
+  assert.equal(grid.children[0].dataset.captureStatus, 'linked'); assert.equal(grid.children[1].dataset.captureStatus, 'captured');
+  assert.equal(grid.children[0].children[0].src, 'https://example.test/a.png'); assert.equal(grid.children[0].children[0].alt, 'first');
+  assert.equal(grid.children[1].children[0].src, 'data:image/png;base64,iVBORw0KGgo='); assert.equal(grid.children[1].children[0].alt, '', 'L: null alt normalizes to an empty alt');
+  assert.equal(grid.children[0].children[0].loading, 'lazy'); assert.equal(grid.children[0].children[0].decoding, 'async');
+  assert.equal(grid.children[0].children[0].dataset.naturalWidth, '640'); assert.equal(grid.children[0].children[0].dataset.naturalHeight, '480');
+  assert.equal(seams.api.buildUserAttachmentGrid([{ kind: 'image', thumbnailSrc: 'javascript:alert(1)' }]), null, 'L: an all-unsafe set yields no grid');
+  {
+    const bare = seams.api.buildTurnShell('user', 'canonical', { turnNo: 2 }); const bareHost = seams.api.buildMessageHost('user', 'canonical', {}); bare.appendChild(bareHost);
+    seams.api.attachUserAttachmentsToTurn(bare, bareHost, []);
+    assert.equal(bare.classList.contains('cgTurn--has-attachments'), false, 'A: no attachments -> no state hook'); assert.equal(bare.children.length, 1);
+  }
+  /* L (source invariants of the seam not executable in the fake DOM): native attachment removal keeps its accepted exclusions. */
+  const removal = extractFunction(rendererSource, 'removeNativeUserAttachmentImages');
+  assert.match(removal, /img\.closest\("\.cgUserAttachmentGrid"\)\) return;/, 'L: H2O attachment grid images are never removed');
+  assert.match(removal, /img\.closest\(assistantRoleSelector\)\) return;/, 'L: assistant images are never removed');
+  assert.match(removal, /\[data-message-attachment-id\], \[data-testid="image-asset"\], button, \[role="button"\]/, 'L: provider attachment holders are the removal targets');
+  /* C/D/E/F/G/I/H: presentation ownership relation between the Renderer vocabulary and the two stylesheets. */
+  const profileRules = cssRulesOf(profileCss); const studioRules = cssRulesOf(studioCss);
+  const decls = (sel) => { const hit = profileRules.find((r) => r.selector === sel); return hit ? hit.decls : null; };
+  assert.deepEqual(decls(`${scope} .cgUserAttachmentGrid`), ['--cg-user-attachment-size:112px', 'display:grid', 'grid-template-columns:repeat(auto-fit, minmax(var(--cg-user-attachment-size), var(--cg-user-attachment-size)))', 'justify-content:end', 'gap:8px', 'width:fit-content', 'max-width:min(100%, calc((var(--cg-user-attachment-size) * 3) + 16px))', 'margin:0 0 8px auto'], 'C: attachment grid presentation is profile-owned, verbatim');
+  assert.deepEqual(decls(`${scope} .cgUserAttachmentCard`), ['width:var(--cg-user-attachment-size)', 'height:var(--cg-user-attachment-size)', 'overflow:hidden', 'border-radius:18px', 'border:1px solid rgba(255,255,255,.12)', 'background:rgba(255,255,255,.08)'], 'C: attachment card presentation is profile-owned, verbatim');
+  assert.deepEqual(decls(`${scope} .cgUserAttachmentCard img`), ['display:block', 'width:100%', 'height:100%', 'max-width:none', 'object-fit:cover', 'border-radius:inherit'], 'C: attachment card image presentation is profile-owned, verbatim');
+  assert.deepEqual(decls(`${scope} .wbRichRoot :where(img, video, canvas, svg)`), ['max-width:100%'], 'F: rich media containment is profile-owned, verbatim');
+  const generic = profileRules.find((r) => cssMembersOf(r.selector).includes(`${scope} .cgMsgBody img`));
+  assert.ok(generic, 'D/E: the generic image rule (incl. canonical cgMsgBody img) is profile-owned');
+  assert.deepEqual(cssMembersOf(generic.selector).map((m) => m.replace(`${scope} `, '')), ['.dalle-image-container img', '[data-testid="image-asset"] img', '.wbRichRoot img', '.cgMsgBody img', '[data-message-author-role] img'], 'D/E: generic image members complete and scoped');
+  assert.deepEqual(generic.decls, ['max-width: 100%', 'height: auto', 'border-radius: 8px']);
+  assert.ok(profileRules.some((r) => r.selector === `${scope} .wbRichRoot .grid:has(> img), ${scope} .wbRichRoot [data-message-attachment-id]:has(> img)`), 'G: provider rich image grid presentation is profile-owned');
+  assert.ok(profileRules.indexOf(generic) < profileRules.findIndex((r) => r.selector === `${scope} .cgUserAttachmentCard img`), 'generic image presentation precedes the attachment-card image specialization');
+  for (const sheet of [profileRules, studioRules]) assert.equal(sheet.filter((r) => r.selector.includes('.cgTurn--has-attachments')).length, 0, 'I: cgTurn--has-attachments is a structural state hook without presentation');
+  const globalAttachment = studioRules.filter((r) => cssMembersOf(r.selector).some((m) => /cgUserAttachment/.test(m)));
+  assert.equal(globalAttachment.length, 1, 'H: exactly one attachment rule stays global');
+  assert.ok(cssMembersOf(globalAttachment[0].selector).every((m) => m.startsWith('body[data-route="reader"]')), 'H: the global attachment rule is the Reader-route alignment');
+  assert.ok(globalAttachment[0].decls.every((d) => /!important$/.test(d)), 'H: Reader-route alignment keeps !important');
+  assert.equal(profileRules.filter((r) => r.selector.includes('body[data-route="reader"]')).length, 0, 'H: no Reader-route rule in the profile stylesheet');
+}
+
 function validateExtractedRendererBoundary() {
   const sanitizerTag = '<script src="./platform/html-sanitizer.js"></script>';
   const rendererTag = '<script src="./renderer/chat-renderer.studio.js"></script>';
@@ -1613,6 +1715,7 @@ validateRichUserBubbleAuthority();
 validatePresentationProfileContract();
 validateRichShellPresentationOwnership();
 validatePersistedEditPresentationOwnership();
+validateAttachmentPresentationOwnership();
 validateExtractedRendererBoundary();
 
 console.log('Studio renderer contract repair validation passed');

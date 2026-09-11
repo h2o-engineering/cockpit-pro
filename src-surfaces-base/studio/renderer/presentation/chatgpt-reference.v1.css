@@ -1,5 +1,5 @@
 /*
- * @version 1.0.4
+ * @version 1.0.5
  * H2O Studio Renderer — chatgpt-reference PresentationProfile stylesheet.
  *
  * Owner:   L-STUDIO-RENDERER
@@ -295,6 +295,12 @@
   border:1px solid rgba(255,255,255,.10);
   padding:9px 10px;
   text-align:left;
+}
+
+/* Rich media containment. Ordered after the rich content baseline and before
+   the provider utility layer, exactly as in the accepted global cascade. */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot :where(img, video, canvas, svg){
+  max-width:100%;
 }
 
 /* ── 2. ChatGPT provider design-token aliases ──
@@ -926,4 +932,87 @@
   font-family: var(--mono);
   font-size: 13px;
   margin: 8px 0;
+}
+
+/* ── 8. Image / attachment presentation ──
+   Generic canonical/provider image presentation, the provider rich image grid,
+   the H2O user attachment grid / card (structural Renderer classes styled here,
+   class authority stays with the Renderer) and the provider/user attachment
+   fallback. Source order is load-bearing: the generic image rule precedes the
+   attachment-card and attachment-image specializations at equal specificity.
+   The Reader-route attachment alignment stays in studio.css. */
+/* Image rendering — saved-chat images bounded to message column.
+   Covers DALLE results, image-asset testids, canonical Studio bodies,
+   and any <img> inside a rich-replay turn. */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .dalle-image-container img,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) [data-testid="image-asset"] img,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot img,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsgBody img,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) [data-message-author-role] img{
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+
+/* Multi-image attachments: ChatGPT groups inline images in a `.grid`
+   container; let them wrap responsively without forcing full width. */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot .grid:has(> img),
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot [data-message-attachment-id]:has(> img){
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 6px;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgUserAttachmentGrid{
+  --cg-user-attachment-size:112px;
+  display:grid;
+  grid-template-columns:repeat(auto-fit, minmax(var(--cg-user-attachment-size), var(--cg-user-attachment-size)));
+  justify-content:end;
+  gap:8px;
+  width:fit-content;
+  max-width:min(100%, calc((var(--cg-user-attachment-size) * 3) + 16px));
+  margin:0 0 8px auto;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgUserAttachmentCard{
+  width:var(--cg-user-attachment-size);
+  height:var(--cg-user-attachment-size);
+  overflow:hidden;
+  border-radius:18px;
+  border:1px solid rgba(255,255,255,.12);
+  background:rgba(255,255,255,.08);
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgUserAttachmentCard img{
+  display:block;
+  width:100%;
+  height:100%;
+  max-width:none;
+  object-fit:cover;
+  border-radius:inherit;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgTurn--user .grid:has(img),
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgTurn--user [data-message-attachment-id]:has(img),
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot .cgTurn--user .grid:has(img),
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot .cgTurn--user [data-message-attachment-id]:has(img){
+  display:flex;
+  flex-wrap:wrap;
+  justify-content:flex-end;
+  gap:8px;
+  width:fit-content;
+  max-width:min(100%, 352px);
+  margin:0 0 8px auto;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgTurn--user .grid:has(img) img,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgTurn--user [data-message-attachment-id]:has(img) img,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot .cgTurn--user .grid:has(img) img,
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot .cgTurn--user [data-message-attachment-id]:has(img) img{
+  display:block;
+  width:112px;
+  height:112px;
+  max-width:none;
+  object-fit:cover;
+  border-radius:18px;
 }

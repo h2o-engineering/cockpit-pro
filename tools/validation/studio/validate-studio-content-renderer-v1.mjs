@@ -521,11 +521,17 @@ check('studio.css keeps the deferred rich rules, the prose/Tailwind layer, Reade
   const readerRich = rules.filter((r) => members(r).some((m) => m.startsWith('body[data-route="reader"] .wbRichRoot') && /cgTurn--user|user-message-bubble-color|data-message-author-role="user"/.test(m)));
   assert.ok(readerRich.length >= 4, `D: Reader-route rich alignment rules remain global (found ${readerRich.length})`);
   assert.ok(readerRich.every((r) => Object.values(r.declarations).every((v) => /!important/.test(v))), 'D: Reader-route rich alignment declarations keep !important');
-  /* E + F: attachment and interactive edit-mode rules remain global. The
-   * persisted .cgMsg--edited accent is profile-owned since S3C slice E;
-   * wbTurn--edited carries no rule anywhere (state hook). */
-  for (const sel of ['.cgUserAttachmentGrid', '.cgUserAttachmentCard', '.wbTurn--editing', '[data-edit-mode="on"]']) {
+  /* E + F: interactive edit-mode rules remain global. The persisted
+   * .cgMsg--edited accent is profile-owned since S3C slice E and the
+   * attachment / image presentation since slice F (only the Reader-route
+   * attachment alignment stays global); wbTurn--edited carries no rule
+   * anywhere (state hook). */
+  for (const sel of ['.wbTurn--editing', '[data-edit-mode="on"]']) {
     assert.ok(rules.some((r) => members(r).some((m) => m.includes(sel))), `${sel} rules remain global`);
+  }
+  for (const sel of ['.cgUserAttachmentGrid', '.cgUserAttachmentCard']) {
+    assert.ok(rules.some((r) => members(r).some((m) => m.startsWith('body[data-route="reader"]') && m.includes(sel))) || sel === '.cgUserAttachmentCard', `Reader-route ${sel} alignment stays global`);
+    assert.equal(rules.some((r) => members(r).some((m) => !m.startsWith('body[data-route="reader"]') && m.includes(sel))), false, `${sel} presentation no longer global (slice F)`);
   }
   assert.equal(rules.some((r) => members(r).some((m) => m.includes('.wbTurn--edited'))), false, 'wbTurn--edited has no studio.css rule');
 });
@@ -564,9 +570,9 @@ check('the provider-content compatibility layer lives in the profile stylesheet 
   for (const v of PROVIDER_ALIAS_VARIABLES) assert.ok(v in rootRules[0].declarations, `C: provider alias ${v} defined on the profile root`);
   /* D: the sheet defines no shared --wb-* theme input (it may consume them). */
   for (const r of rules) for (const prop of Object.keys(r.declarations)) assert.ok(!prop.startsWith('--wb-'), `D: profile stylesheet must not define shared theme input ${prop}`);
-  /* K: replay-interaction safety and image/media presentation are not part of the unit. */
+  /* K: replay-interaction safety is not part of the unit; image/media presentation joined the profile in slice F. */
   assert.equal(rules.filter((r) => r.plain.includes('button, input, textarea, select, summary')).length, 0, 'K: replay-interaction safety stays outside the profile');
-  assert.equal(rules.filter((r) => r.plain.includes(':where(img, video, canvas, svg)') || r.plain.includes('.cgMsgBody img') || r.plain.includes('.dalle-image-container')).length, 0, 'J: image/media presentation stays outside the profile');
+  assert.equal(rules.filter((r) => r.plain.includes(':where(img, video, canvas, svg)')).length, 1, 'J: rich media containment lives in the profile (slice F)');
   /* L: canonical table members moved with the prose table rules. */
   for (const sel of ['.cgMsgBody table', '.cgMsgBody thead', '.cgMsgBody th', '.cgMsgBody td', '.cgMsgBody tr:nth-child(even) td']) {
     assert.ok(rules.some((r) => splitMembers(r.plain).includes(sel)), `L: canonical table member ${sel} is profile-owned`);
@@ -590,15 +596,74 @@ check('global studio.css keeps no duplicate of the migrated provider-content lay
   assert.ok(roots.length >= 1, 'global :root theme block exists');
   for (const v of PROVIDER_ALIAS_VARIABLES) assert.ok(!roots.some((r) => v in r.declarations), `C: provider alias ${v} no longer on global :root`);
   for (const v of SHARED_THEME_INPUTS) assert.ok(roots.some((r) => v in r.declarations), `D: shared theme input ${v} stays on global :root`);
-  /* K: replay-interaction safety; J: image/media and attachment rules stay global. */
+  /* K: replay-interaction safety stays global; J: image/media and attachment presentation moved in slice F. */
   const safety = glob.filter((r) => r.selector === '.wbRichRoot :where(button, input, textarea, select, summary)');
   assert.equal(safety.length, 1); assert.deepEqual(safety[0].declarations, { 'pointer-events': 'none' }, 'K: replay-interaction safety rule unchanged and global');
-  assert.ok(glob.some((r) => r.selector === '.wbRichRoot :where(img, video, canvas, svg)'), 'J: rich media containment stays global');
-  assert.ok(glob.some((r) => splitMembers(r.selector).includes('.cgMsgBody img')), 'J: canonical image presentation stays global');
-  assert.ok(glob.some((r) => splitMembers(r.selector).some((m) => m.includes('.dalle-image-container img'))), 'J: provider image rules stay global');
-  /* L: canonical table members no longer global; .cgMsgBody img still is. */
-  for (const sel of ['.cgMsgBody table', '.cgMsgBody thead', '.cgMsgBody th', '.cgMsgBody td', '.cgMsgBody tr:nth-child(even) td']) assert.equal(globalMembers.has(sel), false, `L: ${sel} no longer global`);
-  assert.equal(globalMembers.has('.cgMsgBody img'), true);
+  assert.equal(glob.some((r) => r.selector === '.wbRichRoot :where(img, video, canvas, svg)'), false, 'J: rich media containment no longer global');
+  assert.equal(glob.some((r) => splitMembers(r.selector).some((m) => m.includes('.dalle-image-container img'))), false, 'J: provider image rules no longer global');
+  /* L: canonical table members and .cgMsgBody img no longer global. */
+  for (const sel of ['.cgMsgBody table', '.cgMsgBody thead', '.cgMsgBody th', '.cgMsgBody td', '.cgMsgBody tr:nth-child(even) td', '.cgMsgBody img']) assert.equal(globalMembers.has(sel), false, `L: ${sel} no longer global`);
+});
+
+/* S3C slice F: image / attachment presentation is one ordered unit in the
+ * profile stylesheet. Rich media containment sits after the rich content
+ * baseline and before the provider utility layer; the generic image rule, the
+ * provider image grid, the H2O attachment grid / card and the provider/user
+ * attachment fallback follow the late leftovers, in the accepted order. */
+const IMAGE_UNIT = [
+  ['.dalle-image-container img, [data-testid="image-asset"] img, .wbRichRoot img, .cgMsgBody img, [data-message-author-role] img', { 'max-width': '100%', height: 'auto', 'border-radius': '8px' }],
+  ['.wbRichRoot .grid:has(> img), .wbRichRoot [data-message-attachment-id]:has(> img)', { display: 'grid', 'grid-template-columns': 'repeat(auto-fit, minmax(180px, 1fr))', gap: '6px' }],
+  ['.cgUserAttachmentGrid', { '--cg-user-attachment-size': '112px', display: 'grid', 'grid-template-columns': 'repeat(auto-fit, minmax(var(--cg-user-attachment-size), var(--cg-user-attachment-size)))', 'justify-content': 'end', gap: '8px', width: 'fit-content', 'max-width': 'min(100%, calc((var(--cg-user-attachment-size) * 3) + 16px))', margin: '0 0 8px auto' }],
+  ['.cgUserAttachmentCard', { width: 'var(--cg-user-attachment-size)', height: 'var(--cg-user-attachment-size)', overflow: 'hidden', 'border-radius': '18px', border: '1px solid rgba(255,255,255,.12)', background: 'rgba(255,255,255,.08)' }],
+  ['.cgUserAttachmentCard img', { display: 'block', width: '100%', height: '100%', 'max-width': 'none', 'object-fit': 'cover', 'border-radius': 'inherit' }],
+  ['.cgTurn--user .grid:has(img), .cgTurn--user [data-message-attachment-id]:has(img), .wbRichRoot .cgTurn--user .grid:has(img), .wbRichRoot .cgTurn--user [data-message-attachment-id]:has(img)', { display: 'flex', 'flex-wrap': 'wrap', 'justify-content': 'flex-end', gap: '8px', width: 'fit-content', 'max-width': 'min(100%, 352px)', margin: '0 0 8px auto' }],
+  ['.cgTurn--user .grid:has(img) img, .cgTurn--user [data-message-attachment-id]:has(img) img, .wbRichRoot .cgTurn--user .grid:has(img) img, .wbRichRoot .cgTurn--user [data-message-attachment-id]:has(img) img', { display: 'block', width: '112px', height: '112px', 'max-width': 'none', 'object-fit': 'cover', 'border-radius': '18px' }],
+];
+const READER_ATTACHMENT_ALIGNMENT = 'body[data-route="reader"] .cgUserAttachmentGrid, body[data-route="reader"] .wbRichRoot .cgTurn--user .cgUserAttachmentGrid, body[data-route="reader"] .wbRichRoot .wbTurn--user .cgUserAttachmentGrid, body[data-route="reader"] .wbRichRoot [data-turn="user"] .cgUserAttachmentGrid, body[data-route="reader"] :where(.cgTurn--user, .wbTurn--user, [data-turn="user"]) .cgUserAttachmentGrid';
+
+check('image / attachment presentation lives in the profile stylesheet as one ordered unit after the provider-content layer (S3C slice F)', () => {
+  const rules = parseRules(read(PROFILE_CSS_REL)).map((r) => ({ ...r, selector: norm(r.selector), plain: unscopedSelector(norm(r.selector)) }));
+  const find = (plain) => rules.filter((r) => r.media === null && r.plain === norm(plain));
+  /* F: rich media containment - after the rich content baseline, before the alias/utility layers. */
+  const media = find('.wbRichRoot :where(img, video, canvas, svg)');
+  assert.equal(media.length, 1, 'F: exactly one rich media containment rule');
+  assert.deepEqual(media[0].declarations, { 'max-width': '100%' }, 'F: declaration verbatim');
+  const lastBaseline = find('.wbRichRoot :where(th, td)').at(-1); const aliasRoot = find(':root')[0]; const firstUtility = find('.leading-tight')[0];
+  assert.ok(lastBaseline && aliasRoot && firstUtility, 'unit anchors present');
+  assert.ok(lastBaseline.index < media[0].index && media[0].index < aliasRoot.index && media[0].index < firstUtility.index, 'F: containment ordered after the rich baseline and before the provider token / utility layers');
+  /* C/D/E/G: the image / attachment sequence follows the late leftovers, in order, declarations verbatim. */
+  const lateLeftover = find('.sandbox-output').at(-1); assert.ok(lateLeftover, 'late leftover anchor present');
+  let last = lateLeftover.index;
+  for (const [plain, declarations] of IMAGE_UNIT) {
+    const hits = find(plain);
+    assert.equal(hits.length, 1, `unit rule present exactly once: ${plain}`);
+    assert.ok(hits[0].index > last, `unit order preserved at: ${plain}`);
+    assert.deepEqual(hits[0].declarations, declarations, `declarations verbatim: ${plain}`);
+    last = hits[0].index;
+  }
+  /* A/B (order-sensitive pair): the generic image rule precedes the attachment-card image specialization at equal specificity. */
+  assert.ok(find(IMAGE_UNIT[0][0])[0].index < find('.cgUserAttachmentCard img')[0].index, 'B: generic image presentation precedes the attachment-card image specialization');
+  /* K: every member of the unit is profile-root scoped (raw selector members carry the scope). */
+  for (const [plain] of IMAGE_UNIT) for (const m of splitMembers(find(plain)[0].selector)) assert.ok(m.startsWith(SCOPE), `K: scoped member: ${m}`);
+  for (const m of splitMembers(media[0].selector)) assert.ok(m.startsWith(SCOPE), `K: scoped member: ${m}`);
+  /* H: Reader-route attachment alignment is not in the profile sheet; I: cgTurn--has-attachments stays unstyled. */
+  assert.equal(rules.filter((r) => r.selector.includes('body[data-route="reader"]')).length, 0, 'H: no Reader-route rule in the profile stylesheet');
+  assert.equal(rules.filter((r) => r.selector.includes('.cgTurn--has-attachments')).length, 0, 'I: cgTurn--has-attachments has no profile rule');
+});
+
+check('global studio.css keeps only the Reader-route attachment alignment and no image / attachment duplicate (S3C slice F)', () => {
+  const glob = parseRules(read(STUDIO_CSS_REL)).map((r) => ({ ...r, selector: norm(r.selector) }));
+  /* H: the Reader-route alignment block is verbatim, !important, and global. */
+  const reader = glob.filter((r) => r.selector === norm(READER_ATTACHMENT_ALIGNMENT));
+  assert.equal(reader.length, 1, 'H: Reader-route attachment alignment rule present once in studio.css');
+  assert.deepEqual(reader[0].declarations, { 'align-self': 'flex-end !important', 'justify-content': 'end !important', 'margin-left': 'auto !important', 'margin-right': '0 !important' }, 'H: Reader-route alignment declarations unchanged');
+  /* J: no migrated unit member is still declared globally. */
+  const globalMembers = new Set(); for (const r of glob) for (const m of splitMembers(r.selector)) globalMembers.add(m);
+  for (const [plain] of IMAGE_UNIT) for (const m of splitMembers(norm(plain))) assert.equal(globalMembers.has(m), false, `J: ${m} no longer declared in studio.css`);
+  assert.equal(globalMembers.has('.wbRichRoot :where(img, video, canvas, svg)'), false, 'J: rich media containment no longer global');
+  /* I: cgTurn--has-attachments has no rule anywhere; the safety rule is untouched. */
+  assert.equal(glob.filter((r) => r.selector.includes('.cgTurn--has-attachments')).length, 0, 'I: cgTurn--has-attachments unstyled in studio.css');
+  assert.ok(glob.some((r) => r.selector === '.wbRichRoot :where(button, input, textarea, select, summary)'), 'replay-interaction safety stays global');
 });
 
 check('profile stylesheet @version and the studio.html cache query match exactly', () => {
@@ -789,12 +854,24 @@ if (!chromium) {
     const edited = document.createElement('div'); edited.className = 'cgMsg cgMsg--assistant cgMsg--edited'; edited.textContent = 'edited';
     const turnPlain = document.createElement('div'); turnPlain.className = 'cgTurn cgTurn--assistant wbTurn wbTurn--rich wbTurn--assistant';
     const turnEdited = document.createElement('div'); turnEdited.className = 'cgTurn cgTurn--assistant wbTurn wbTurn--rich wbTurn--assistant wbTurn--edited';
-    parent.appendChild(node); parent.appendChild(prose); parent.appendChild(rich); parent.appendChild(edited); parent.appendChild(turnPlain); parent.appendChild(turnEdited);
+    /* S3C slice F: attachment grid / card / image, a canonical body image and a
+     * provider image-asset image, all inside a rich transcript root. */
+    const PX = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const richRoot = document.createElement('div'); richRoot.className = 'cgScroll wbRichRoot';
+    const turn = document.createElement('div'); turn.className = 'cgTurn cgTurn--user wbTurn wbTurn--fallback wbTurn--user cgTurn--has-attachments'; turn.setAttribute('data-turn', 'user');
+    const grid = document.createElement('div'); grid.className = 'cgUserAttachmentGrid';
+    const card = document.createElement('div'); card.className = 'cgUserAttachmentCard'; const cardImg = document.createElement('img'); cardImg.src = PX; card.appendChild(cardImg); grid.appendChild(card);
+    const msg = document.createElement('div'); msg.className = 'cgMsg cgMsg--user'; msg.setAttribute('data-message-author-role', 'user'); const body = document.createElement('div'); body.className = 'cgMsgBody'; const bodyImg = document.createElement('img'); bodyImg.src = PX; body.appendChild(bodyImg); msg.appendChild(body);
+    const asset = document.createElement('div'); asset.setAttribute('data-testid', 'image-asset'); const assetImg = document.createElement('img'); assetImg.src = PX; asset.appendChild(assetImg);
+    turn.appendChild(grid); turn.appendChild(msg); turn.appendChild(asset); richRoot.appendChild(turn);
+    parent.appendChild(node); parent.appendChild(prose); parent.appendChild(rich); parent.appendChild(edited); parent.appendChild(turnPlain); parent.appendChild(turnEdited); parent.appendChild(richRoot);
     const cs = getComputedStyle(node); const hs = getComputedStyle(inner); const rs = getComputedStyle(richHeading); const es = getComputedStyle(edited);
+    const gs = getComputedStyle(grid), cds = getComputedStyle(card), cis = getComputedStyle(cardImg), bis = getComputedStyle(bodyImg), ais = getComputedStyle(assetImg);
+    const attachments = { gridDisplay: gs.display, gridGap: gs.gap, gridMaxWidth: gs.maxWidth, gridJustify: gs.justifyContent, cardWidth: cds.width, cardHeight: cds.height, cardRadius: cds.borderRadius, cardOverflow: cds.overflow, cardImgObjectFit: cis.objectFit, cardImgRadius: cis.borderRadius, cardImgMaxWidth: cis.maxWidth, cardImgHeight: cis.height, bodyImgRadius: bis.borderRadius, bodyImgMaxWidth: bis.maxWidth, bodyImgHeight: bis.height, assetImgRadius: ais.borderRadius, turnDelta: (() => { const a = getComputedStyle(turn); turn.classList.remove('cgTurn--has-attachments'); const b = getComputedStyle(turn); const diff = []; for (const k of Array.from(a)) if (a.getPropertyValue(k) !== b.getPropertyValue(k)) diff.push(k); turn.classList.add('cgTurn--has-attachments'); return diff; })() };
     const turnDelta = (() => { const a = getComputedStyle(turnPlain), b = getComputedStyle(turnEdited); const diff = []; for (const k of Array.from(a)) if (a.getPropertyValue(k) !== b.getPropertyValue(k)) diff.push(k); return diff; })();
     const out = { display: cs.display, fontSize: cs.fontSize, borderRadius: cs.borderRadius, position: cs.position, color: cs.color, headingLineHeight: hs.lineHeight, headingMarginTop: hs.marginTop, headingFontSize: hs.fontSize, richHeadingFontSize: rs.fontSize, richHeadingLineHeight: rs.lineHeight, richHeadingMarginTop: rs.marginTop, tokenText: getComputedStyle(node).getPropertyValue('--token-text-primary').trim(),
-      editedBorderLeftWidth: es.borderLeftWidth, editedBorderLeftColor: es.borderLeftColor, editedPaddingLeft: es.paddingLeft, editedMarginLeft: es.marginLeft, editedTurnDelta: turnDelta };
-    node.remove(); prose.remove(); rich.remove(); edited.remove(); turnPlain.remove(); turnEdited.remove(); return out;
+      editedBorderLeftWidth: es.borderLeftWidth, editedBorderLeftColor: es.borderLeftColor, editedPaddingLeft: es.paddingLeft, editedMarginLeft: es.marginLeft, editedTurnDelta: turnDelta, attachments };
+    node.remove(); prose.remove(); rich.remove(); edited.remove(); turnPlain.remove(); turnEdited.remove(); richRoot.remove(); return out;
   };
   const scoping = { inside: await page.evaluate(SCOPE_PROBE, 'host'), outside: await page.evaluate(SCOPE_PROBE, 'unscoped') };
   const cascade = { normal: await page.evaluate(PROBE), richNormal: await page.evaluate(RICH_PROBE) };
@@ -846,6 +923,21 @@ if (!chromium) {
     assert.equal(o.editedPaddingLeft, '0px'); assert.equal(o.editedMarginLeft, '0px');
     assert.deepEqual(i.editedTurnDelta, [], 'G: wbTurn--edited changes no computed property (state hook without presentation)');
     assert.deepEqual(o.editedTurnDelta, []);
+  });
+
+  check('attachment grid / card / image and canonical or provider image presentation apply only beneath the profile-marked root (S3C slice F)', () => {
+    const i = scoping.inside.attachments, o = scoping.outside.attachments;
+    assert.equal(i.gridDisplay, 'grid'); assert.equal(i.gridGap, '8px'); assert.equal(i.gridJustify, 'end'); assert.equal(i.gridMaxWidth, 'min(100%, 352px)', 'grid max-width resolves from the local attachment size variable');
+    assert.equal(i.cardWidth, '112px'); assert.equal(i.cardHeight, '112px'); assert.equal(i.cardRadius, '18px'); assert.equal(i.cardOverflow, 'hidden');
+    /* B: the attachment-card image specialization wins over the generic 8px image rule by order. */
+    assert.equal(i.cardImgObjectFit, 'cover'); assert.equal(i.cardImgRadius, '18px', 'B: card image inherits the 18px card radius, not the generic 8px'); assert.equal(i.cardImgMaxWidth, 'none'); assert.equal(i.cardImgHeight, '110px', 'card image fills the card (100% of the 112px card minus the 1px border)');
+    /* getComputedStyle reports the used height for a replaced element, so `height:auto` is proven by the verbatim declaration check above, not here. */
+    assert.equal(i.bodyImgRadius, '8px', 'E: canonical cgMsgBody img keeps the generic 8px radius'); assert.equal(i.bodyImgMaxWidth, '100%');
+    assert.equal(i.assetImgRadius, '8px', 'D: provider image-asset image keeps the generic 8px radius');
+    assert.deepEqual(i.turnDelta, [], 'I: cgTurn--has-attachments changes no computed property');
+    assert.equal(o.gridDisplay, 'block', 'negative scope: no attachment grid presentation outside the profile root'); assert.equal(o.gridGap, 'normal');
+    assert.equal(o.cardRadius, '0px'); assert.equal(o.cardOverflow, 'visible'); assert.equal(o.cardImgObjectFit, 'fill'); assert.equal(o.cardImgRadius, '0px');
+    assert.equal(o.bodyImgRadius, '0px', 'negative scope: no generic image presentation outside the profile root'); assert.equal(o.assetImgRadius, '0px'); assert.equal(o.bodyImgMaxWidth, 'none');
   });
 
   check('rich user bubble skin and its narrow override cascade correctly from the profile stylesheet (S3C slice C)', () => {

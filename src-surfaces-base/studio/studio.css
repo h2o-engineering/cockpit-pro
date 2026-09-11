@@ -2390,9 +2390,8 @@ body[data-layout="wide"] .cgScroll > *{
 }
 
 
-.wbRichRoot :where(img, video, canvas, svg){
-  max-width:100%;
-}
+/* Rich media containment (.wbRichRoot :where(img, video, canvas, svg)) is
+   owned by the Renderer stylesheet renderer/presentation/chatgpt-reference.v1.css. */
 
 .wbRichRoot :where(button, input, textarea, select, summary){
   pointer-events:none;
@@ -3191,81 +3190,11 @@ body[data-route="reader"][data-layout="wide"] .cgScroll > :where(
 /* KaTeX overflow, late token utilities and the sandbox output block are owned
    by the Renderer stylesheet renderer/presentation/chatgpt-reference.v1.css. */
 
-/* Image rendering — saved-chat images bounded to message column.
-   Covers DALLE results, image-asset testids, canonical Studio bodies,
-   and any <img> inside a rich-replay turn. */
-.dalle-image-container img,
-[data-testid="image-asset"] img,
-.wbRichRoot img,
-.cgMsgBody img,
-[data-message-author-role] img {
-  max-width: 100%;
-  height: auto;
-  border-radius: 8px;
-}
-
-/* Multi-image attachments: ChatGPT groups inline images in a `.grid`
-   container; let them wrap responsively without forcing full width. */
-.wbRichRoot .grid:has(> img),
-.wbRichRoot [data-message-attachment-id]:has(> img) {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 6px;
-}
-
-.cgUserAttachmentGrid{
-  --cg-user-attachment-size:112px;
-  display:grid;
-  grid-template-columns:repeat(auto-fit, minmax(var(--cg-user-attachment-size), var(--cg-user-attachment-size)));
-  justify-content:end;
-  gap:8px;
-  width:fit-content;
-  max-width:min(100%, calc((var(--cg-user-attachment-size) * 3) + 16px));
-  margin:0 0 8px auto;
-}
-
-.cgUserAttachmentCard{
-  width:var(--cg-user-attachment-size);
-  height:var(--cg-user-attachment-size);
-  overflow:hidden;
-  border-radius:18px;
-  border:1px solid rgba(255,255,255,.12);
-  background:rgba(255,255,255,.08);
-}
-
-.cgUserAttachmentCard img{
-  display:block;
-  width:100%;
-  height:100%;
-  max-width:none;
-  object-fit:cover;
-  border-radius:inherit;
-}
-
-.cgTurn--user .grid:has(img),
-.cgTurn--user [data-message-attachment-id]:has(img),
-.wbRichRoot .cgTurn--user .grid:has(img),
-.wbRichRoot .cgTurn--user [data-message-attachment-id]:has(img){
-  display:flex;
-  flex-wrap:wrap;
-  justify-content:flex-end;
-  gap:8px;
-  width:fit-content;
-  max-width:min(100%, 352px);
-  margin:0 0 8px auto;
-}
-
-.cgTurn--user .grid:has(img) img,
-.cgTurn--user [data-message-attachment-id]:has(img) img,
-.wbRichRoot .cgTurn--user .grid:has(img) img,
-.wbRichRoot .cgTurn--user [data-message-attachment-id]:has(img) img{
-  display:block;
-  width:112px;
-  height:112px;
-  max-width:none;
-  object-fit:cover;
-  border-radius:18px;
-}
+/* Image / attachment presentation (generic image rules, provider image
+   grids, the H2O user attachment grid / card and the provider/user attachment
+   fallback) is owned by the Renderer stylesheet
+   renderer/presentation/chatgpt-reference.v1.css. The Reader-route attachment
+   alignment block below stays here. */
 
 body[data-route="reader"] .wbRichRoot .cgTurn--user,
 body[data-route="reader"] .wbRichRoot .wbTurn--user,
