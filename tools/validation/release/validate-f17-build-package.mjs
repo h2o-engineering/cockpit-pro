@@ -495,7 +495,8 @@ function runTauriBuild() {
     };
   }
   const result = run('npm', ['run', 'tauri:build'], {
-    cwd: path.join(ROOT, 'apps/studio/desktop')
+    cwd: path.join(ROOT, 'apps/studio/desktop'),
+    env: { H2O_STUDIO_BUILD_CHECKPOINT: 'F17_VALIDATION' }
   });
   return {
     ok: result.ok,
