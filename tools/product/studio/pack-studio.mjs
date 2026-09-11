@@ -1329,6 +1329,9 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   // ContentRenderer registry turns accepted blocks into H2O-owned DOM. Keep
   // parallel to ARCHIVE_WORKBENCH_OUT_FILES below.
   "renderer/semantic/render-ir.v1.js",
+  // S2C/T11: semantic ingress is now consumed at runtime (Saved-Chat v3 typed
+  // content[] -> Render IR). Loads after the IR contract, before the renderers.
+  "renderer/semantic/semantic-ingress.v1.js",
   "renderer/content/content-renderer.v1.js",
 ]);
 export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
@@ -1721,6 +1724,7 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
 
   // Renderer typed semantic rendering (M03 P2 S2B T5) — see SOURCE_FILES.
   "renderer/semantic/render-ir.v1.js",
+  "renderer/semantic/semantic-ingress.v1.js",
   "renderer/content/content-renderer.v1.js",
 ]);
 

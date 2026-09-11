@@ -580,6 +580,104 @@ function renderSemanticBody(bodyEl, source){
   }
 }
 
+/*
+ * Author text recoverable from accepted Render IR blocks WITHOUT any HTML:
+ * text nodes only. Opaque HTML payloads are deliberately never included, so a
+ * fallback can never surface raw provider markup.
+ */
+function safeTextFromBlocks(blocks){
+  const out = [];
+  const walk = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (node.kind === "text" && typeof node.text === "string") out.push(node.text);
+    for (const key of ["children", "blocks", "items", "rows", "cells"]){
+      if (Array.isArray(node[key])) node[key].forEach(walk);
+    }
+  };
+  (Array.isArray(blocks) ? blocks : []).forEach(walk);
+  return out.join(" ").replace(/\s+/g, " ").trim();
+}
+
+/*
+ * Already-semantic blocks (Saved-Chat v3 via semantic ingress). No Markdown
+ * reparse: the owner contract does not mark v3 text parts as Markdown. Any
+ * renderer failure - including a refused owner-HTML block - falls back to the
+ * whole message's safe text, never to raw HTML, shared v1 HTML, provider
+ * outerHTML or a legacy parser.
+ */
+function renderSemanticBlocks(bodyEl, blocks){
+  const R = Studio.Renderer || {};
+  try {
+    const content = R.contentRenderer;
+    if (!content || !Array.isArray(blocks)) throw new Error("content renderer unavailable");
+    const fragment = content.renderBlocks(blocks, { document });
+    while (bodyEl.firstChild) bodyEl.removeChild(bodyEl.firstChild);
+    bodyEl.appendChild(fragment);
+    return true;
+  } catch {
+    return appendVerbatimBody(bodyEl, safeTextFromBlocks(blocks) || "Content unavailable");
+  }
+}
+
+/*
+ * Conforming Saved-Chat v3 -> Render IR through the accepted semantic ingress,
+ * BEFORE compatibility normalization could flatten typed content[] away. Any
+ * non-conforming v3 input (including an HTML part its owner did not mark
+ * sanitized) makes ingress throw, and this returns null: nothing new is
+ * trusted and the input takes the pre-existing path unchanged.
+ */
+function semanticV3Conversation(inputRaw){
+  const R = Studio.Renderer || {};
+  const ingress = R.semanticIngress;
+  const ir = R.renderIR;
+  if (!ingress || !ir || typeof ingress.fromSavedChatV3Snapshot !== "function") return null;
+  try {
+    if (ingress.detectSourceKind(inputRaw) !== ingress.sourceKinds.SAVED_CHAT_V3) return null;
+    const conversation = ingress.fromSavedChatV3Snapshot(inputRaw);
+    const verdict = ir.validate(conversation);
+    if (!verdict || verdict.ok !== true) return null;
+    return conversation;
+  } catch {
+    return null;
+  }
+}
+
+function buildSemanticConversation(container, conversation, snapRaw){
+  const messages = Array.isArray(conversation?.messages) ? conversation.messages : [];
+  const rawRows = Array.isArray(snapRaw?.messages) ? snapRaw.messages : [];
+  const assistantTurns = [];
+  let answerIdx = 0;
+  let turnNo = 0;
+
+  for (let i = 0; i < messages.length; i += 1){
+    const message = messages[i];
+    const role = normalizeRole(message?.role);
+    if (!role) continue;
+    const raw = rawRows[i] && typeof rawRows[i] === "object" ? rawRows[i] : {};
+    turnNo += 1;
+
+    const rowCreateTime = resolveSnapshotTurnCreateTime(snapRaw, raw, turnNo - 1);
+    const nextAnswerIdx = role === "assistant" ? (answerIdx + 1) : 0;
+    const { turn } = buildCanonicalTurn(role, "", {
+      turnNo,
+      answerIdx: nextAnswerIdx,
+      createTime: rowCreateTime,
+      messageId: raw.messageId || raw.id || "",
+      turnId: raw.turnId || "",
+      dir: message.dir || raw.dir || "",
+      attachments: raw.attachments,
+      semanticBlocks: message.blocks,
+    });
+    if (role === "assistant"){
+      answerIdx = nextAnswerIdx;
+      assistantTurns.push(turn);
+    }
+    container.appendChild(turn);
+  }
+
+  return assistantTurns;
+}
+
 function buildCanonicalMessage(role, text, meta = {}){
   const wrap = document.createElement("div");
   wrap.className = `cgMsg cgMsg--${role}`;
@@ -590,7 +688,11 @@ function buildCanonicalMessage(role, text, meta = {}){
 
   const bodyEl = document.createElement("div");
   bodyEl.className = "cgMsgBody";
-  renderSemanticBody(bodyEl, role === "user" ? cleanReaderUserText(text) : text);
+  if (Array.isArray(meta.semanticBlocks)){
+    renderSemanticBlocks(bodyEl, meta.semanticBlocks);
+  } else {
+    renderSemanticBody(bodyEl, role === "user" ? cleanReaderUserText(text) : text);
+  }
 
   wrap.appendChild(bodyEl);
 
@@ -878,6 +980,14 @@ function mountRichTurns(container, richTurns, snapshotId, snap, options){
   };
 }
 
+/* "" when the row carries no typed content[]; null when it cannot be
+ * fingerprinted, which conservatively defeats reuse rather than risking a stale
+ * render. */
+function typedContentKey(content){
+  if (!Array.isArray(content)) return "";
+  try { return JSON.stringify(content); } catch { return null; }
+}
+
 function normalizeRendererMessage(raw, idx, snapshot){
   const row = raw && typeof raw === "object" ? raw : {};
   const role = normalizeRole(row.role || row.author || row.type || "");
@@ -886,6 +996,11 @@ function normalizeRendererMessage(raw, idx, snapshot){
     order: Number.isFinite(Number(row.order)) ? Number(row.order) : idx,
     role,
     text: String(row.text ?? ""),
+    /* Saved-Chat v3 carries typed content[] instead of text. Exact-equivalence
+     * reuse must see that content, or two snapshots with the same identities
+     * but different typed parts would be treated as identical. This is a
+     * fingerprint only; rendering goes through semantic ingress. */
+    contentKey: typedContentKey(row.content),
     createTime: resolveSnapshotTurnCreateTime(snapshot, row, idx),
     messageId: String(row.messageId || row.id || "").trim(),
     turnId: String(row.turnId || "").trim(),
@@ -968,6 +1083,7 @@ function haveEquivalentRendererMessages(leftRaw, rightRaw){
     if (
       String(a.role || "") !== String(b.role || "")
       || String(a.text || "") !== String(b.text || "")
+      || a.contentKey === null || b.contentKey === null || a.contentKey !== b.contentKey
       || Number(a.createTime || 0) !== Number(b.createTime || 0)
       || String(a.messageId || "") !== String(b.messageId || "")
       || String(a.turnId || "") !== String(b.turnId || "")
@@ -1028,6 +1144,8 @@ function hasCompleteRichCoverage(input){
 
 function render(inputRaw, options){
   options = options && typeof options === "object" ? options : {};
+  /* Resolved before normalizeInput so typed v3 content[] is never flattened. */
+  const semanticConversation = semanticV3Conversation(inputRaw);
   const input = normalizeInput(inputRaw);
   const root = document.createElement("div");
   root.className = "cgFrame";
@@ -1072,7 +1190,12 @@ function render(inputRaw, options){
     renderMode = "canonical";
     turnsEl.classList.add("wbRichRoot");
     turnsEl.classList.remove("is-rich");
-    assistantTurnEls = buildCanonicalConversation(turnsEl, input);
+    /* Rich replay keeps its precedence untouched. In the canonical branch a
+     * conforming v3 snapshot renders its typed content semantically through the
+     * same H2O shells; everything else keeps the existing canonical path. */
+    assistantTurnEls = semanticConversation
+      ? buildSemanticConversation(turnsEl, semanticConversation, inputRaw)
+      : buildCanonicalConversation(turnsEl, input);
   }
 
   return {
@@ -1082,6 +1205,7 @@ function render(inputRaw, options){
     assistantTurnEls,
     mountedTurnCount: turnsEl.children.length,
     renderMode,
+    semanticSource: semanticConversation ? "savedChatSnapshotV3" : "",
   };
 }
 

@@ -113,6 +113,7 @@ function validateRendererInputContract() {
     'normalizeAttachmentRecord',
     'normalizeAttachments',
     'normalizeRichTurns',
+    'typedContentKey',
     'normalizeRendererMessage',
     'normalizeRendererMessages',
     'normalizeInput',
@@ -590,6 +591,11 @@ function createRendererBuildHarness(richResult) {
     Element: FakeScroll,
     TURNS_TESTID: 'conversation-turns',
     normalizeInput: (input) => input,
+    /* S2C/T11: render() first asks whether the input is a conforming Saved-Chat
+     * v3 snapshot. These decision scenarios are not v3, so the semantic branch
+     * must stay dormant and the rich/canonical decision must be unchanged. */
+    semanticV3Conversation: () => null,
+    buildSemanticConversation: () => { throw new Error('semantic branch must not run for non-v3 input'); },
     mountRichTurns: (container) => {
       richMountCalls += 1;
       for (let i = 0; i < richResult.mountedTurnCount; i += 1) container.appendChild({ kind: 'rich' });

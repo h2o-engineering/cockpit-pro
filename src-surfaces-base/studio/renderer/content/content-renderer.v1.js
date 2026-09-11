@@ -19,11 +19,12 @@
   const Studio = H2O.Studio = H2O.Studio || {};
   const Renderer = Studio.Renderer = Studio.Renderer || {};
 
-  /* Kinds this slice actually renders. */
+  /* Kinds this slice actually renders. opaqueProviderBlock joined in S2C/T11
+   * as a CONTROLLED kind: it never grants provider markup structural authority. */
   const CORE_KINDS = Object.freeze([
     "paragraph", "heading", "text", "list", "listItem", "blockquote",
     "codeBlock", "table", "tableRow", "tableCell", "image", "file",
-    "thematicBreak", "hardBreak",
+    "thematicBreak", "hardBreak", "opaqueProviderBlock",
   ]);
 
   /*
@@ -32,8 +33,13 @@
    * throws and the caller falls back to the whole-message verbatim path.
    */
   const RESERVED_EXTENSION_KINDS = Object.freeze([
-    "math", "citation", "toolCall", "toolResult", "artifact", "opaqueProviderBlock",
+    "math", "citation", "toolCall", "toolResult", "artifact",
   ]);
+
+  /* The two controlled opaque subtypes the accepted semantic ingress emits. */
+  const OPAQUE_OWNER_SANITIZED_HTML = "ownerSanitizedHtml";
+  const OPAQUE_UNSUPPORTED_OWNER_CONTENT = "unsupportedOwnerContent";
+  const HTML_MEDIA_TYPE = "text/html";
 
   const MARK_TAGS = Object.freeze({ strong: "strong", emphasis: "em", code: "code", strikethrough: "s" });
   const ALIGNMENTS = Object.freeze(["left", "center", "right"]);
@@ -55,7 +61,12 @@
    * admitted. Renderer.sanitizerPolicy is the only authority consulted.
    */
   function classify(context, value, urlContext) {
-    const policy = (context && context.urlPolicy) || Renderer.sanitizerPolicy;
+    /* An explicit override - even null - is honoured; only an absent key falls
+     * back to the installed authority. "No policy" must never silently
+     * upgrade to a global one. */
+    const policy = context && Object.prototype.hasOwnProperty.call(context, "urlPolicy")
+      ? context.urlPolicy
+      : Renderer.sanitizerPolicy;
     if (!policy || typeof policy.classifyUrl !== "function") {
       return { ok: false, reason: "url-policy-unavailable" };
     }
@@ -297,11 +308,83 @@
     return span;
   });
 
+  /* ------------------------------------------- controlled opaque content */
+
+  /*
+   * `ownerSanitized: true` is ONLY an ingress-admission signal, never live-DOM
+   * trust. Every HTML block reaching the live DOM passes through Renderer
+   * sanitizer v2's fragment path immediately before insertion; the sanitized
+   * fragment then lives INSIDE an H2O-owned node, so provider markup owns
+   * content and nothing else. Any missing piece fails closed: no HTML string is
+   * ever handed to innerHTML, insertAdjacentHTML, DOMParser or a template.
+   */
+  function liveHtmlSanitizer(context) {
+    /* Same rule as the URL policy: an explicit override, even null, is
+     * honoured and fails closed; only an absent key uses the installed v2. */
+    const sanitizer = context && Object.prototype.hasOwnProperty.call(context, "htmlSanitizer")
+      ? context.htmlSanitizer
+      : Renderer.htmlSanitizer;
+    if (!sanitizer || typeof sanitizer.sanitizeToFragment !== "function") {
+      throw new TypeError("contentRenderer: Renderer sanitizer v2 is unavailable; refusing owner HTML");
+    }
+    if (typeof sanitizer.isSupported === "function" && sanitizer.isSupported() !== true) {
+      throw new TypeError("contentRenderer: Renderer sanitizer v2 is unsupported here; refusing owner HTML");
+    }
+    return sanitizer;
+  }
+
+  function renderOwnerSanitizedHtml(block, context) {
+    if (block.opaqueKind !== OPAQUE_OWNER_SANITIZED_HTML
+      || block.mediaType !== HTML_MEDIA_TYPE
+      || block.ownerSanitized !== true
+      || typeof block.html !== "string") {
+      throw new TypeError("contentRenderer: ownerSanitizedHtml block does not match the accepted metadata shape");
+    }
+    const fragment = liveHtmlSanitizer(context).sanitizeToFragment(block.html);
+    if (!fragment || fragment.nodeType !== 11) {
+      throw new TypeError("contentRenderer: sanitizer v2 did not return a DocumentFragment");
+    }
+    const host = el(context, "div");
+    host.setAttribute("data-h2o-content-kind", "opaqueProviderBlock");
+    host.setAttribute("data-h2o-opaque-kind", OPAQUE_OWNER_SANITIZED_HTML);
+    host.appendChild(fragment);
+    return host;
+  }
+
+  /*
+   * Not HTML authority and not semantic support: an inert textual notice using
+   * only truthful, non-executable information the owner part already carries.
+   * Arbitrary owner objects are never stringified into the live DOM.
+   */
+  function renderUnsupportedOwnerContent(block, context) {
+    const type = asText(block.ownerContentType).trim() || "unknown";
+    const owner = block.ownerContent && typeof block.ownerContent === "object" ? block.ownerContent : null;
+    let label = "";
+    if (owner) {
+      for (const key of ["text", "label", "name", "title"]) {
+        if (typeof owner[key] === "string" && owner[key].trim()) { label = owner[key].trim(); break; }
+      }
+    }
+    const host = el(context, "div");
+    host.setAttribute("data-h2o-content-kind", "opaqueProviderBlock");
+    host.setAttribute("data-h2o-opaque-kind", OPAQUE_UNSUPPORTED_OWNER_CONTENT);
+    host.setAttribute("data-h2o-owner-content-type", type);
+    host.appendChild(textNode(context, label ? `Unsupported content (${type}): ${label}` : `Unsupported content: ${type}`));
+    return host;
+  }
+
+  register("opaqueProviderBlock", (block, context) => {
+    if (block.opaqueKind === OPAQUE_OWNER_SANITIZED_HTML) return renderOwnerSanitizedHtml(block, context);
+    if (block.opaqueKind === OPAQUE_UNSUPPORTED_OWNER_CONTENT) return renderUnsupportedOwnerContent(block, context);
+    throw new TypeError(`contentRenderer: unsupported opaqueProviderBlock subtype: ${block.opaqueKind || "<empty>"}`);
+  });
+
   Renderer.contentRenderer = Object.freeze({
     __installed: true,
     __version: API_VERSION,
     coreKinds: CORE_KINDS,
     extensionKinds: RESERVED_EXTENSION_KINDS,
+    opaqueKinds: Object.freeze([OPAQUE_OWNER_SANITIZED_HTML, OPAQUE_UNSUPPORTED_OWNER_CONTENT]),
     register,
     has,
     registeredKinds,

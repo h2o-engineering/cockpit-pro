@@ -105,6 +105,68 @@ check('sanitizerPolicy.classifyUrl is the only URL admission authority', () => {
   assert.match(source, /url-policy-unavailable/, 'a missing policy must deny, not admit');
 });
 
+/* ------------------------------------------------- Tier 1: S2C / T11 */
+
+check('opaqueProviderBlock is a controlled core kind; five extension kinds stay reserved', () => {
+  const cr = loadRegistry();
+  assert.equal(cr.has('opaqueProviderBlock'), true);
+  assert.deepEqual([...cr.extensionKinds].sort(), ['artifact', 'citation', 'math', 'toolCall', 'toolResult']);
+  assert.deepEqual([...cr.opaqueKinds].sort(), ['ownerSanitizedHtml', 'unsupportedOwnerContent']);
+  for (const kind of cr.extensionKinds) assert.equal(cr.has(kind), false, `${kind} must stay unregistered`);
+});
+
+check('ownerSanitizedHtml demands the exact accepted metadata shape before any sanitizer call', () => {
+  const cr = loadRegistry();
+  let sanitizerCalls = 0;
+  const context = { htmlSanitizer: { isSupported: () => true, sanitizeToFragment: () => { sanitizerCalls += 1; return { nodeType: 11 }; } } };
+  const good = { kind: 'opaqueProviderBlock', opaqueKind: 'ownerSanitizedHtml', mediaType: 'text/html', ownerSanitized: true, html: '<p>x</p>' };
+  const bad = [
+    { ...good, ownerSanitized: false },
+    { ...good, ownerSanitized: 'true' },
+    { ...good, mediaType: 'text/plain' },
+    { ...good, html: 42 },
+    { ...good, html: undefined },
+    { kind: 'opaqueProviderBlock', opaqueKind: 'somethingElse', html: '<p>x</p>' },
+  ];
+  for (const block of bad) {
+    assert.throws(() => cr.renderBlock(block, context), /metadata shape|unsupported opaqueProviderBlock subtype/,
+      `malformed opaque block was accepted: ${JSON.stringify(block)}`);
+  }
+  assert.equal(sanitizerCalls, 0, 'the sanitizer must never be reached for a malformed block');
+});
+
+check('owner HTML fails closed when sanitizer v2 is absent, unsupported, throwing, or returns a non-fragment', () => {
+  const cr = loadRegistry();
+  const block = { kind: 'opaqueProviderBlock', opaqueKind: 'ownerSanitizedHtml', mediaType: 'text/html', ownerSanitized: true, html: '<p>x</p>' };
+  const sandboxDoc = { createElement: () => { throw new Error('document must not be reached before the sanitizer verdict'); } };
+  assert.throws(() => cr.renderBlock(block, { document: sandboxDoc, htmlSanitizer: null }), /unavailable/);
+  assert.throws(() => cr.renderBlock(block, { document: sandboxDoc, htmlSanitizer: { isSupported: () => false, sanitizeToFragment: () => ({ nodeType: 11 }) } }), /unsupported/);
+  assert.throws(() => cr.renderBlock(block, { document: sandboxDoc, htmlSanitizer: { isSupported: () => true, sanitizeToFragment: () => { throw new Error('engine down'); } } }), /engine down/);
+  assert.throws(() => cr.renderBlock(block, { document: sandboxDoc, htmlSanitizer: { isSupported: () => true, sanitizeToFragment: () => '<p>x</p>' } }), /DocumentFragment/);
+});
+
+check('the S2C path has no HTML-string sink and names sanitizer v2 as the only live HTML authority', () => {
+  const content = read(CONTENT_REL);
+  assert.match(content, /sanitizeToFragment\(block\.html\)/, 'owner HTML must go through sanitizeToFragment');
+  for (const sink of [/\.innerHTML\s*=/, /insertAdjacentHTML\s*\(/, /new\s+DOMParser\s*\(/, /createContextualFragment\s*\(/, /\.outerHTML\s*=/]) {
+    assert.doesNotMatch(content, sink, `content renderer must not use ${sink}`);
+  }
+  assert.doesNotMatch(content, /Studio\.html\.sanitize|html-sanitizer\.js/, 'the shared v1 sanitizer must not be called');
+  assert.doesNotMatch(content, /JSON\.stringify\(block\.ownerContent|JSON\.stringify\(owner\b/, 'owner objects must not be stringified into the DOM');
+
+  const renderer = read(RENDERER_REL);
+  const s2c = renderer.slice(renderer.indexOf('function safeTextFromBlocks'), renderer.indexOf('function buildCanonicalMessage'));
+  assert.ok(s2c.length > 500, 'S2C helpers must be present in the Renderer');
+  for (const sink of [/innerHTML/, /insertAdjacentHTML/, /DOMParser/, /template/]) {
+    assert.doesNotMatch(s2c, sink, `S2C renderer path must not use ${sink}`);
+  }
+  assert.match(s2c, /fromSavedChatV3Snapshot/, 'v3 must be consumed through the accepted ingress');
+  assert.doesNotMatch(renderer, /\.contentText\b|\.contentHtml\b/, 'forbidden v3 scalar bodies must not be read');
+  /* The verbatim fallback derives text from text nodes only - never from html. */
+  assert.match(s2c, /node\.kind === "text"/);
+  assert.doesNotMatch(s2c.slice(0, s2c.indexOf('function renderSemanticBlocks')), /\.html\b/, 'safeTextFromBlocks must never read an html payload');
+});
+
 /* ------------------------------------------------------------ Tier 2 */
 
 async function resolvePlaywright() {
@@ -132,13 +194,19 @@ if (!chromium) {
     const rel = decodeURIComponent(req.url.split('?')[0]).replace(/^\/+/, '');
     if (rel === '__harness__') {
       const tags = [
+        'platform/selectors.contract.js',
+        'platform/html-sanitizer.js',
         'renderer/safety/sanitizer-policy.v1.js',
+        'renderer/safety/vendor/dompurify/purify.js',
+        'renderer/safety/html-sanitizer.v2.js',
         'renderer/markdown/vendor/markdown-it/markdown-it.umd.min.js',
         'renderer/markdown/h2o-gfm.v1.js',
         'renderer/markdown/markdown-engine.v1.js',
         'renderer/markdown/markdown-ir-adapter.v1.js',
         'renderer/semantic/render-ir.v1.js',
+        'renderer/semantic/semantic-ingress.v1.js',
         CONTENT_REL,
+        RENDERER_REL,
       ].map((r) => `<script src="./${r}"></script>`).join('\n');
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(`<!doctype html><meta charset="utf-8"><title>t5</title>\n${tags}\n<div id="host"></div>`);
@@ -316,6 +384,102 @@ if (!chromium) {
   check('an unregistered kind fails whole-message rather than rendering partially', () => {
     assert.equal(fallbackProof.threw, true, 'an unregistered kind must throw');
     assert.equal(fallbackProof.hostChildren, 0, 'no partial tree may reach the host');
+  });
+
+  /* ---------------------------------------------- Tier 2: S2C / T11 */
+
+  const s2c = await page.evaluate(() => {
+    globalThis.__h2oRan = false;
+    const R = globalThis.H2O.Studio.Renderer;
+    const cr = globalThis.H2O.Studio.chatRenderer;
+    const hostile = '<article id="pa" name="pn" data-h2o-turn="1" data-message-author-role="assistant">'
+      + '<script>globalThis.__h2oRan = true;</script>'
+      + '<p onclick="globalThis.__h2oRan = true" id="pp" data-h2o-block="b">kept <b>text</b></p>'
+      + '<a href="javascript:globalThis.__h2oRan = true">j</a><a href="/r">r</a><a href="#f">f</a><a href="//e.test/p">p</a>'
+      + '<a href="https://example.test/ok">ok</a><img src="x" onerror="globalThis.__h2oRan = true">'
+      + '<iframe src="https://e.test"></iframe><form><input><button>b</button></form><style>*{}</style>'
+      + '<svg onload="globalThis.__h2oRan = true"></svg><math><mi>m</mi></math></article>';
+    const snap = (parts) => ({ schema: 'h2o.savedChatSnapshot', schemaVersion: 3, chatId: 'c', snapshotId: 's',
+      messages: [{ id: 'a1', role: 'assistant', content: parts }] });
+    const q = (n, s) => Array.from(n.querySelectorAll(s));
+
+    /* 1. ownerSanitized alone never bypasses: hostile HTML marked sanitized is still sanitized live. */
+    const r1 = cr.render(snap([
+      { type: 'text', text: 'one' },
+      { type: 'html', sanitized: true, html: hostile },
+      { type: 'gizmo', name: 'Thing' },
+      { type: 'text', text: 'four' },
+    ]));
+    const body1 = r1.root.querySelector('[data-message-author-role="assistant"] .cgMsgBody');
+    const order = Array.from(body1.children).map((n) => n.tagName + ':' + (n.getAttribute('data-h2o-opaque-kind') || n.textContent));
+    const opaque = body1.querySelector('[data-h2o-opaque-kind="ownerSanitizedHtml"]');
+    const p = opaque && opaque.querySelector('p');
+    if (p) p.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    /* 2. malformed v3: html part without sanitized:true -> ingress refuses -> no HTML anywhere. */
+    const r2 = cr.render(snap([{ type: 'text', text: 'safe' }, { type: 'html', html: '<b>untrusted</b>' }]));
+
+    /* 3. sanitizer unavailable at the live sink -> message-level safe fallback with no HTML. */
+    const good = [{ kind: 'paragraph', children: [{ kind: 'text', text: 'kept text' }] },
+      { kind: 'opaqueProviderBlock', opaqueKind: 'ownerSanitizedHtml', mediaType: 'text/html', ownerSanitized: true, html: '<b>never</b>' }];
+    let threw = false, hostChildren = -1;
+    const host3 = document.createElement('div');
+    try { host3.appendChild(R.contentRenderer.renderBlocks(good, { document, htmlSanitizer: null })); } catch { threw = true; }
+    hostChildren = host3.childNodes.length;
+
+    return {
+      order,
+      roleHosts: q(r1.root, '[data-message-author-role]').length,
+      turns: q(r1.root, 'article.cgTurn').length,
+      opaqueText: opaque ? opaque.textContent.replace(/\s+/g, ' ').trim() : null,
+      liveHrefs: q(body1, 'a[href]').map((n) => n.getAttribute('href')),
+      removed: { script: q(body1, 'script').length, style: q(body1, 'style').length, iframe: q(body1, 'iframe').length, form: q(body1, 'form,input,button').length, svg: q(body1, 'svg').length, math: q(body1, 'math').length, structural: q(body1, 'article,main,section').length },
+      onAttrs: q(body1, '*').filter((n) => Array.from(n.attributes).some((a) => /^on/i.test(a.name))).length,
+      identity: q(body1, '[id],[name],[data-h2o-turn],[data-h2o-block],[data-message-author-role]').length,
+      ran: globalThis.__h2oRan,
+      unsupported: q(body1, '[data-h2o-opaque-kind="unsupportedOwnerContent"]').map((n) => n.textContent),
+      malformedSemantic: r2.semanticSource, malformedHtml: r2.root.querySelectorAll('b, [data-h2o-opaque-kind]').length,
+      malformedBodyText: r2.root.querySelector('.cgMsgBody')?.textContent ?? null,
+      noSanitizer: { threw, hostChildren },
+    };
+  });
+
+  check('v3 typed content order is preserved through ingress and the renderers', () => {
+    assert.deepEqual(s2c.order, ['P:one', 'DIV:ownerSanitizedHtml', 'DIV:unsupportedOwnerContent', 'P:four']);
+  });
+
+  check('ownerSanitized alone never bypasses live sanitization', () => {
+    assert.equal(s2c.removed.script, 0); assert.equal(s2c.removed.style, 0); assert.equal(s2c.removed.iframe, 0);
+    assert.equal(s2c.removed.form, 0); assert.equal(s2c.removed.svg, 0); assert.equal(s2c.removed.math, 0);
+    assert.equal(s2c.onAttrs, 0, 'no on* handler may survive');
+    assert.equal(s2c.ran, false, 'no script or handler may execute');
+    assert.equal(s2c.opaqueText.includes('kept text'), true, 'allowed semantic content must remain');
+  });
+
+  check('provider identity and structure cannot survive into the live DOM', () => {
+    assert.equal(s2c.identity, 0, 'id / name / data-h2o-* / role identity must be stripped');
+    assert.equal(s2c.removed.structural, 0, 'provider article/main/section must not survive');
+    assert.equal(s2c.roleHosts, 1, 'the fake provider role host must not create a second message host');
+    assert.equal(s2c.turns, 1);
+  });
+
+  check('unsafe URIs inside owner HTML never become live', () => {
+    assert.deepEqual(s2c.liveHrefs, ['https://example.test/ok']);
+  });
+
+  check('unsupportedOwnerContent stays inert text', () => {
+    assert.deepEqual(s2c.unsupported, ['Unsupported content (gizmo): Thing']);
+  });
+
+  check('malformed v3 HTML (owner did not mark sanitized) fails closed at ingress', () => {
+    assert.equal(s2c.malformedSemantic, '', 'non-conforming v3 must not take the semantic path');
+    assert.equal(s2c.malformedHtml, 0, 'no owner HTML may reach the DOM');
+    assert.doesNotMatch(String(s2c.malformedBodyText), /untrusted/, 'untrusted markup text must not be rendered');
+  });
+
+  check('a missing live sanitizer fails closed with no partial tree', () => {
+    assert.equal(s2c.noSanitizer.threw, true);
+    assert.equal(s2c.noSanitizer.hostChildren, 0);
   });
 
   await browser.close();

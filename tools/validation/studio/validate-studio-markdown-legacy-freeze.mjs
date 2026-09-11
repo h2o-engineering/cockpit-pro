@@ -256,13 +256,18 @@ check('studio.html, publisher and activator agree on the semantic load order', (
     'renderer/markdown/markdown-engine.v1.js',
     'renderer/markdown/markdown-ir-adapter.v1.js',
     'renderer/semantic/render-ir.v1.js',
+    'renderer/semantic/semantic-ingress.v1.js',
     'renderer/content/content-renderer.v1.js',
     'renderer/chat-renderer.studio.js',
   ]) {
     assert.ok(publisher.includes(name), `required order is missing ${name}`);
     assert.equal(refs.filter((r) => r === name).length, 1, `${name} must be loaded exactly once`);
   }
-  /* The consumer loads last. */
+  /* Dependency order inside the semantic chain, then the consumer last. */
+  assert.ok(refs.indexOf('renderer/semantic/semantic-ingress.v1.js') > refs.indexOf('renderer/semantic/render-ir.v1.js'),
+    'semantic ingress must load after the Render IR contract it builds on');
+  assert.ok(refs.indexOf('renderer/content/content-renderer.v1.js') > refs.indexOf('renderer/semantic/semantic-ingress.v1.js'),
+    'the ContentRenderer must load after semantic ingress');
   assert.ok(refs.indexOf('renderer/chat-renderer.studio.js')
     > refs.indexOf('renderer/content/content-renderer.v1.js'),
     'the Renderer must load after the ContentRenderer it consumes');

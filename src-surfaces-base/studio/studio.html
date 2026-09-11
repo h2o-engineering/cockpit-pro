@@ -673,6 +673,11 @@
        H2O-owned DOM. No Markdown HTML string and no innerHTML on that path.
        Must load before the Renderer that consumes them. -->
   <script src="./renderer/semantic/render-ir.v1.js"></script>
+  <!-- S2C/T11: semantic ingress now consumed - conforming Saved-Chat v3 typed
+       content[] becomes Render IR before any compatibility normalization.
+       Owner HTML parts reach the DOM only as sanitizer-v2 fragments inside
+       H2O-owned content nodes. -->
+  <script src="./renderer/semantic/semantic-ingress.v1.js"></script>
   <script src="./renderer/content/content-renderer.v1.js"></script>
   <!-- Canonical base transcript Renderer. Loads after the shared sanitizer
        and selector contract, and before studio.js Reader orchestration. -->
