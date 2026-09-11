@@ -810,11 +810,11 @@ function buildMessageHost(role, mode, meta = {}){
   if (mode === "rich"){
     /* Neutral H2O message host only. The role modifier is deliberately omitted
      * for rich replay: cgMsg--user carries the canonical bubble skin (padding,
-     * background, radius), which would wrap a second bubble around provider
-     * content that already contains .user-message-bubble-color. The
-     * owner-derived role attribute below stays - rich-replay CSS keys on it,
-     * and it is structural metadata, not presentation. Migrating that bubble
-     * boundary is the remaining S3A work, not this slice. */
+     * background, radius), and the rich user bubble is a separate H2O element
+     * beneath this host (adoptRichUserBubble) that carries that skin through
+     * the compatibility class, so the modifier would wrap a second bubble
+     * around it. The owner-derived role attribute below stays - rich-replay
+     * CSS keys on it, and it is structural metadata, not presentation. */
     messageEl.className = "cgMsg";
   } else {
     messageEl.className = `cgMsg cgMsg--${role}`;
@@ -887,6 +887,77 @@ function claimReplayIdentity(el, attrName, preferredRaw, seen){
     try { el.setAttribute(attrName, value); } catch { return ""; }
   }
   return value;
+}
+/*
+ * H2O rich user-bubble authority (M03 P3 S3A T6, slice B).
+ *
+ * The Renderer decides that a rich user message has exactly one bubble and
+ * creates that element itself. Provider markup may still supply the CONTENT
+ * inside the bubble, and its `user-message-bubble-color` marker is read only to
+ * locate where that bubble sits in the sanitized content; the provider element
+ * never survives as the bubble boundary, and several or nested markers cannot
+ * create more than one bubble.
+ *
+ * Presentation stays on the accepted compatibility path: the H2O bubble keeps
+ * `user-message-bubble-color` because Studio CSS and existing consumers key on
+ * it, and nothing else is taken from the provider element except a sanitized
+ * `dir` (bidi rendering). Identity is never copied: the message host owns role
+ * and identity, and the bubble is presentation-container structure beneath it.
+ * Owning that class as an explicit PresentationProfile is S3B.
+ *
+ * The bubble-boundary class vocabulary belongs to the Renderer as well: the
+ * compatibility marker and the H2O bubble classes are demoted wherever
+ * sanitized provider content carries them, so no content element can pose as
+ * the bubble or the rail.
+ *
+ * Only sanitized DOM reaches this seam (sanitizer v2 has already run), and it
+ * runs before post-sanitizer content projection.
+ */
+const USER_BUBBLE_COMPAT_CLASS = "user-message-bubble-color";
+const USER_BUBBLE_H2O_CLASSES = ["cgBubble", "cgBubble--user", "cgBubbleRail"];
+
+function buildRichUserBubbleShell(){
+  const bubble = document.createElement("div");
+  bubble.className = `cgBubble cgBubble--user ${USER_BUBBLE_COMPAT_CLASS}`;
+  return bubble;
+}
+
+function adoptRichUserBubble(messageEl){
+  if (!(messageEl instanceof Element)) return false;
+  messageEl.querySelectorAll(USER_BUBBLE_H2O_CLASSES.map((cls) => `.${cls}`).join(", ")).forEach((el) => {
+    el.classList.remove(...USER_BUBBLE_H2O_CLASSES);
+  });
+  const markers = Array.from(messageEl.querySelectorAll(`.${USER_BUBBLE_COMPAT_CLASS}`));
+  const outermost = markers.filter((el) => !markers.some((other) => other !== el && other.contains(el)));
+  const bubble = buildRichUserBubbleShell();
+
+  if (outermost.length === 1){
+    /* Provider bubble present: the H2O bubble takes its logical position, so
+     * the accepted bubble geometry (which keys on that position) is unchanged.
+     * Nested markers become plain content. */
+    const provider = outermost[0];
+    if (!provider.parentNode) return false;
+    const dir = String(provider.getAttribute("dir") || "").trim();
+    if (dir) bubble.setAttribute("dir", dir);
+    for (const el of markers){
+      if (el !== provider) el.classList.remove(USER_BUBBLE_COMPAT_CLASS);
+    }
+    while (provider.firstChild) bubble.appendChild(provider.firstChild);
+    provider.replaceWith(bubble);
+    return true;
+  }
+
+  /* No provider bubble, or several unrelated markers: one H2O bubble over the
+   * whole sanitized content in source order. The rail is the full-width
+   * scaffolding layer the accepted bubble CSS expects between the role host
+   * and the bubble; the provider wrapper supplies it when a bubble exists. */
+  for (const el of markers) el.classList.remove(USER_BUBBLE_COMPAT_CLASS);
+  const rail = document.createElement("div");
+  rail.className = "cgBubbleRail";
+  while (messageEl.firstChild) bubble.appendChild(messageEl.firstChild);
+  rail.appendChild(bubble);
+  messageEl.appendChild(rail);
+  return true;
 }
 function applyEditedMessageBody(messageEl, role, text){
   if (!(messageEl instanceof Element)) return;
@@ -985,6 +1056,9 @@ function mountRichTurns(container, richTurns, snapshotId, snap, options){
       /* The fragment carries a foreign inert ownerDocument; appendChild adopts
        * it, so no explicit import/adopt is needed. */
       messageEl.appendChild(fragment);
+      /* The Renderer decides that a rich user message has exactly one bubble;
+       * a user fragment that cannot be adopted fails the transcript closed. */
+      if (role === "user" && !adoptRichUserBubble(messageEl)) return fallbackResult;
       projectRichContent(messageEl);
       if (role === "user") cleanReaderUserTextNodeLeaks(host);
 

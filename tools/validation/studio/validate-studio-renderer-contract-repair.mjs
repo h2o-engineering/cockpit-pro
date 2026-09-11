@@ -54,6 +54,12 @@ function extractFunction(source, name) {
   throw new Error(`extractFunction: unterminated '${name}'`);
 }
 
+function extractConst(source, name) {
+  const match = new RegExp(`^const\\s+${name}\\s*=\\s*[^;]+;`, 'm').exec(source);
+  if (!match) throw new Error(`extractConst: '${name}' not found`);
+  return match[0];
+}
+
 function stripJsComments(source) {
   let out = '';
   let i = 0;
@@ -296,6 +302,8 @@ function createRichMountHarness() {
   const shells = [];
   const attachedUsers = [];
   const sanitizedContent = [];
+  const adoptions = [];
+  const order = [];
   const globals = {
     Element: FakeElement,
     normalizeRichTurns: (rows) => Array.isArray(rows) ? rows : [],
@@ -315,14 +323,22 @@ function createRichMountHarness() {
       turn.message = new FakeElement(role);
       return { turn, messageEl: turn.message };
     },
-    projectRichContent() {},
+    projectRichContent: (host) => { order.push(['project', host.role]); },
     cleanReaderUserTextNodeLeaks() {},
     getEditOverride: () => null,
     applyEditedMessageBody() {},
     attachUserAttachmentsToTurn: (host) => attachedUsers.push(host),
+    /* S3A slice B: the user-bubble adoption seam runs on the H2O message host
+     * after the sanitized fragment is appended; an unadoptable fragment must
+     * fail the whole transcript closed. */
+    adoptRichUserBubble: (host) => {
+      adoptions.push(host.role);
+      order.push(['adopt', host.role]);
+      return !(host.appended[0] && host.appended[0].html === 'UNADOPTABLE');
+    },
   };
   const { fn } = loadFunction(rendererSource, 'mountRichTurns', globals);
-  return { fn, decorated: shells, shells, attachedUsers, sanitizedContent };
+  return { fn, decorated: shells, shells, attachedUsers, sanitizedContent, adoptions, order };
 }
 
 function runRichMount(fn, rows) {
@@ -370,6 +386,21 @@ function validateRichMountContract() {
     assert.equal(result.assistantTurnEls[0].role, 'assistant');
     assert.deepEqual(h.decorated.map((row) => row.answerIdx), [0, 1, 0, 0], 'answer numbering must be assistant-only');
     assert.equal(h.attachedUsers.length, 1, 'user attachment decoration must remain user-only');
+    assert.deepEqual(h.adoptions, ['user'], 'rich user-bubble adoption must run for user turns only - assistant/system/tool get no invented bubble');
+    assert.deepEqual(h.order, [['adopt', 'user'], ['project', 'user'], ['project', 'assistant'], ['project', 'system'], ['project', 'tool']],
+      'user-bubble adoption must run on the sanitized host before post-sanitizer content projection');
+  }
+
+  {
+    const h = createRichMountHarness();
+    const { result, appended } = runRichMount(h.fn, [
+      { turnIdx: 1, role: 'assistant', outerHTML: 'assistant' },
+      { turnIdx: 2, role: 'user', outerHTML: 'UNADOPTABLE' },
+    ]);
+    assert.equal(result.fallbackRequired, true, 'a rich user fragment that cannot be adopted must request canonical fallback');
+    assert.equal(result.mountedTurnCount, 0);
+    assert.equal(appended.length, 0, 'adoption failure must not leave a partial mount - whole-transcript fallback stays atomic');
+    assert.deepEqual(h.adoptions, ['user']);
   }
 
   {
@@ -561,30 +592,68 @@ class FakeClassList {
   add(...values) { values.forEach((value) => this.values.add(value)); }
   remove(...values) { values.forEach((value) => this.values.delete(value)); }
   contains(value) { return this.values.has(value); }
+  get length() { return this.values.size; }
+  [Symbol.iterator]() { return this.values.values(); }
 }
 
-/* Tag-aware DOM fake for the structural seams: the Renderer now builds every
- * shell with createElement/setAttribute/appendChild, so the fake must model a
- * small element tree rather than an innerHTML string. */
+class FakeTextNode {
+  constructor(text) { this.nodeType = 3; this.nodeValue = String(text); this.parentNode = null; }
+  get textContent() { return this.nodeValue; }
+}
+
+/* Tag-aware DOM fake for the structural seams: the Renderer builds every shell
+ * with createElement/setAttribute/appendChild and now re-parents sanitized
+ * content (rich user-bubble adoption), so the fake models a small live tree:
+ * a node has one parent, moving it detaches it first, class state has a single
+ * source of truth, and querySelectorAll answers class selectors in document
+ * order. Only what the seams use is modelled. */
 class FakeDomElement {
   constructor(tagName = 'DIV') {
+    this.nodeType = 1;
     this.tagName = String(tagName).toUpperCase();
     this.attrs = new Map();
     this.classList = new FakeClassList();
     this.dataset = {};
     this.children = [];
     this.parentNode = null;
-    this.classNameValue = '';
   }
-  get className() { return this.classNameValue; }
+  get className() { return [...this.classList].join(' '); }
   set className(value) {
-    this.classNameValue = String(value);
-    this.classList.values = new Set(this.classNameValue.split(/\s+/).filter(Boolean));
+    this.classList.values = new Set(String(value).split(/\s+/).filter(Boolean));
   }
-  appendChild(node) {
-    this.children.push(node);
-    if (node && typeof node === 'object') node.parentNode = this;
+  get firstChild() { return this.children[0] || null; }
+  get childNodes() { return this.children.slice(); }
+  get textContent() { return this.children.map((child) => child.textContent ?? '').join(''); }
+  appendChild(node) { return this.insertBefore(node, null); }
+  insertBefore(node, ref) {
+    if (!node || typeof node !== 'object') throw new TypeError('insertBefore: not a node');
+    if (node.parentNode) node.parentNode.removeChild(node);
+    const idx = ref ? this.children.indexOf(ref) : -1;
+    if (ref && idx === -1) throw new Error('insertBefore: reference node is not a child');
+    if (idx === -1) this.children.push(node); else this.children.splice(idx, 0, node);
+    node.parentNode = this;
     return node;
+  }
+  removeChild(node) {
+    const idx = this.children.indexOf(node);
+    if (idx === -1) throw new Error('removeChild: not a child');
+    this.children.splice(idx, 1);
+    node.parentNode = null;
+    return node;
+  }
+  replaceWith(node) {
+    const parent = this.parentNode;
+    if (!parent) throw new Error('replaceWith: detached node');
+    parent.insertBefore(node, this);
+    parent.removeChild(this);
+  }
+  remove() { if (this.parentNode) this.parentNode.removeChild(this); }
+  insertAdjacentElement(position, node) {
+    const parent = this.parentNode;
+    if (!parent) throw new Error('insertAdjacentElement: detached node');
+    if (position === 'beforebegin') return parent.insertBefore(node, this);
+    if (position === 'afterend') return parent.insertBefore(node, parent.children[parent.children.indexOf(this) + 1] || null);
+    throw new Error(`insertAdjacentElement: unsupported position ${position}`);
   }
   addEventListener() {}
   contains(node) {
@@ -593,21 +662,43 @@ class FakeDomElement {
   }
   find(predicate) {
     for (const child of this.children) {
-      if (child && predicate(child)) return child;
+      if (child && child.nodeType === 1 && predicate(child)) return child;
       const nested = child && typeof child.find === 'function' ? child.find(predicate) : null;
       if (nested) return nested;
     }
     return null;
   }
-  querySelector(selector) {
-    if (selector === '.cgScroll') return this.find((node) => node.classList?.contains('cgScroll'));
-    return null;
+  /* Class selectors only ('.a' or '.a, .b'), matched over descendants in
+   * document order - the shape every structural seam under test uses. */
+  querySelectorAll(selector) {
+    const classes = String(selector).split(',').map((part) => part.trim());
+    if (!classes.length || classes.some((part) => !/^\.[A-Za-z0-9_-]+$/.test(part))) {
+      throw new Error(`FakeDomElement.querySelectorAll: unsupported selector ${selector}`);
+    }
+    const names = classes.map((part) => part.slice(1));
+    const out = [];
+    const walk = (node) => {
+      for (const child of node.children) {
+        if (child && child.nodeType === 1) {
+          if (names.some((name) => child.classList.contains(name))) out.push(child);
+          walk(child);
+        }
+      }
+    };
+    walk(this);
+    return out;
   }
-  querySelectorAll() { return []; }
-  setAttribute(name, value) { this.attrs.set(name, String(value)); }
-  getAttribute(name) { return this.attrs.has(name) ? this.attrs.get(name) : null; }
-  removeAttribute(name) { this.attrs.delete(name); }
-  hasAttribute(name) { return this.attrs.has(name); }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+  setAttribute(name, value) {
+    if (name === 'class') { this.className = value; return; }
+    this.attrs.set(name, String(value));
+  }
+  getAttribute(name) {
+    if (name === 'class') return this.classList.length ? this.className : null;
+    return this.attrs.has(name) ? this.attrs.get(name) : null;
+  }
+  removeAttribute(name) { if (name === 'class') this.className = ''; else this.attrs.delete(name); }
+  hasAttribute(name) { return name === 'class' ? this.classList.length > 0 : this.attrs.has(name); }
 }
 
 function createRendererBuildHarness(richResult) {
@@ -841,6 +932,255 @@ function validateStructuralShellAuthority() {
   assert.equal(calls.host, 1); assert.equal(calls.turn, 0);
 }
 
+/*
+ * M03 P3 S3A T6 slice B: the rich user bubble is Renderer-owned structure.
+ * Executes the real adoption seam on the real rich shells over a live DOM fake
+ * and proves the A-L contract of the slice.
+ */
+function validateRichUserBubbleAuthority() {
+  const mountFn = extractFunction(rendererSource, 'mountRichTurns');
+  const adoptFn = extractFunction(rendererSource, 'adoptRichUserBubble');
+  const shellFn = extractFunction(rendererSource, 'buildRichUserBubbleShell');
+
+  /* Source contract: the seam runs on the H2O host after the sanitized
+   * fragment is appended, before content projection, for user turns only, and
+   * fails closed; it re-parents sanitized nodes and never clones provider
+   * attributes or touches an HTML sink. */
+  const appendAt = mountFn.indexOf('messageEl.appendChild(fragment)');
+  const adoptAt = mountFn.indexOf('if (role === "user" && !adoptRichUserBubble(messageEl)) return fallbackResult;');
+  const projectAt = mountFn.indexOf('projectRichContent(messageEl)');
+  assert.ok(appendAt !== -1 && adoptAt !== -1 && projectAt !== -1, 'mountRichTurns must append, adopt and project the rich host');
+  assert.ok(appendAt < adoptAt && adoptAt < projectAt, 'user-bubble adoption must sit between fragment append and content projection');
+  assert.equal(mountFn.indexOf('adoptRichUserBubble('), mountFn.lastIndexOf('adoptRichUserBubble('), 'exactly one adoption call site');
+  for (const [name, source] of [['adoptRichUserBubble', adoptFn], ['buildRichUserBubbleShell', shellFn]]) {
+    assert.doesNotMatch(source, /innerHTML|outerHTML|insertAdjacentHTML|cloneNode|\.attributes\b|getAttributeNames/,
+      `${name} must build with DOM APIs on sanitized nodes and never clone provider attributes`);
+  }
+  assert.match(adoptFn, /buildRichUserBubbleShell\(\)/, 'the adopted bubble must come from the H2O bubble shell seam');
+  assert.match(extractConst(rendererSource, 'USER_BUBBLE_COMPAT_CLASS'), /"user-message-bubble-color"/, 'the compatibility class stays the provider marker consumers key on');
+  assert.match(shellFn, /createElement\("div"\)/, 'the bubble shell is a Renderer-created div');
+  assert.doesNotMatch(adoptFn, /setAttribute\("(id|name|data-[^"]*)"/, 'the seam must not stamp identity on the bubble');
+
+  const seamCalls = { bubble: 0 };
+  const sandbox = {
+    document: { createElement: (tagName) => new FakeDomElement(tagName) },
+    Element: FakeDomElement, String, Number, Set, Array, Object,
+    TESTID_ATTR: 'data-testid', TURN_TESTID: 'conversation-turn', ROLE_ATTR: 'data-message-author-role',
+    MESSAGE_ID_ATTR: 'data-message-id', TURN_ID_ATTR: 'data-turn-id', ROLES: roleContract,
+    stampReplayTurnMeta: () => {},
+    removeNativeUserAttachmentImages: () => {},
+    buildUserAttachmentGrid: () => { const grid = new FakeDomElement('div'); grid.className = 'cgUserAttachmentGrid'; return grid; },
+    seamCalls,
+  };
+  const context = vm.createContext(sandbox);
+  vm.runInContext([
+    extractFunction(rendererSource, 'normalizeRole'),
+    extractFunction(rendererSource, 'getAccessibleRoleLabel'),
+    extractFunction(rendererSource, 'applyTurnAccessibility'),
+    extractFunction(rendererSource, 'claimReplayIdentity'),
+    extractFunction(rendererSource, 'buildTurnShell'),
+    extractFunction(rendererSource, 'buildMessageHost'),
+    extractFunction(rendererSource, 'buildRichTurnShell'),
+    extractFunction(rendererSource, 'attachUserAttachmentsToTurn'),
+    extractConst(rendererSource, 'USER_BUBBLE_COMPAT_CLASS'),
+    extractConst(rendererSource, 'USER_BUBBLE_H2O_CLASSES'),
+    shellFn,
+    adoptFn,
+    'const __bubbleSeam = buildRichUserBubbleShell; buildRichUserBubbleShell = () => { seamCalls.bubble += 1; const b = __bubbleSeam(); b.__fromSeam = true; return b; };',
+    'this.api = { buildRichTurnShell, adoptRichUserBubble, attachUserAttachmentsToTurn };',
+  ].join('\n'), context);
+  const api = context.api;
+
+  const el = (tag, className = '', attrs = {}) => {
+    const node = new FakeDomElement(tag);
+    if (className) node.className = className;
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+    return node;
+  };
+  const text = (value) => new FakeTextNode(value);
+  const richUserShell = () => api.buildRichTurnShell('user', {
+    turnNo: 1, answerIdx: 0, createTime: 1, messageId: 'owner-m', turnId: 'owner-t', seenMessageIds: new Set(), seenTurnIds: new Set(),
+  });
+  const bubblesIn = (host) => host.querySelectorAll('.user-message-bubble-color');
+  const h2oBubblesIn = (host) => host.querySelectorAll('.cgBubble');
+  const IDENTITY_ATTRS = ['id', 'name', 'data-message-author-role', 'data-message-id', 'data-turn-id', 'data-h2o-id', 'data-h2o-turn', 'data-testid', 'onclick', 'role'];
+  const spoofAttrs = () => ({
+    id: 'spoof-id', name: 'spoof-name', 'data-message-author-role': 'assistant', 'data-message-id': 'SPOOF-MSG', 'data-turn-id': 'SPOOF-TURN',
+    'data-h2o-id': 'spoof', 'data-h2o-turn': '9', 'data-testid': 'conversation-turn-99', onclick: 'alert(1)', role: 'article',
+  });
+
+  /* The A-E bubble contract, applied to any adopted user host; also used as a
+   * RED control below so a seam that leaves the provider bubble in place is
+   * proven to be caught. */
+  const assertBubbleContract = (host, providerBubble) => {
+    const bubbles = bubblesIn(host);
+    assert.equal(bubbles.length, 1, 'A: exactly one user bubble after adoption');
+    const bubble = bubbles[0];
+    assert.equal(h2oBubblesIn(host).length, 1, 'A: exactly one H2O bubble');
+    assert.equal(bubble.__fromSeam, true, 'B: the bubble must be the element created by buildRichUserBubbleShell');
+    if (providerBubble) {
+      assert.notEqual(bubble, providerBubble, 'C: the provider bubble element must not be retained as the bubble');
+      assert.equal(host.contains(providerBubble), false, 'C: the provider bubble element must leave the tree');
+      assert.equal(providerBubble.parentNode, null, 'C: the provider bubble element is detached');
+    }
+    assert.equal(bubble.className, 'cgBubble cgBubble--user user-message-bubble-color',
+      'D: the bubble carries the H2O structural classes and the compatibility class only');
+    for (const name of IDENTITY_ATTRS) assert.equal(bubble.hasAttribute(name), false, `E: bubble must not carry provider ${name}`);
+    assert.equal(bubble.dataset.turnIdx, undefined, 'E: no dataset identity on the bubble');
+    for (const nested of bubble.querySelectorAll('.cgBubble, .user-message-bubble-color')) {
+      assert.fail(`no nested bubble: ${nested.className}`);
+    }
+    return bubble;
+  };
+
+  /* A-E + H + J: provider bubble present (accepted ChatGPT shape:
+   * wrapper > bubble > text), with spoofed identity on the provider bubble. */
+  {
+    const { turn, messageEl } = richUserShell();
+    const wrapper = el('div', 'flex w-full flex-col gap-1 items-end');
+    const provider = el('div', 'relative rounded-3xl px-5 py-2.5 user-message-bubble-color cgMsg cgMsg--user', spoofAttrs());
+    const p1 = el('p'); p1.appendChild(text('first '));
+    const p2 = el('p'); p2.appendChild(text('second'));
+    const mid = text('middle ');
+    provider.appendChild(p1); provider.appendChild(mid); provider.appendChild(p2);
+    wrapper.appendChild(provider); messageEl.appendChild(wrapper);
+    const before = messageEl.textContent;
+    seamCalls.bubble = 0;
+    assert.equal(api.adoptRichUserBubble(messageEl), true);
+    assert.equal(seamCalls.bubble, 1, 'B: one bubble shell per adopted host');
+    const bubble = assertBubbleContract(messageEl, provider);
+    assert.equal(bubble.parentNode, wrapper, 'the bubble takes the provider bubble\'s logical position');
+    assert.deepEqual(wrapper.children, [bubble], 'no sibling residue at the provider position');
+    assert.deepEqual(bubble.children, [p1, mid, p2], 'H: adopted children (elements and text) keep their order');
+    assert.equal(messageEl.textContent, before, 'H: text survives adoption');
+    assert.equal(messageEl.getAttribute('data-message-author-role'), 'user', 'J: host role untouched');
+    assert.equal(messageEl.getAttribute('data-message-id'), 'owner-m', 'J: host identity untouched');
+    assert.equal(messageEl.getAttribute('data-turn-id'), 'owner-t', 'J: host identity untouched');
+    assert.equal(messageEl.className, 'cgMsg', 'J: host stays the neutral rich host');
+    assert.deepEqual(turn.children, [messageEl], 'the bubble is beneath the host, never a turn child');
+    assert.equal(bubble.hasAttribute('dir'), false, 'no dir is invented');
+  }
+
+  /* Sanitized bidi presentation is the one provider attribute carried. */
+  {
+    const { messageEl } = richUserShell();
+    const provider = el('div', 'user-message-bubble-color', { dir: 'rtl', lang: 'ar', title: 'x' });
+    provider.appendChild(text('مرحبا')); messageEl.appendChild(provider);
+    assert.equal(api.adoptRichUserBubble(messageEl), true);
+    const bubble = assertBubbleContract(messageEl, provider);
+    assert.equal(bubble.getAttribute('dir'), 'rtl', 'sanitized dir is carried for bidi fidelity');
+    assert.equal(bubble.hasAttribute('lang'), false); assert.equal(bubble.hasAttribute('title'), false);
+  }
+
+  /* F + H: no provider bubble - the same H2O bubble over the whole content in
+   * source order, beneath the full-width rail the accepted CSS expects. */
+  {
+    const { messageEl } = richUserShell();
+    const p = el('p'); p.appendChild(text('para'));
+    const t = text(' tail');
+    messageEl.appendChild(text('lead ')); messageEl.appendChild(p); messageEl.appendChild(t);
+    const before = messageEl.textContent;
+    seamCalls.bubble = 0;
+    assert.equal(api.adoptRichUserBubble(messageEl), true);
+    assert.equal(seamCalls.bubble, 1);
+    const bubble = assertBubbleContract(messageEl, null);
+    assert.equal(messageEl.children.length, 1, 'F: the host has one child');
+    const rail = messageEl.children[0];
+    assert.equal(rail.className, 'cgBubbleRail', 'F: the rail is the full-width layer beneath the host');
+    assert.deepEqual(rail.children, [bubble], 'F: the rail holds the bubble only');
+    assert.equal(bubble.children.length, 3, 'F: all sanitized content moved into the bubble');
+    assert.equal(bubble.children[0].nodeValue, 'lead '); assert.equal(bubble.children[1], p); assert.equal(bubble.children[2], t);
+    assert.equal(messageEl.textContent, before, 'H: text survives the absent-bubble adoption');
+  }
+
+  /* Provider content posing as the H2O bubble or rail is demoted to content;
+   * the compatibility marker on it still locates the bubble position. */
+  {
+    const { messageEl } = richUserShell();
+    const wrapper = el('div', 'flex');
+    const provider = el('div', 'cgBubble cgBubble--user user-message-bubble-color'); provider.appendChild(text('posing'));
+    const railSpoof = el('div', 'cgBubbleRail keep-me'); railSpoof.appendChild(text(' rail'));
+    provider.appendChild(railSpoof);
+    wrapper.appendChild(provider); messageEl.appendChild(wrapper);
+    assert.equal(api.adoptRichUserBubble(messageEl), true);
+    const bubble = assertBubbleContract(messageEl, provider);
+    assert.equal(bubble.parentNode, wrapper);
+    assert.equal(railSpoof.parentNode, bubble, 'spoofed rail stays as ordered content');
+    assert.equal(railSpoof.className, 'keep-me', 'spoofed H2O bubble classes are demoted, other sanitized classes stay');
+    assert.equal(messageEl.querySelectorAll('.cgBubbleRail').length, 0, 'no provider element may pose as the rail');
+    assert.equal(messageEl.textContent, 'posing rail');
+  }
+
+  /* G: nested markers -> one bubble at the outermost marker; inner markers
+   * become plain content. */
+  {
+    const { messageEl } = richUserShell();
+    const wrapper = el('div');
+    const outer = el('div', 'user-message-bubble-color outer', spoofAttrs());
+    const inner = el('div', 'user-message-bubble-color inner');
+    const innermost = el('span', 'user-message-bubble-color innermost');
+    innermost.appendChild(text('deep'));
+    inner.appendChild(text('in ')); inner.appendChild(innermost);
+    outer.appendChild(text('out ')); outer.appendChild(inner);
+    wrapper.appendChild(outer); messageEl.appendChild(wrapper);
+    assert.equal(api.adoptRichUserBubble(messageEl), true);
+    const bubble = assertBubbleContract(messageEl, outer);
+    assert.equal(bubble.parentNode, wrapper);
+    assert.equal(inner.parentNode, bubble, 'G: inner marker stays as ordered content');
+    assert.equal(inner.className, 'inner', 'G: inner marker loses the bubble marker class');
+    assert.equal(innermost.className, 'innermost');
+    assert.equal(messageEl.textContent, 'out in deep');
+  }
+
+  /* G: several sibling markers -> one bubble, order preserved, no guessing. */
+  {
+    const { messageEl } = richUserShell();
+    const a = el('div', 'user-message-bubble-color'); a.appendChild(text('A'));
+    const between = el('p'); between.appendChild(text('B'));
+    const c = el('div', 'user-message-bubble-color'); c.appendChild(text('C'));
+    messageEl.appendChild(a); messageEl.appendChild(between); messageEl.appendChild(c);
+    assert.equal(api.adoptRichUserBubble(messageEl), true);
+    const bubble = assertBubbleContract(messageEl, null);
+    assert.equal(messageEl.children[0].className, 'cgBubbleRail');
+    assert.deepEqual(bubble.children, [a, between, c], 'G: content order preserved across normalized markers');
+    assert.equal(a.className, ''); assert.equal(c.className, '');
+    assert.equal(messageEl.textContent, 'ABC');
+  }
+
+  /* K: attachments keep their accepted position - before the host, never in
+   * the bubble - through the real attachment seam. */
+  {
+    const { turn, messageEl } = richUserShell();
+    const provider = el('div', 'user-message-bubble-color'); provider.appendChild(text('with attachments'));
+    messageEl.appendChild(provider);
+    assert.equal(api.adoptRichUserBubble(messageEl), true);
+    const bubble = assertBubbleContract(messageEl, provider);
+    api.attachUserAttachmentsToTurn(turn, messageEl, [{ kind: 'image', thumbnailSrc: 'https://x/y.png' }]);
+    assert.equal(turn.children.length, 2, 'K: attachment grid mounts beside the host');
+    assert.equal(turn.children[0].className, 'cgUserAttachmentGrid', 'K: grid precedes the host');
+    assert.equal(turn.children[1], messageEl);
+    assert.equal(bubble.querySelectorAll('.cgUserAttachmentGrid').length, 0, 'K: grid never lands inside the bubble');
+    assert.equal(turn.classList.contains('cgTurn--has-attachments'), true);
+  }
+
+  /* Fail-closed: a marker that cannot be replaced reports failure instead of
+   * guessing, so mountRichTurns falls the transcript back. */
+  {
+    assert.equal(api.adoptRichUserBubble(null), false, 'non-element input fails closed');
+    assert.equal(api.adoptRichUserBubble({}), false);
+  }
+
+  /* RED control: a lazy "adoption" that merely re-labels the provider bubble
+   * with the H2O classes must still fail the contract. */
+  {
+    const { messageEl } = richUserShell();
+    const provider = el('div', 'cgBubble cgBubble--user user-message-bubble-color', spoofAttrs()); provider.appendChild(text('kept'));
+    messageEl.appendChild(provider);
+    assert.throws(() => assertBubbleContract(messageEl, provider), /B: the bubble must be the element created/,
+      'non-vacuity: a retained provider bubble must fail the contract');
+  }
+}
+
 function validateExtractedRendererBoundary() {
   const sanitizerTag = '<script src="./platform/html-sanitizer.js"></script>';
   const rendererTag = '<script src="./renderer/chat-renderer.studio.js"></script>';
@@ -868,6 +1208,7 @@ validateRendererSanitizerV2Migration();
 validateProviderSpoofRejected();
 validateBuildFallbackDecision();
 validateStructuralShellAuthority();
+validateRichUserBubbleAuthority();
 validateExtractedRendererBoundary();
 
 console.log('Studio renderer contract repair validation passed');
