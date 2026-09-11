@@ -1,5 +1,5 @@
 /*
- * @version 1.0.0
+ * @version 1.0.1
  * H2O Studio Renderer — chatgpt-reference PresentationProfile stylesheet.
  *
  * Owner:   L-STUDIO-RENDERER
@@ -34,4 +34,81 @@
   text-transform:uppercase;
   letter-spacing:.04em;
   color:var(--wb-dim);
+}
+
+/* Canonical message skin: the host color, the user bubble and the assistant
+   host. Structural sizing (.cgMsg min-width) stays in studio.css. */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsg{
+  color:var(--wb-text);
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsg--user{
+  max-width:min(var(--wb-user-w), 44rem);
+  width:fit-content;
+  padding:10px 20px;
+  border-radius:var(--wb-radius-xl);
+  background:var(--wb-user-bg);
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsg--assistant{
+  background:transparent;
+}
+
+/* Canonical content body typography. The canonical renderer emits plain <p>,
+   so paragraphs are targeted by tag. */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsgBody{
+  font-size:16px;
+  line-height:1.625;
+  color:var(--wb-text);
+  word-break:break-word;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsgBody p{
+  margin:0 0 12px;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsgBody p:last-child{
+  margin-bottom:0;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsgBody pre{
+  margin:0;
+  overflow:auto;
+  padding:14px 16px;
+  border-radius:12px;
+  border:1px solid var(--wb-code-border);
+  background:var(--wb-code-bg);
+  font-family:var(--mono);
+  font-size:12.5px;
+  line-height:1.65;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsgBody code{
+  font-family:var(--mono);
+  font-size:.92em;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsgBody :not(pre) > code{
+  padding:.12em .4em;
+  border-radius:8px;
+  background:rgba(255,255,255,.08);
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsgBody a{
+  color:var(--tw-prose-links, var(--wb-focus));
+  text-decoration:underline;
+  text-underline-offset:2px;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsgBody a:hover{
+  color:var(--wb-text);
+}
+
+/* Narrow-viewport canonical user bubble. Kept beside its base rule so the
+   override still follows it in the cascade after relocation. */
+@media (max-width: 720px){
+  :where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsg--user{
+    width:fit-content;
+    max-width:min(100%, 42rem);
+  }
 }

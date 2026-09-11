@@ -2350,50 +2350,20 @@ body[data-layout="wide"] .cgScroll > *{
   justify-content:flex-start;
 }
 
+/* Structural sizing only. The canonical message skin (.cgMsg color,
+   .cgMsg--user / .cgMsg--assistant), the canonical content body
+   (.cgMsgBody, its p / pre / code / a rules) and the ChatGPT
+   reference-profile code-block presentation (.wbCodeBlock, .wbCodeLang) are
+   owned by the Renderer stylesheet
+   renderer/presentation/chatgpt-reference.v1.css, linked after this file. */
 .cgMsg{
   min-width:0;
-  color:var(--wb-text);
-}
-
-.cgMsg--user{
-  max-width:min(var(--wb-user-w), 44rem);
-  width:fit-content;
-  padding:10px 20px;
-  border-radius:var(--wb-radius-xl);
-  background:var(--wb-user-bg);
-}
-
-.cgMsg--assistant{
-  background:transparent;
 }
 
 .cgMsg--rich{
   width:100%;
 }
 
-.cgMsgBody{
-  font-size:16px;
-  line-height:1.625;
-  color:var(--wb-text);
-  word-break:break-word;
-}
-
-/* Canonical renderer emits plain <p> (no class), so target the tag.
-   Pre-fix this rule targeted `.cgMsgBody .p` which never matched, and
-   paragraphs fell back to the browser-default 1em margin. */
-.cgMsgBody p{
-  margin:0 0 12px;
-}
-
-.cgMsgBody p:last-child{
-  margin-bottom:0;
-}
-
-/* ChatGPT reference-profile code-block presentation (.wbCodeBlock,
-   .wbCodeLang) is owned by the Renderer stylesheet
-   renderer/presentation/chatgpt-reference.v1.css, linked after this file. */
-
-.cgMsgBody pre,
 .wbRichRoot pre{
   margin:0;
   overflow:auto;
@@ -2406,27 +2376,15 @@ body[data-layout="wide"] .cgScroll > *{
   line-height:1.65;
 }
 
-.cgMsgBody code,
 .wbRichRoot code{
   font-family:var(--mono);
   font-size:.92em;
 }
 
-.cgMsgBody :not(pre) > code,
 .wbRichRoot :not(pre) > code{
   padding:.12em .4em;
   border-radius:8px;
   background:rgba(255,255,255,.08);
-}
-
-.cgMsgBody a{
-  color:var(--tw-prose-links, var(--wb-focus));
-  text-decoration:underline;
-  text-underline-offset:2px;
-}
-
-.cgMsgBody a:hover{
-  color:var(--wb-text);
 }
 
 .wbFrozen{
@@ -2987,7 +2945,6 @@ body[data-route="reader"] .cgScroll .cgxui-mnmp-wash-orange::before{ background:
     padding:10px 6px 48px;
   }
 
-  .cgMsg--user,
   .wbRichRoot :where([data-message-author-role="user"]):not(:has(.user-message-bubble-color)),
   .wbRichRoot :where(.user-message-bubble-color){
     width:fit-content;

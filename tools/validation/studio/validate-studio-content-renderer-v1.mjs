@@ -261,20 +261,30 @@ check('the content renderer embeds no presentation class map and stays semantics
 
 function stripCssComments(source) { return source.replace(/\/\*[\s\S]*?\*\//g, ' '); }
 
-/* Parse a small plain stylesheet into [{ selector, declarations: {prop: value} }]. */
+/* Parse a plain stylesheet into [{ selector, declarations, media, index }],
+ * tracking the enclosing @media prelude (one level, which is all the Studio
+ * stylesheets use) so responsive overrides are distinguishable from base rules. */
 function parseRules(css) {
+  const src = stripCssComments(css);
   const rules = [];
-  const re = /([^{}]+)\{([^{}]*)\}/g;
-  let m;
-  while ((m = re.exec(stripCssComments(css))) !== null) {
-    const selector = m[1].trim();
+  let i = 0; let media = null; let depth = 0;
+  while (i < src.length) {
+    const open = src.indexOf('{', i);
+    if (open === -1) break;
+    const prelude = src.slice(i, open).trim();
+    if (prelude.startsWith('@media')) { media = prelude.slice(6).trim(); depth += 1; i = open + 1; continue; }
+    const close = src.indexOf('}', open);
+    if (close === -1) break;
     const declarations = {};
-    for (const part of m[2].split(';')) {
-      const i = part.indexOf(':');
-      if (i === -1) continue;
-      declarations[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+    for (const part of src.slice(open + 1, close).split(';')) {
+      const k = part.indexOf(':');
+      if (k === -1) continue;
+      declarations[part.slice(0, k).trim()] = part.slice(k + 1).trim();
     }
-    rules.push({ selector, declarations });
+    rules.push({ selector: prelude, declarations, media, index: rules.length });
+    i = close + 1;
+    /* Leave the @media block when its closing brace is next. */
+    while (depth > 0 && /^\s*\}/.test(src.slice(i))) { i = src.indexOf('}', i) + 1; depth -= 1; if (depth === 0) media = null; }
   }
   return rules;
 }
@@ -297,7 +307,7 @@ check('the Renderer-owned chatgpt-reference stylesheet exists, is profile-scoped
     assert.ok(rule.selector.startsWith(`:where([${PROFILE_MARKER}]) `), `B: every rule is scoped to the profile marker with zero-specificity :where(): ${rule.selector}`);
   }
   assert.doesNotMatch(stripCssComments(css), /!important/, 'no !important escalation');
-  const byClass = (cls) => rules.filter((r) => r.selector === `:where([${PROFILE_MARKER}]) .${cls}`);
+  const byClass = (cls) => rules.filter((r) => r.selector === `:where([${PROFILE_MARKER}]) .${cls}` && r.media === null);
   assert.equal(byClass('wbCodeBlock').length, 1, 'C: exactly one wbCodeBlock rule');
   assert.deepEqual(byClass('wbCodeBlock')[0].declarations, CODE_BLOCK_DECLARATIONS, 'C: the effective wbCodeBlock declarations moved verbatim');
   assert.equal(byClass('wbCodeLang').length, 1, 'D: exactly one wbCodeLang rule');
@@ -317,8 +327,8 @@ check('global studio.css no longer declares the migrated code selectors', () => 
   const css = stripCssComments(read(STUDIO_CSS_REL));
   assert.doesNotMatch(css, /\.wbCodeBlock\b/, 'E: .wbCodeBlock must not be declared in studio.css');
   assert.doesNotMatch(css, /\.wbCodeLang\b/, 'E: .wbCodeLang must not be declared in studio.css');
-  /* The generic pre/code rules stay global in this slice. */
-  assert.match(css, /\.cgMsgBody pre,\s*\.wbRichRoot pre\{/, 'generic pre rules remain in studio.css');
+  /* The rich half of the split pre rule stays global (slice B moved the canonical half). */
+  assert.match(css, /\n\.wbRichRoot pre\{/, 'rich pre rule remains in studio.css');
 });
 
 /* Imported at top level: check() is synchronous, so a promise handed to it
@@ -336,6 +346,78 @@ check('studio.html links the profile stylesheet exactly once, after studio.css, 
   }
   assert.equal(packer.ARCHIVE_WORKBENCH_SOURCE_FILES.indexOf(PROFILE_CSS_REL) - packer.ARCHIVE_WORKBENCH_SOURCE_FILES.indexOf(PROFILE_REL),
     packer.ARCHIVE_WORKBENCH_OUT_FILES.indexOf(PROFILE_CSS_REL) - packer.ARCHIVE_WORKBENCH_OUT_FILES.indexOf(PROFILE_REL), 'G: source/output parity around the presentation entries');
+});
+
+const SCOPE = `:where([${PROFILE_MARKER}])`;
+const CANONICAL_MESSAGE_RULES = {
+  '.cgMsg': { color: 'var(--wb-text)' },
+  '.cgMsg--user': { 'max-width': 'min(var(--wb-user-w), 44rem)', width: 'fit-content', padding: '10px 20px', 'border-radius': 'var(--wb-radius-xl)', background: 'var(--wb-user-bg)' },
+  '.cgMsg--assistant': { background: 'transparent' },
+  '.cgMsgBody': { 'font-size': '16px', 'line-height': '1.625', color: 'var(--wb-text)', 'word-break': 'break-word' },
+  '.cgMsgBody p': { margin: '0 0 12px' },
+  '.cgMsgBody p:last-child': { 'margin-bottom': '0' },
+  '.cgMsgBody pre': { margin: '0', overflow: 'auto', padding: '14px 16px', 'border-radius': '12px', border: '1px solid var(--wb-code-border)', background: 'var(--wb-code-bg)', 'font-family': 'var(--mono)', 'font-size': '12.5px', 'line-height': '1.65' },
+  '.cgMsgBody code': { 'font-family': 'var(--mono)', 'font-size': '.92em' },
+  '.cgMsgBody :not(pre) > code': { padding: '.12em .4em', 'border-radius': '8px', background: 'rgba(255,255,255,.08)' },
+  '.cgMsgBody a': { color: 'var(--tw-prose-links, var(--wb-focus))', 'text-decoration': 'underline', 'text-underline-offset': '2px' },
+  '.cgMsgBody a:hover': { color: 'var(--wb-text)' },
+};
+const NARROW_USER_OVERRIDE = { width: 'fit-content', 'max-width': 'min(100%, 42rem)' };
+
+check('canonical message / content-body presentation lives in the profile stylesheet with its responsive override (S3C slice B)', () => {
+  const rules = parseRules(read(PROFILE_CSS_REL));
+  const byScoped = (sel, media = null) => rules.filter((r) => r.selector === `${SCOPE} ${sel}` && r.media === media);
+  for (const [sel, decls] of Object.entries(CANONICAL_MESSAGE_RULES)) {
+    const found = byScoped(sel);
+    assert.equal(found.length, 1, `A/B: exactly one profile-scoped base rule for ${sel}`);
+    assert.deepEqual(found[0].declarations, decls, `A: ${sel} declarations moved verbatim`);
+  }
+  /* H: the narrow override follows the base rule inside the same stylesheet. */
+  const base = byScoped('.cgMsg--user')[0];
+  const narrow = byScoped('.cgMsg--user', '(max-width: 720px)');
+  assert.equal(narrow.length, 1, 'H: the narrow canonical user-bubble override is migrated with the base rule');
+  assert.deepEqual(narrow[0].declarations, NARROW_USER_OVERRIDE);
+  assert.ok(narrow[0].index > base.index, 'H: the override must follow the base rule so it still wins at equal specificity');
+  for (const rule of rules) assert.ok(rule.selector.startsWith(`${SCOPE} `), `B: every rule is profile-scoped: ${rule.selector}`);
+  assert.doesNotMatch(stripCssComments(read(PROFILE_CSS_REL)), /!important/);
+});
+
+check('studio.css keeps only structural .cgMsg sizing and the rich halves of the split pre/code rules', () => {
+  const rules = parseRules(read(STUDIO_CSS_REL));
+  const members = (r) => r.selector.split(',').map((x) => x.trim());
+  /* C: no canonical presentation authority remains in the global sheet. */
+  for (const sel of Object.keys(CANONICAL_MESSAGE_RULES)) {
+    if (sel === '.cgMsg') continue;
+    const dup = rules.filter((r) => members(r).includes(sel));
+    assert.equal(dup.length, 0, `C: studio.css must not declare ${sel} (found in ${dup.map((r) => r.selector).join(' | ')})`);
+  }
+  /* D: structural sizing stays global, the color moved. */
+  const cgMsg = rules.filter((r) => r.selector === '.cgMsg');
+  assert.equal(cgMsg.length, 1);
+  assert.deepEqual(cgMsg[0].declarations, { 'min-width': '0' }, 'D: global .cgMsg keeps only structural min-width');
+  /* E: the rich halves survive as standalone rules with the same values. */
+  const richPre = rules.filter((r) => r.selector === '.wbRichRoot pre' && r.media === null);
+  assert.equal(richPre.length, 1); assert.deepEqual(richPre[0].declarations, CANONICAL_MESSAGE_RULES['.cgMsgBody pre'], 'E: rich pre values unchanged');
+  const richCode = rules.filter((r) => r.selector === '.wbRichRoot code' && r.media === null);
+  assert.equal(richCode.length, 1); assert.deepEqual(richCode[0].declarations, CANONICAL_MESSAGE_RULES['.cgMsgBody code'], 'E: rich code values unchanged');
+  const richInline = rules.filter((r) => r.selector === '.wbRichRoot :not(pre) > code' && r.media === null);
+  assert.equal(richInline.length, 1); assert.deepEqual(richInline[0].declarations, CANONICAL_MESSAGE_RULES['.cgMsgBody :not(pre) > code'], 'E: rich inline-code values unchanged');
+  const narrowRich = rules.filter((r) => r.media === '(max-width: 720px)' && members(r).includes('.wbRichRoot :where(.user-message-bubble-color)'));
+  assert.equal(narrowRich.length, 1, 'E: the narrow rich user rule stays global');
+  assert.deepEqual(narrowRich[0].declarations, NARROW_USER_OVERRIDE);
+  assert.equal(members(narrowRich[0]).includes('.cgMsg--user'), false, 'C: the canonical member left the global narrow rule');
+  /* I: Reader-route, edit-state and rich rules were not absorbed. */
+  assert.ok(rules.some((r) => members(r).includes('body[data-route="reader"] .cgMsg--user')), 'I: Reader-route user rule remains global');
+  assert.ok(rules.some((r) => r.selector === '.cgMsg--edited'), 'I: edit-state rule remains global');
+  assert.ok(rules.some((r) => members(r).includes('.wbReader[data-edit-mode="on"] [data-turn].wbTurn--editing .cgMsg--user')), 'I: edit-mode user rule remains global');
+  assert.ok(rules.some((r) => r.selector === '.cgMsg--rich'), 'stale .cgMsg--rich left untouched in this slice');
+});
+
+check('profile stylesheet @version and the studio.html cache query match exactly', () => {
+  const version = /@version\s+(\d+\.\d+\.\d+)/.exec(read(PROFILE_CSS_REL))?.[1];
+  const link = new RegExp(`href="\\./${PROFILE_CSS_REL.replace(/[.]/g, '\\.')}\\?v=(\\d+\\.\\d+\\.\\d+)"`).exec(read(STUDIO_HTML_REL))?.[1];
+  assert.ok(version, 'profile stylesheet carries an @version');
+  assert.equal(link, version, `J: studio.html ?v= (${link}) must equal the profile stylesheet @version (${version})`);
 });
 
 /* ------------------------------------------------------------ Tier 2 */
@@ -475,6 +557,37 @@ if (!chromium) {
       htmlHasScript: /<script/i.test(host.innerHTML),
     };
   }, SOURCE);
+
+  /* S3C slice B: the canonical user-bubble base rule and its narrow override
+   * now live together in the profile stylesheet. A probe .cgMsg--user directly
+   * under the marked host (outside any .wbRichRoot / .wbReader / reader-route
+   * scaffolding, which carry higher-specificity rules) exposes exactly that
+   * base/override pair at equal specificity. */
+  const PROBE = () => {
+    const host = document.getElementById('host');
+    const probe = document.createElement('div'); probe.className = 'cgMsg cgMsg--user'; probe.textContent = 'probe';
+    host.appendChild(probe);
+    const cs = getComputedStyle(probe);
+    const out = { maxWidth: cs.maxWidth, width: cs.width, padding: cs.padding, borderRadius: cs.borderRadius, background: cs.backgroundColor, color: cs.color, viewport: innerWidth };
+    probe.remove();
+    return out;
+  };
+  const cascade = { normal: await page.evaluate(PROBE) };
+  await page.setViewportSize({ width: 480, height: 800 });
+  cascade.narrow = await page.evaluate(PROBE);
+  await page.setViewportSize({ width: 1280, height: 720 });
+
+  check('canonical user-bubble base rule and narrow override cascade correctly from the profile stylesheet (S3C slice B)', () => {
+    assert.ok(cascade.normal.viewport > 720 && cascade.narrow.viewport <= 720, 'probe ran at both widths');
+    assert.equal(cascade.normal.maxWidth, 'min(70%, 704px)', 'H: base max-width min(var(--wb-user-w), 44rem) at normal width');
+    assert.equal(cascade.narrow.maxWidth, 'min(100%, 672px)', 'H: the migrated narrow override min(100%, 42rem) wins at <= 720px');
+    for (const probe of [cascade.normal, cascade.narrow]) {
+      /* width:fit-content resolves to a used px value in getComputedStyle; the shrink-wrap is proven by it being far below the host width. */
+      assert.ok(parseFloat(probe.width) > 0 && parseFloat(probe.width) < 200, `fit-content user bubble shrink-wraps its text (${probe.width})`);
+      assert.equal(probe.padding, '10px 20px'); assert.equal(probe.borderRadius, '24px');
+      assert.notEqual(probe.background, 'rgba(0, 0, 0, 0)', 'user bubble background comes from the shared --wb-user-bg token');
+    }
+  });
 
   check('representative Markdown renders as semantic DOM without fallback', () => {
     assert.deepEqual(pageErrors, [], `page errors: ${pageErrors.join(' | ')}`);
