@@ -20,6 +20,15 @@ const RENDERER_REL = 'src-surfaces-base/studio/renderer/chat-renderer.studio.js'
 const STUDIO_HTML_REL = 'src-surfaces-base/studio/studio.html';
 const ARCHIVE_REL = 'src-surfaces-base/studio/S0D3a. 🎬 Transcript Archive Engine - Studio.js';
 const SANITIZER_REL = 'src-surfaces-base/studio/platform/html-sanitizer.js';
+const PRESENTATION_PROFILE_REL = 'src-surfaces-base/studio/renderer/presentation/presentation-profile.v1.js';
+const SEMANTIC_SOURCE_RELS = Object.freeze([
+  'src-surfaces-base/studio/renderer/semantic/render-ir.v1.js',
+  'src-surfaces-base/studio/renderer/semantic/semantic-ingress.v1.js',
+  'src-surfaces-base/studio/renderer/markdown/h2o-gfm.v1.js',
+  'src-surfaces-base/studio/renderer/markdown/markdown-engine.v1.js',
+  'src-surfaces-base/studio/renderer/markdown/markdown-ir-adapter.v1.js',
+  'src-surfaces-base/studio/renderer/content/content-renderer.v1.js',
+]);
 
 function readRepo(rel) {
   return fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');
@@ -82,6 +91,22 @@ function stripJsComments(source) {
 
 const studioSource = readRepo(STUDIO_REL);
 const rendererSource = readRepo(RENDERER_REL);
+const presentationProfileSource = readRepo(PRESENTATION_PROFILE_REL);
+
+/* The REAL PresentationProfile module, installed into an isolated fake window
+ * so executed shell seams consume the real reference profile. */
+function installPresentationProfile(context) {
+  vm.runInContext(`${presentationProfileSource}\nthis.__presentationProfileApi = this.H2O.Studio.Renderer.presentationProfile;`, context);
+  return context.__presentationProfileApi;
+}
+
+/* The Renderer's own resolver, extracted verbatim, bound to a sandbox whose
+ * Studio namespace carries (or deliberately lacks) the real profile API. */
+function presentationProfileGlobals(context, { withProfile = true } = {}) {
+  const Studio = { Renderer: {} };
+  if (withProfile) Studio.Renderer.presentationProfile = installPresentationProfile(context);
+  return { Studio, PRESENTATION_PROFILE_ATTR: 'data-h2o-presentation-profile' };
+}
 const studioHtmlSource = readRepo(STUDIO_HTML_REL);
 const archiveSource = readRepo(ARCHIVE_REL);
 const roleContract = {
@@ -732,7 +757,14 @@ function createRendererBuildHarness(richResult) {
     Object,
   };
   const context = vm.createContext(sandbox);
-  vm.runInContext(`${extractFunction(rendererSource, 'hasCompleteRichCoverage')}\n${extractFunction(rendererSource, 'buildConversationShell')}\n${extractFunction(rendererSource, 'render')}\nthis.result = render;`, context);
+  Object.assign(sandbox, presentationProfileGlobals(context));
+  vm.runInContext([
+    extractFunction(rendererSource, 'activePresentationProfile'),
+    extractFunction(rendererSource, 'hasCompleteRichCoverage'),
+    extractFunction(rendererSource, 'buildConversationShell'),
+    extractFunction(rendererSource, 'render'),
+    'this.result = render;',
+  ].join('\n'), context);
   return {
     fn: context.result,
     getCanonicalCalls: () => canonicalCalls,
@@ -838,7 +870,9 @@ function validateStructuralShellAuthority() {
     calls,
   };
   const context = vm.createContext(sandbox);
+  Object.assign(sandbox, presentationProfileGlobals(context));
   vm.runInContext([
+    extractFunction(rendererSource, 'activePresentationProfile'),
     extractFunction(rendererSource, 'normalizeRole'),
     extractFunction(rendererSource, 'getAccessibleRoleLabel'),
     extractFunction(rendererSource, 'applyTurnAccessibility'),
@@ -860,6 +894,8 @@ function validateStructuralShellAuthority() {
   const shell = api.buildConversationShell({ title: 'T', chatId: 'c1', projectId: 'p1' });
   assert.equal(shell.root.className, 'cgFrame');
   assert.deepEqual(shell.root.dataset, { chatTitle: 'T', chatId: 'c1', projectId: 'p1' });
+  assert.equal(shell.root.getAttribute('data-h2o-presentation-profile'), 'chatgpt-reference',
+    'the conversation root carries the active presentation profile marker');
   const body = shell.root.children[0]; const thread = body.children[0]; const scroll = thread.children[0];
   assert.equal(body.className, 'cgBody'); assert.equal(thread.className, 'cgThread');
   assert.equal(scroll, shell.turnsEl, 'turnsEl must be the section inside cgThread');
@@ -957,7 +993,7 @@ function validateRichUserBubbleAuthority() {
       `${name} must build with DOM APIs on sanitized nodes and never clone provider attributes`);
   }
   assert.match(adoptFn, /buildRichUserBubbleShell\(\)/, 'the adopted bubble must come from the H2O bubble shell seam');
-  assert.match(extractConst(rendererSource, 'USER_BUBBLE_COMPAT_CLASS'), /"user-message-bubble-color"/, 'the compatibility class stays the provider marker consumers key on');
+  assert.match(adoptFn, /activePresentationProfile\(\)\.userBubbleMarkerClass\(\)/, 'the provider marker class comes from the active presentation profile');
   assert.match(shellFn, /createElement\("div"\)/, 'the bubble shell is a Renderer-created div');
   assert.doesNotMatch(adoptFn, /setAttribute\("(id|name|data-[^"]*)"/, 'the seam must not stamp identity on the bubble');
 
@@ -973,6 +1009,7 @@ function validateRichUserBubbleAuthority() {
     seamCalls,
   };
   const context = vm.createContext(sandbox);
+  Object.assign(sandbox, presentationProfileGlobals(context));
   vm.runInContext([
     extractFunction(rendererSource, 'normalizeRole'),
     extractFunction(rendererSource, 'getAccessibleRoleLabel'),
@@ -982,7 +1019,7 @@ function validateRichUserBubbleAuthority() {
     extractFunction(rendererSource, 'buildMessageHost'),
     extractFunction(rendererSource, 'buildRichTurnShell'),
     extractFunction(rendererSource, 'attachUserAttachmentsToTurn'),
-    extractConst(rendererSource, 'USER_BUBBLE_COMPAT_CLASS'),
+    extractFunction(rendererSource, 'activePresentationProfile'),
     extractConst(rendererSource, 'USER_BUBBLE_H2O_CLASSES'),
     shellFn,
     adoptFn,
@@ -1181,6 +1218,144 @@ function validateRichUserBubbleAuthority() {
   }
 }
 
+/*
+ * M03 P3 S3B T6 slice A: the PresentationProfile contract and the ChatGPT
+ * reference profile. Presentation / compatibility class hooks are the profile's
+ * decision; structure, role, identity, accessibility and semantics are not.
+ */
+function validatePresentationProfileContract() {
+  const STRUCTURAL = ['cgFrame', 'cgBody', 'cgThread', 'cgScroll', 'cgTurn', 'cgMsg', 'cgMsgBody', 'cgBubble', 'cgBubble--user', 'cgBubbleRail'];
+  const ROLES = ['user', 'assistant', 'system', 'tool'];
+
+  /* A + B + C + D. Install the real module in an isolated window. */
+  const context = vm.createContext({});
+  const api = installPresentationProfile(context);
+  assert.equal(api.__installed, true, 'A: presentationProfile installs');
+  assert.match(String(api.__version), /^\d+\.\d+\.\d+/, 'A: versioned API');
+  assert.equal(Object.isFrozen(api), true, 'A: API object is immutable');
+  assert.throws(() => { 'use strict'; api.referenceId = 'other'; }, { name: 'TypeError' } /* vm-realm errors are not host TypeError instances */, 'A: API fields cannot be reassigned');
+  assert.equal(api.referenceId, 'chatgpt-reference', 'B: reference id is exactly chatgpt-reference');
+  const profile = api.reference();
+  assert.equal(profile.id, 'chatgpt-reference', 'B: reference() resolves the reference profile');
+  assert.equal(api.reference(), profile, 'B: reference() is stable');
+  assert.deepEqual([...api.ids()], ['chatgpt-reference'], 'C: exactly one built-in profile in this slice');
+  assert.equal(Object.isFrozen(api.ids()), true);
+  for (const unknown of ['other', 'chatgpt', 'chatgpt-reference-v2', '', undefined, null, 42, {}]) {
+    assert.equal(api.get(unknown), null, `D: unknown profile id ${JSON.stringify(unknown)} resolves to null`);
+  }
+  assert.equal(api.get('chatgpt-reference'), profile);
+  assert.deepEqual([...api.ids()], ['chatgpt-reference'], 'D: unknown lookups never register a profile');
+  assert.equal(Object.isFrozen(profile), true, 'profile is immutable');
+  assert.equal(Object.isFrozen(profile.hooks.turn.role), true, 'hook table is deep-frozen');
+  assert.throws(() => { 'use strict'; profile.hooks.userBubble.compat.push('x'); }, { name: 'TypeError' }, 'hook arrays are frozen');
+
+  /* E. The reference profile produces exactly the accepted class hooks. */
+  for (const role of ROLES) {
+    assert.deepEqual([...profile.turnClasses(role, 'canonical')], ['wbTurn', 'wbTurn--fallback', `wbTurn--${role}`], `E: canonical turn hooks (${role})`);
+    assert.deepEqual([...profile.turnClasses(role, 'rich')], ['wbTurn', 'wbTurn--rich', `wbTurn--${role}`], `E: rich turn hooks (${role})`);
+    assert.deepEqual([...profile.messageClasses(role, 'canonical')], [`cgMsg--${role}`], `E: canonical message modifier (${role})`);
+    assert.deepEqual([...profile.messageClasses(role, 'rich')], [], `E: rich hosts get no message modifier (${role})`);
+  }
+  assert.deepEqual([...profile.userBubbleClasses()], ['user-message-bubble-color'], 'E: rich user-bubble compatibility class');
+  assert.equal(profile.userBubbleMarkerClass(), 'user-message-bubble-color', 'E: provider bubble marker');
+  assert.deepEqual([...profile.transcriptClasses('rich')], ['wbRichRoot', 'is-rich'], 'E: rich transcript mode');
+  assert.deepEqual([...profile.transcriptClasses('canonical')], ['wbRichRoot'], 'E: canonical transcript mode');
+  for (const bad of ['admin', 'USER', '', null, undefined, 'user ', 'user; drop']) {
+    assert.throws(() => profile.turnClasses(bad, 'rich'), { name: 'TypeError' }, `helpers reject unknown role ${JSON.stringify(bad)}`);
+    assert.throws(() => profile.messageClasses(bad, 'canonical'), { name: 'TypeError' });
+  }
+  for (const bad of ['weird', '', null, 'RICH']) {
+    assert.throws(() => profile.turnClasses('user', bad), { name: 'TypeError' }, `helpers reject unknown mode ${JSON.stringify(bad)}`);
+    assert.throws(() => profile.transcriptClasses(bad), { name: 'TypeError' });
+  }
+  assert.deepEqual([...profile.turnClasses('user', 'rich')], [...profile.turnClasses('user', 'rich')], 'deterministic output');
+
+  /* G. Structural vocabulary is not a profile decision. */
+  const hookValues = [];
+  const collect = (node) => { if (Array.isArray(node)) hookValues.push(...node); else if (typeof node === 'string') hookValues.push(node); else if (node && typeof node === 'object') Object.values(node).forEach(collect); };
+  collect(profile.hooks);
+  for (const token of STRUCTURAL) assert.equal(hookValues.includes(token), false, `G: structural class ${token} must not be profile-owned`);
+  assert.doesNotMatch(stripJsComments(presentationProfileSource), /document\.|innerHTML|localStorage|sessionStorage|indexedDB|renderIR|markdownEngine|contentRenderer|semanticIngress|data-message-id|data-turn-id/,
+    'the profile module has no DOM, persistence, semantic or identity coupling');
+
+  /* F. chat-renderer consumes the profile: no duplicated map of the moved hooks. */
+  const code = stripJsComments(rendererSource);
+  for (const token of ['wbRichRoot', 'is-rich', 'wbTurn--rich', 'wbTurn--fallback', 'user-message-bubble-color', 'chatgpt-reference']) {
+    assert.equal(code.includes(token), false, `F: chat-renderer must not hardcode moved presentation token ${token}`);
+  }
+  assert.doesNotMatch(code, /["'`]wbTurn(--\$\{|["'`])/, 'F: chat-renderer must not hardcode wbTurn / wbTurn--<role>');
+  assert.doesNotMatch(code, /cgMsg--\$\{|["'`]cgMsg--(user|assistant|system|tool)["'`]/, 'F: chat-renderer must not hardcode cgMsg--<role>');
+  for (const name of ['buildTurnShell', 'buildMessageHost', 'buildRichUserBubbleShell', 'adoptRichUserBubble', 'buildConversationShell', 'render', 'applyEditedMessageBody', 'cleanReaderUserTextNodeLeaks']) {
+    assert.match(extractFunction(rendererSource, name), /activePresentationProfile\(\)/, `F: ${name} resolves the active profile`);
+  }
+  assert.match(extractFunction(rendererSource, 'buildTurnShell'), /\.turnClasses\(role, mode\)/);
+  assert.match(extractFunction(rendererSource, 'buildMessageHost'), /\.messageClasses\(role, mode\)/);
+  assert.match(extractFunction(rendererSource, 'buildRichUserBubbleShell'), /\.userBubbleClasses\(\)/);
+  assert.match(extractFunction(rendererSource, 'render'), /\.transcriptClasses\("rich"\)/);
+  assert.match(extractFunction(rendererSource, 'render'), /\.transcriptClasses\("canonical"\)/);
+  for (const token of STRUCTURAL) {
+    assert.equal(code.includes(`"${token}"`) || code.includes(`\`${token}`) || code.includes(`${token} `), true, `G: chat-renderer still owns structural class ${token}`);
+  }
+
+  /* H. Executed: the conversation root carries the presentation marker, and
+   * the shells emit the accepted class output through the profile. */
+  const seams = vm.createContext({
+    document: { createElement: (tagName) => new FakeDomElement(tagName) },
+    Element: FakeDomElement, String, Number, Set, Array, Object,
+    TESTID_ATTR: 'data-testid', TURN_TESTID: 'conversation-turn', TURNS_TESTID: 'conversation-turns',
+    ROLE_ATTR: 'data-message-author-role', MESSAGE_ID_ATTR: 'data-message-id', TURN_ID_ATTR: 'data-turn-id', ROLES: roleContract,
+  });
+  Object.assign(seams, presentationProfileGlobals(seams));
+  vm.runInContext([
+    extractFunction(rendererSource, 'activePresentationProfile'),
+    extractFunction(rendererSource, 'normalizeRole'),
+    extractFunction(rendererSource, 'getAccessibleRoleLabel'),
+    extractFunction(rendererSource, 'applyTurnAccessibility'),
+    extractFunction(rendererSource, 'claimReplayIdentity'),
+    extractFunction(rendererSource, 'buildConversationShell'),
+    extractFunction(rendererSource, 'buildTurnShell'),
+    extractFunction(rendererSource, 'buildMessageHost'),
+    extractFunction(rendererSource, 'buildRichUserBubbleShell'),
+    'this.api = { buildConversationShell, buildTurnShell, buildMessageHost, buildRichUserBubbleShell };',
+  ].join('\n'), seams);
+  const shell = seams.api.buildConversationShell({ title: 'T', chatId: 'c', projectId: 'p' });
+  assert.equal(shell.root.getAttribute('data-h2o-presentation-profile'), 'chatgpt-reference', 'H: conversation root carries the profile marker');
+  assert.equal(shell.turnsEl.getAttribute('data-h2o-presentation-profile'), null, 'H: the marker is on the conversation root only');
+  assert.equal(shell.root.className, 'cgFrame', 'no extra marker class');
+  assert.equal(seams.api.buildTurnShell('user', 'rich', { turnNo: 1 }).className, 'cgTurn cgTurn--user wbTurn wbTurn--rich wbTurn--user');
+  assert.equal(seams.api.buildTurnShell('tool', 'canonical', { turnNo: 1 }).className, 'cgTurn cgTurn--tool wbTurn wbTurn--fallback wbTurn--tool');
+  assert.equal(seams.api.buildMessageHost('assistant', 'canonical', {}).className, 'cgMsg cgMsg--assistant');
+  assert.equal(seams.api.buildMessageHost('user', 'rich', { seenMessageIds: new Set(), seenTurnIds: new Set() }).className, 'cgMsg');
+  assert.equal(seams.api.buildRichUserBubbleShell().className, 'cgBubble cgBubble--user user-message-bubble-color');
+
+  /* I. Semantic sources neither read the profile nor changed shape. */
+  for (const rel of SEMANTIC_SOURCE_RELS) {
+    assert.doesNotMatch(stripJsComments(readRepo(rel)), /presentationProfile/, `I: ${rel} must not read the presentation profile`);
+  }
+  assert.doesNotMatch(stripJsComments(presentationProfileSource), /Render IR|renderIR|blocks|marks/i, 'I: no profile data reaches Render IR');
+
+  /* J. Profile absence fails clearly - no embedded duplicate map. */
+  const bare = vm.createContext({
+    document: { createElement: (tagName) => new FakeDomElement(tagName) },
+    Element: FakeDomElement, String, Number, Set, Array, Object,
+    TESTID_ATTR: 'data-testid', TURN_TESTID: 'conversation-turn', TURNS_TESTID: 'conversation-turns',
+    ROLE_ATTR: 'data-message-author-role', ROLES: roleContract,
+  });
+  Object.assign(bare, presentationProfileGlobals(bare, { withProfile: false }));
+  vm.runInContext([
+    extractFunction(rendererSource, 'activePresentationProfile'),
+    extractFunction(rendererSource, 'getAccessibleRoleLabel'),
+    extractFunction(rendererSource, 'applyTurnAccessibility'),
+    extractFunction(rendererSource, 'buildConversationShell'),
+    extractFunction(rendererSource, 'buildTurnShell'),
+    'this.api = { buildConversationShell, buildTurnShell };',
+  ].join('\n'), bare);
+  assert.throws(() => bare.api.buildTurnShell('user', 'rich', { turnNo: 1 }), /presentationProfile/, 'J: missing profile fails clearly at the turn seam');
+  assert.throws(() => bare.api.buildConversationShell({ title: 'T', chatId: 'c', projectId: 'p' }), /presentationProfile/, 'J: missing profile fails clearly at the conversation seam');
+  bare.Studio.Renderer.presentationProfile = { __installed: true, reference: () => null };
+  assert.throws(() => bare.api.buildTurnShell('user', 'rich', { turnNo: 1 }), /reference PresentationProfile is unavailable/, 'J: an unresolvable reference profile fails clearly');
+}
+
 function validateExtractedRendererBoundary() {
   const sanitizerTag = '<script src="./platform/html-sanitizer.js"></script>';
   const rendererTag = '<script src="./renderer/chat-renderer.studio.js"></script>';
@@ -1209,6 +1384,7 @@ validateProviderSpoofRejected();
 validateBuildFallbackDecision();
 validateStructuralShellAuthority();
 validateRichUserBubbleAuthority();
+validatePresentationProfileContract();
 validateExtractedRendererBoundary();
 
 console.log('Studio renderer contract repair validation passed');

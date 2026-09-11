@@ -678,6 +678,10 @@
        Owner HTML parts reach the DOM only as sanitizer-v2 fragments inside
        H2O-owned content nodes. -->
   <script src="./renderer/semantic/semantic-ingress.v1.js"></script>
+  <!-- S3B/T6: PresentationProfile contract + ChatGPT reference profile. No
+       semantic dependency; loads before the renderers that consume its
+       presentation class hooks. -->
+  <script src="./renderer/presentation/presentation-profile.v1.js"></script>
   <script src="./renderer/content/content-renderer.v1.js"></script>
   <!-- Canonical base transcript Renderer. Loads after the shared sanitizer
        and selector contract, and before studio.js Reader orchestration. -->

@@ -205,6 +205,10 @@ if (!chromium) {
         'renderer/markdown/markdown-ir-adapter.v1.js',
         'renderer/semantic/render-ir.v1.js',
         'renderer/semantic/semantic-ingress.v1.js',
+        /* S3B/T6: the Renderer resolves its presentation hooks from the profile
+         * module and fails clearly without it, so the Tier-2 chain admits it in
+         * its production position. */
+        'renderer/presentation/presentation-profile.v1.js',
         CONTENT_REL,
         RENDERER_REL,
       ].map((r) => `<script src="./${r}"></script>`).join('\n');

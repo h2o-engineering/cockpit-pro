@@ -160,9 +160,10 @@ const BATCH11_VALIDATOR_SHA256 = "c8a1abd5c21a9328dc13a8bf19aba508ab476095d9e988
 // invisible. Main commit 0bec56f5 ("feat(publish): allow clean worktree staging
 // authority") advanced the publisher, so the two roles are now pinned separately:
 // BASE_HEAD immutability above, executed-fixture bytes here. M03 P2 S2A T4
-// Stage B advanced the publisher again (markdown STUDIO_REQUIRED_ORDER), so
-// this moving pin follows the new committed publisher bytes.
-const SYNCED_PUBLISHER_SHA256 = "f281a9fa523ee2cf237af2c3a686c8533efbf85f46371d73d20b7547e7a1f38a";
+// Stage B advanced the publisher again (markdown STUDIO_REQUIRED_ORDER), and
+// M03 P3 S3B T6 admitted the Renderer presentation profile, so this moving
+// pin follows the new committed publisher bytes.
+const SYNCED_PUBLISHER_SHA256 = "f1f41c9c9a6c1d09c5483ae6d507b7706744b5081eec629de00f3a900a5959ea";
 const ACCEPTED_ACTIVATOR_SHA256 = "531bb4e9b5d7d61584e013d0d10c8007c78f75498988ba64bac4d24a8d4f2f36";
 const REQUIRED_FILES = Object.freeze([
   "manifest.json", "loader.js", "bg.js", "title-contract-bridge.js",

@@ -105,8 +105,17 @@ function cleanReaderUserTextNodeLeaks(root){
   const userRoleSelector = SEL.userTurn || (
     typeof BY.role === "function" ? BY.role(ROLES.USER || "user") : `[${ROLE_ATTR}="user"]`
   );
-  const messageSelector = `${userRoleSelector}, .user-message-bubble-color, .cgMsg--user`;
-  const turnSelector = '.cgTurn--user, .wbTurn--user, [data-turn="user"]';
+  const profile = activePresentationProfile();
+  const messageSelector = [
+    userRoleSelector,
+    ...profile.userBubbleClasses().map((cls) => `.${cls}`),
+    ...profile.messageClasses("user", "canonical").map((cls) => `.${cls}`),
+  ].join(", ");
+  const turnSelector = [
+    ".cgTurn--user",
+    ...profile.hooks.turn.role.user.map((cls) => `.${cls}`),
+    '[data-turn="user"]',
+  ].join(", ");
   const messageHosts = [];
   if (root.matches?.(messageSelector)) messageHosts.push(root);
   messageHosts.push(...root.querySelectorAll?.(messageSelector) || []);
@@ -768,12 +777,41 @@ function attachUserAttachmentsToTurn(turnEl, messageEl, attachmentsRaw){
  * identity scheme are introduced here (P4 owns that), and every effective DOM
  * contract below is unchanged from the pre-consolidation builders.
  */
+/*
+ * PresentationProfile consumption (M03 P3 S3B T6, slice A).
+ *
+ * Structure is Renderer property and profile-independent (cgFrame, cgBody,
+ * cgThread, cgScroll, cgTurn, cgMsg, cgMsgBody, cgBubble, cgBubbleRail, role,
+ * identity, accessibility). How that structure looks - the presentation and
+ * provider-compatibility class hooks layered on it - is the active
+ * PresentationProfile's decision, resolved here from the Renderer profile
+ * module. There is deliberately no embedded class map to fall back to: a
+ * missing profile fails clearly rather than becoming a second presentation
+ * authority.
+ */
+const PRESENTATION_PROFILE_ATTR = "data-h2o-presentation-profile";
+
+function activePresentationProfile(){
+  const api = Studio.Renderer && Studio.Renderer.presentationProfile;
+  if (!api || api.__installed !== true || typeof api.reference !== "function"){
+    throw new Error("Studio Chat Renderer requires H2O.Studio.Renderer.presentationProfile (renderer/presentation/presentation-profile.v1.js); no embedded presentation fallback exists");
+  }
+  const profile = api.reference();
+  if (!profile || typeof profile.id !== "string" || !profile.id){
+    throw new Error("Studio Chat Renderer: the reference PresentationProfile is unavailable");
+  }
+  return profile;
+}
+
 function buildConversationShell(input){
   const root = document.createElement("div");
   root.className = "cgFrame";
   root.dataset.chatTitle = input.title;
   root.dataset.chatId = input.chatId;
   root.dataset.projectId = input.projectId;
+  /* Observable presentation-selection marker only: not identity, not Storage
+   * or Knowledge metadata, and no CSS keys on it yet. */
+  root.setAttribute(PRESENTATION_PROFILE_ATTR, activePresentationProfile().id);
 
   const body = document.createElement("div");
   body.className = "cgBody";
@@ -794,8 +832,7 @@ function buildConversationShell(input){
 
 function buildTurnShell(role, mode, meta = {}){
   const turn = document.createElement("article");
-  const modeClass = mode === "rich" ? "wbTurn--rich" : "wbTurn--fallback";
-  turn.className = `cgTurn cgTurn--${role} wbTurn ${modeClass} wbTurn--${role}`;
+  turn.className = ["cgTurn", `cgTurn--${role}`, ...activePresentationProfile().turnClasses(role, mode)].join(" ");
   turn.setAttribute(TESTID_ATTR, meta.turnNo > 0 ? `${TURN_TESTID}-${meta.turnNo}` : TURN_TESTID);
   turn.setAttribute("data-turn", role);
   applyTurnAccessibility(turn, role);
@@ -807,18 +844,14 @@ function buildTurnShell(role, mode, meta = {}){
 
 function buildMessageHost(role, mode, meta = {}){
   const messageEl = document.createElement("div");
-  if (mode === "rich"){
-    /* Neutral H2O message host only. The role modifier is deliberately omitted
-     * for rich replay: cgMsg--user carries the canonical bubble skin (padding,
-     * background, radius), and the rich user bubble is a separate H2O element
-     * beneath this host (adoptRichUserBubble) that carries that skin through
-     * the compatibility class, so the modifier would wrap a second bubble
-     * around it. The owner-derived role attribute below stays - rich-replay
-     * CSS keys on it, and it is structural metadata, not presentation. */
-    messageEl.className = "cgMsg";
-  } else {
-    messageEl.className = `cgMsg cgMsg--${role}`;
-  }
+  /* The presentation modifier is the profile's decision: canonical hosts carry
+   * the bubble skin themselves, while a rich host stays a neutral cgMsg because
+   * the rich user bubble is a separate H2O element beneath it
+   * (adoptRichUserBubble) that carries the skin through the profile's
+   * compatibility class - a modifier here would wrap a second bubble around
+   * it. The owner-derived role attribute below stays - rich-replay CSS keys on
+   * it, and it is structural metadata, not presentation. */
+  messageEl.className = ["cgMsg", ...activePresentationProfile().messageClasses(role, mode)].join(" ");
   messageEl.setAttribute(ROLE_ATTR, role);
 
   if (mode === "rich"){
@@ -898,36 +931,37 @@ function claimReplayIdentity(el, attrName, preferredRaw, seen){
  * never survives as the bubble boundary, and several or nested markers cannot
  * create more than one bubble.
  *
- * Presentation stays on the accepted compatibility path: the H2O bubble keeps
- * `user-message-bubble-color` because Studio CSS and existing consumers key on
- * it, and nothing else is taken from the provider element except a sanitized
- * `dir` (bidi rendering). Identity is never copied: the message host owns role
- * and identity, and the bubble is presentation-container structure beneath it.
- * Owning that class as an explicit PresentationProfile is S3B.
+ * Presentation stays on the accepted compatibility path: the compatibility
+ * class the H2O bubble carries, and the provider marker class that locates a
+ * captured bubble, both come from the active PresentationProfile (for the
+ * ChatGPT reference profile they are the same token), and nothing else is
+ * taken from the provider element except a sanitized `dir` (bidi rendering).
+ * Identity is never copied: the message host owns role and identity, and the
+ * bubble is presentation-container structure beneath it.
  *
  * The bubble-boundary class vocabulary belongs to the Renderer as well: the
- * compatibility marker and the H2O bubble classes are demoted wherever
- * sanitized provider content carries them, so no content element can pose as
- * the bubble or the rail.
+ * provider marker and the H2O bubble classes are demoted wherever sanitized
+ * provider content carries them, so no content element can pose as the bubble
+ * or the rail.
  *
  * Only sanitized DOM reaches this seam (sanitizer v2 has already run), and it
  * runs before post-sanitizer content projection.
  */
-const USER_BUBBLE_COMPAT_CLASS = "user-message-bubble-color";
 const USER_BUBBLE_H2O_CLASSES = ["cgBubble", "cgBubble--user", "cgBubbleRail"];
 
 function buildRichUserBubbleShell(){
   const bubble = document.createElement("div");
-  bubble.className = `cgBubble cgBubble--user ${USER_BUBBLE_COMPAT_CLASS}`;
+  bubble.className = ["cgBubble", "cgBubble--user", ...activePresentationProfile().userBubbleClasses()].join(" ");
   return bubble;
 }
 
 function adoptRichUserBubble(messageEl){
   if (!(messageEl instanceof Element)) return false;
+  const markerClass = activePresentationProfile().userBubbleMarkerClass();
   messageEl.querySelectorAll(USER_BUBBLE_H2O_CLASSES.map((cls) => `.${cls}`).join(", ")).forEach((el) => {
     el.classList.remove(...USER_BUBBLE_H2O_CLASSES);
   });
-  const markers = Array.from(messageEl.querySelectorAll(`.${USER_BUBBLE_COMPAT_CLASS}`));
+  const markers = Array.from(messageEl.querySelectorAll(`.${markerClass}`));
   const outermost = markers.filter((el) => !markers.some((other) => other !== el && other.contains(el)));
   const bubble = buildRichUserBubbleShell();
 
@@ -940,7 +974,7 @@ function adoptRichUserBubble(messageEl){
     const dir = String(provider.getAttribute("dir") || "").trim();
     if (dir) bubble.setAttribute("dir", dir);
     for (const el of markers){
-      if (el !== provider) el.classList.remove(USER_BUBBLE_COMPAT_CLASS);
+      if (el !== provider) el.classList.remove(markerClass);
     }
     while (provider.firstChild) bubble.appendChild(provider.firstChild);
     provider.replaceWith(bubble);
@@ -951,7 +985,7 @@ function adoptRichUserBubble(messageEl){
    * whole sanitized content in source order. The rail is the full-width
    * scaffolding layer the accepted bubble CSS expects between the role host
    * and the bubble; the provider wrapper supplies it when a bubble exists. */
-  for (const el of markers) el.classList.remove(USER_BUBBLE_COMPAT_CLASS);
+  for (const el of markers) el.classList.remove(markerClass);
   const rail = document.createElement("div");
   rail.className = "cgBubbleRail";
   while (messageEl.firstChild) bubble.appendChild(messageEl.firstChild);
@@ -965,7 +999,7 @@ function applyEditedMessageBody(messageEl, role, text){
   if (!normalizedRole) return;
   while (messageEl.firstChild) messageEl.removeChild(messageEl.firstChild);
   messageEl.setAttribute(ROLE_ATTR, normalizedRole);
-  messageEl.classList.add("cgMsg", `cgMsg--${normalizedRole}`, "cgMsg--edited");
+  messageEl.classList.add("cgMsg", ...activePresentationProfile().messageClasses(normalizedRole, "canonical"), "cgMsg--edited");
 
   const bodyEl = document.createElement("div");
   bodyEl.className = "cgMsgBody";
@@ -1275,6 +1309,8 @@ function render(inputRaw, options){
     throw new Error("Studio Chat Renderer could not create the conversation root");
   }
   turnsEl.classList.add("wbReaderScroll");
+  const profile = activePresentationProfile();
+  const richRootClasses = profile.transcriptClasses("rich");
 
   let assistantTurnEls = [];
   let richRenderResult = {
@@ -1284,7 +1320,7 @@ function render(inputRaw, options){
   };
 
   if (hasCompleteRichCoverage(input)){
-    turnsEl.classList.add("wbRichRoot", "is-rich");
+    turnsEl.classList.add(...richRootClasses);
     richRenderResult = mountRichTurns(
       turnsEl,
       input.richTurns,
@@ -1298,8 +1334,9 @@ function render(inputRaw, options){
   let renderMode = "rich";
   if (richRenderResult.fallbackRequired){
     renderMode = "canonical";
-    turnsEl.classList.add("wbRichRoot");
-    turnsEl.classList.remove("is-rich");
+    const canonicalRootClasses = profile.transcriptClasses("canonical");
+    turnsEl.classList.remove(...richRootClasses.filter((cls) => !canonicalRootClasses.includes(cls)));
+    turnsEl.classList.add(...canonicalRootClasses);
     /* Rich replay keeps its precedence untouched. In the canonical branch a
      * conforming v3 snapshot renders its typed content semantically through the
      * same H2O shells; everything else keeps the existing canonical path. */
