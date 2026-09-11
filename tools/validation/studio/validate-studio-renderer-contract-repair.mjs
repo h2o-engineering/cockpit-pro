@@ -29,7 +29,20 @@ function extractFunction(source, name) {
   const match = new RegExp(`\\bfunction\\s+${name}\\s*\\(`).exec(source);
   if (!match) throw new Error(`extractFunction: '${name}' not found`);
   const start = match.index;
-  const braceOpen = source.indexOf('{', start);
+  /* Skip the parameter list first: a default such as `meta = {}` carries
+   * braces of its own, and the body brace is the first one after the
+   * matching `)`. */
+  let parenDepth = 0;
+  let paramsEnd = -1;
+  for (let i = match.index + match[0].length - 1; i < source.length; i += 1) {
+    if (source[i] === '(') parenDepth += 1;
+    else if (source[i] === ')') {
+      parenDepth -= 1;
+      if (parenDepth === 0) { paramsEnd = i; break; }
+    }
+  }
+  if (paramsEnd === -1) throw new Error(`extractFunction: unterminated parameter list for '${name}'`);
+  const braceOpen = source.indexOf('{', paramsEnd);
   let depth = 0;
   for (let i = braceOpen; i < source.length; i += 1) {
     if (source[i] === '{') depth += 1;
@@ -550,35 +563,51 @@ class FakeClassList {
   contains(value) { return this.values.has(value); }
 }
 
-class FakeScroll {
-  constructor(tagName = 'SECTION') {
-    this.tagName = tagName;
+/* Tag-aware DOM fake for the structural seams: the Renderer now builds every
+ * shell with createElement/setAttribute/appendChild, so the fake must model a
+ * small element tree rather than an innerHTML string. */
+class FakeDomElement {
+  constructor(tagName = 'DIV') {
+    this.tagName = String(tagName).toUpperCase();
     this.attrs = new Map();
     this.classList = new FakeClassList();
+    this.dataset = {};
     this.children = [];
+    this.parentNode = null;
+    this.classNameValue = '';
   }
-  appendChild(value) { this.children.push(value); return value; }
+  get className() { return this.classNameValue; }
+  set className(value) {
+    this.classNameValue = String(value);
+    this.classList.values = new Set(this.classNameValue.split(/\s+/).filter(Boolean));
+  }
+  appendChild(node) {
+    this.children.push(node);
+    if (node && typeof node === 'object') node.parentNode = this;
+    return node;
+  }
   addEventListener() {}
-  contains(value) { return this.children.includes(value); }
+  contains(node) {
+    return this.children.some((child) => child === node
+      || (child && typeof child.contains === 'function' && child.contains(node)));
+  }
+  find(predicate) {
+    for (const child of this.children) {
+      if (child && predicate(child)) return child;
+      const nested = child && typeof child.find === 'function' ? child.find(predicate) : null;
+      if (nested) return nested;
+    }
+    return null;
+  }
+  querySelector(selector) {
+    if (selector === '.cgScroll') return this.find((node) => node.classList?.contains('cgScroll'));
+    return null;
+  }
   querySelectorAll() { return []; }
   setAttribute(name, value) { this.attrs.set(name, String(value)); }
-  getAttribute(name) { return this.attrs.get(name) || null; }
-}
-
-class FakeRoot {
-  constructor() {
-    this.dataset = {};
-    this.className = '';
-    this.scroll = null;
-  }
-  set innerHTML(value) {
-    const html = String(value || '');
-    const tagName = String(html.match(/<([a-z]+)\s+class="cgScroll"/i)?.[1] || 'div').toUpperCase();
-    this.scroll = new FakeScroll(tagName);
-    const label = html.match(/class="cgScroll"[^>]*aria-label="([^"]+)"/i)?.[1] || '';
-    if (label) this.scroll.setAttribute('aria-label', label);
-  }
-  querySelector(selector) { return selector === '.cgScroll' ? this.scroll : null; }
+  getAttribute(name) { return this.attrs.has(name) ? this.attrs.get(name) : null; }
+  removeAttribute(name) { this.attrs.delete(name); }
+  hasAttribute(name) { return this.attrs.has(name); }
 }
 
 function createRendererBuildHarness(richResult) {
@@ -586,9 +615,9 @@ function createRendererBuildHarness(richResult) {
   let richMountCalls = 0;
   const sandbox = {
     document: {
-      createElement: () => new FakeRoot(),
+      createElement: (tagName) => new FakeDomElement(tagName),
     },
-    Element: FakeScroll,
+    Element: FakeDomElement,
     TURNS_TESTID: 'conversation-turns',
     normalizeInput: (input) => input,
     /* S2C/T11: render() first asks whether the input is a conforming Saved-Chat
@@ -612,7 +641,7 @@ function createRendererBuildHarness(richResult) {
     Object,
   };
   const context = vm.createContext(sandbox);
-  vm.runInContext(`${extractFunction(rendererSource, 'hasCompleteRichCoverage')}\n${extractFunction(rendererSource, 'render')}\nthis.result = render;`, context);
+  vm.runInContext(`${extractFunction(rendererSource, 'hasCompleteRichCoverage')}\n${extractFunction(rendererSource, 'buildConversationShell')}\n${extractFunction(rendererSource, 'render')}\nthis.result = render;`, context);
   return {
     fn: context.result,
     getCanonicalCalls: () => canonicalCalls,
@@ -667,6 +696,151 @@ function validateBuildFallbackDecision() {
   }
 }
 
+/*
+ * M03 P3 S3A T6 slice A - shared H2O structural shell authority.
+ *
+ * Executes the REAL extracted seams (buildConversationShell, buildTurnShell,
+ * buildMessageHost and the canonical / rich builders that must reach them)
+ * against the tag-aware fake, and proves the effective DOM contract of every
+ * mode is unchanged while structure now has exactly one construction seam.
+ */
+function validateStructuralShellAuthority() {
+  const renderFn = extractFunction(rendererSource, 'render');
+  const canonicalTurnFn = extractFunction(rendererSource, 'buildCanonicalTurn');
+  const canonicalMessageFn = extractFunction(rendererSource, 'buildCanonicalMessage');
+  const richShellFn = extractFunction(rendererSource, 'buildRichTurnShell');
+  const semanticConversationFn = extractFunction(rendererSource, 'buildSemanticConversation');
+
+  /* A. The conversation shell is built by DOM APIs, never an innerHTML scaffold. */
+  assert.doesNotMatch(renderFn, /innerHTML/, 'render() must not build the conversation shell from an HTML string');
+  assert.match(renderFn, /buildConversationShell\(input\)/, 'render() must obtain the conversation shell from the shared seam');
+  const shellFn = extractFunction(rendererSource, 'buildConversationShell');
+  assert.doesNotMatch(shellFn, /innerHTML|insertAdjacentHTML/, 'the conversation shell seam must not use an HTML sink');
+  assert.match(shellFn, /createElement\("section"\)/, 'the transcript root must be a native section');
+
+  /* B. Every turn/message construction path reaches the shared seams. */
+  assert.match(canonicalTurnFn, /buildTurnShell\(role, "canonical", meta\)/, 'canonical turns must use the shared turn seam');
+  assert.match(richShellFn, /buildTurnShell\(role, "rich", meta\)/, 'rich turns must use the shared turn seam');
+  assert.match(canonicalMessageFn, /buildMessageHost\(role, "canonical", meta\)/, 'canonical hosts must use the shared message seam');
+  assert.match(richShellFn, /buildMessageHost\(role, "rich", meta\)/, 'rich hosts must use the shared message seam');
+  assert.match(semanticConversationFn, /buildCanonicalTurn\(role, "", \{/, 'Saved-Chat v3 semantic turns must go through the canonical turn builder');
+  for (const [name, source] of [['buildCanonicalTurn', canonicalTurnFn], ['buildRichTurnShell', richShellFn]]) {
+    assert.doesNotMatch(source, /createElement\("article"\)|createElement\("div"\)/,
+      `${name} must not construct structural elements outside the shared seams`);
+  }
+  assert.doesNotMatch(canonicalMessageFn, /className = `cgMsg/, 'the message host classes belong to the shared seam only');
+
+  /* Execute the real seams. Body rendering, attachments and metadata stamping
+   * have their own contracts and are stubbed here. */
+  const calls = { turn: 0, host: 0 };
+  const sandbox = {
+    document: { createElement: (tagName) => new FakeDomElement(tagName) },
+    Element: FakeDomElement, String, Number, Set, Array, Object,
+    TESTID_ATTR: 'data-testid', TURN_TESTID: 'conversation-turn', TURNS_TESTID: 'conversation-turns',
+    ROLE_ATTR: 'data-message-author-role', MESSAGE_ID_ATTR: 'data-message-id', TURN_ID_ATTR: 'data-turn-id',
+    ROLES: roleContract,
+    stampReplayTurnMeta: () => {},
+    attachUserAttachmentsToTurn: () => {},
+    cleanReaderUserText: (text) => text,
+    renderSemanticBody: (bodyEl) => { bodyEl.appendChild(new FakeDomElement('p')); },
+    renderSemanticBlocks: (bodyEl) => { bodyEl.appendChild(new FakeDomElement('p')); },
+    calls,
+  };
+  const context = vm.createContext(sandbox);
+  vm.runInContext([
+    extractFunction(rendererSource, 'normalizeRole'),
+    extractFunction(rendererSource, 'getAccessibleRoleLabel'),
+    extractFunction(rendererSource, 'applyTurnAccessibility'),
+    extractFunction(rendererSource, 'claimReplayIdentity'),
+    shellFn,
+    extractFunction(rendererSource, 'buildTurnShell'),
+    extractFunction(rendererSource, 'buildMessageHost'),
+    canonicalMessageFn,
+    canonicalTurnFn,
+    richShellFn,
+    /* Count seam use without altering behaviour. */
+    'const __turnSeam = buildTurnShell; buildTurnShell = (...a) => { calls.turn += 1; return __turnSeam(...a); };',
+    'const __hostSeam = buildMessageHost; buildMessageHost = (...a) => { calls.host += 1; return __hostSeam(...a); };',
+    'this.api = { buildConversationShell, buildCanonicalTurn, buildRichTurnShell, buildCanonicalMessage };',
+  ].join('\n'), context);
+  const api = context.api;
+
+  /* A (effective). Conversation shell contract. */
+  const shell = api.buildConversationShell({ title: 'T', chatId: 'c1', projectId: 'p1' });
+  assert.equal(shell.root.className, 'cgFrame');
+  assert.deepEqual(shell.root.dataset, { chatTitle: 'T', chatId: 'c1', projectId: 'p1' });
+  const body = shell.root.children[0]; const thread = body.children[0]; const scroll = thread.children[0];
+  assert.equal(body.className, 'cgBody'); assert.equal(thread.className, 'cgThread');
+  assert.equal(scroll, shell.turnsEl, 'turnsEl must be the section inside cgThread');
+  assert.equal(scroll.tagName, 'SECTION'); assert.equal(scroll.className, 'cgScroll');
+  assert.equal(scroll.getAttribute('data-testid'), 'conversation-turns');
+  assert.equal(scroll.getAttribute('aria-label'), 'Conversation transcript');
+  assert.equal(scroll.children.length, 0);
+
+  const LABELS = { user: 'User message', assistant: 'Assistant message', system: 'System message', tool: 'Tool message' };
+
+  /* C + G + J. Canonical contract for all four roles. */
+  for (const role of ['user', 'assistant', 'system', 'tool']) {
+    const meta = { turnNo: 3, answerIdx: role === 'assistant' ? 2 : 0, messageId: 'm-1', turnId: 't-1', dir: 'rtl', createTime: 1 };
+    const { turn, messageEl } = api.buildCanonicalTurn(role, 'hello', meta);
+    assert.equal(turn.tagName, 'ARTICLE');
+    assert.equal(turn.className, `cgTurn cgTurn--${role} wbTurn wbTurn--fallback wbTurn--${role}`);
+    assert.equal(turn.getAttribute('data-testid'), 'conversation-turn-3');
+    assert.equal(turn.getAttribute('data-turn'), role);
+    assert.equal(turn.getAttribute('aria-label'), LABELS[role], 'accessibility label must be unchanged');
+    assert.equal(turn.getAttribute('role'), null, 'native article needs no ARIA role');
+    assert.equal(messageEl.className, `cgMsg cgMsg--${role}`);
+    assert.equal(messageEl.getAttribute('data-message-author-role'), role);
+    assert.equal(messageEl.getAttribute('data-message-id'), 'm-1');
+    assert.equal(messageEl.getAttribute('data-turn-id'), 't-1');
+    assert.equal(messageEl.getAttribute('dir'), 'rtl');
+    assert.equal(turn.children.length, 1); assert.equal(turn.children[0], messageEl);
+    assert.equal(messageEl.children[0].className, 'cgMsgBody', 'canonical host must carry the H2O body slot');
+    if (role === 'assistant') {
+      assert.equal(turn.dataset.turnIdx, '2'); assert.equal(messageEl.dataset.turnIdx, '2');
+    } else {
+      assert.equal(turn.dataset.turnIdx, undefined); assert.equal(messageEl.dataset.turnIdx, undefined);
+    }
+  }
+
+  /* D + E + F + G. Rich contract for all four roles; provider content stays inside. */
+  for (const role of ['user', 'assistant', 'system', 'tool']) {
+    const seenMessageIds = new Set(); const seenTurnIds = new Set();
+    const meta = { turnNo: 5, answerIdx: role === 'assistant' ? 1 : 0, messageId: 'owner-m', turnId: 'owner-t', seenMessageIds, seenTurnIds, createTime: 1 };
+    const { turn, messageEl } = api.buildRichTurnShell(role, meta);
+    assert.equal(turn.className, `cgTurn cgTurn--${role} wbTurn wbTurn--rich wbTurn--${role}`);
+    assert.equal(turn.getAttribute('data-testid'), 'conversation-turn-5');
+    assert.equal(turn.getAttribute('aria-label'), LABELS[role]);
+    assert.equal(messageEl.className, 'cgMsg', 'rich host must stay a neutral cgMsg - the role modifier omission is intentional presentation compatibility');
+    assert.equal(messageEl.getAttribute('data-message-author-role'), role, 'rich role comes from owner data');
+    assert.equal(messageEl.getAttribute('data-message-id'), 'owner-m');
+    assert.equal(messageEl.getAttribute('data-turn-id'), 'owner-t');
+    assert.equal(messageEl.getAttribute('dir'), null, 'rich host has no dir contract');
+    if (role === 'assistant') { assert.equal(turn.dataset.turnIdx, '1'); assert.equal(messageEl.dataset.turnIdx, '1'); }
+    assert.equal(turn.children.length, 1); assert.equal(turn.children[0], messageEl);
+
+    /* Provider content appended afterwards is only ever a descendant. */
+    const provider = new FakeDomElement('article');
+    provider.setAttribute('data-message-author-role', 'assistant');
+    provider.setAttribute('data-message-id', 'spoof');
+    provider.setAttribute('data-testid', 'conversation-turn-99');
+    messageEl.appendChild(provider);
+    assert.equal(turn.contains(provider), true, 'provider fragment must be a descendant of the H2O message host');
+    assert.equal(messageEl.getAttribute('data-message-author-role'), role, 'provider markup must not change the host role');
+    assert.equal(messageEl.getAttribute('data-message-id'), 'owner-m', 'provider markup must not change the host identity');
+    assert.equal(turn.children.length, 1, 'provider markup must not become a sibling turn or host');
+  }
+
+  /* B (executed). One seam each, used by both modes. */
+  assert.equal(calls.turn, 8, 'every canonical and rich turn must come from buildTurnShell');
+  assert.equal(calls.host, 8, 'every canonical and rich host must come from buildMessageHost');
+
+  /* Non-vacuity: the seam counters actually observe construction. */
+  calls.turn = 0; calls.host = 0;
+  api.buildCanonicalMessage('user', 'x', {});
+  assert.equal(calls.host, 1); assert.equal(calls.turn, 0);
+}
+
 function validateExtractedRendererBoundary() {
   const sanitizerTag = '<script src="./platform/html-sanitizer.js"></script>';
   const rendererTag = '<script src="./renderer/chat-renderer.studio.js"></script>';
@@ -693,6 +867,7 @@ validateRendererAccessibilityContract();
 validateRendererSanitizerV2Migration();
 validateProviderSpoofRejected();
 validateBuildFallbackDecision();
+validateStructuralShellAuthority();
 validateExtractedRendererBoundary();
 
 console.log('Studio renderer contract repair validation passed');

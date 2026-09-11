@@ -679,12 +679,7 @@ function buildSemanticConversation(container, conversation, snapRaw){
 }
 
 function buildCanonicalMessage(role, text, meta = {}){
-  const wrap = document.createElement("div");
-  wrap.className = `cgMsg cgMsg--${role}`;
-  wrap.setAttribute(ROLE_ATTR, role);
-  if (meta.messageId) wrap.setAttribute(MESSAGE_ID_ATTR, String(meta.messageId));
-  if (meta.turnId) wrap.setAttribute(TURN_ID_ATTR, String(meta.turnId));
-  if (meta.dir) wrap.setAttribute("dir", String(meta.dir));
+  const wrap = buildMessageHost(role, "canonical", meta);
 
   const bodyEl = document.createElement("div");
   bodyEl.className = "cgMsgBody";
@@ -695,10 +690,6 @@ function buildCanonicalMessage(role, text, meta = {}){
   }
 
   wrap.appendChild(bodyEl);
-
-  if (meta.answerIdx && role === "assistant"){
-    wrap.dataset.turnIdx = String(meta.answerIdx);
-  }
   return wrap;
 }
 
@@ -762,17 +753,96 @@ function attachUserAttachmentsToTurn(turnEl, messageEl, attachmentsRaw){
   messageEl.insertAdjacentElement("beforebegin", grid);
 }
 
-function buildCanonicalTurn(role, text, meta = {}){
+/*
+ * H2O structural shell authority (M03 P3 S3A T6, slice A).
+ *
+ * The Renderer is the single construction authority for the shared structural
+ * DOM: the conversation shell, the turn shell and the message host. Canonical,
+ * Saved-Chat v3 semantic and rich replay all reach these seams; they differ only
+ * by a narrow `mode` ("canonical" | "rich") that selects mode-specific
+ * presentation classes and identity rules, never by owning structure. Provider
+ * content is only ever a descendant of the H2O message host and cannot create a
+ * conversation root, a turn, a message host, a role or an identity.
+ *
+ * Structural ownership, not identity expansion: no new ids or projection
+ * identity scheme are introduced here (P4 owns that), and every effective DOM
+ * contract below is unchanged from the pre-consolidation builders.
+ */
+function buildConversationShell(input){
+  const root = document.createElement("div");
+  root.className = "cgFrame";
+  root.dataset.chatTitle = input.title;
+  root.dataset.chatId = input.chatId;
+  root.dataset.projectId = input.projectId;
+
+  const body = document.createElement("div");
+  body.className = "cgBody";
+  const thread = document.createElement("div");
+  thread.className = "cgThread";
+  const turnsEl = document.createElement("section");
+  turnsEl.className = "cgScroll";
+  /* Literal attribute name, exactly as the transcript root has always been
+   * stamped; the turn shells key on the selector contract's TESTID_ATTR. */
+  turnsEl.setAttribute("data-testid", TURNS_TESTID);
+  turnsEl.setAttribute("aria-label", "Conversation transcript");
+
+  thread.appendChild(turnsEl);
+  body.appendChild(thread);
+  root.appendChild(body);
+  return { root, turnsEl };
+}
+
+function buildTurnShell(role, mode, meta = {}){
   const turn = document.createElement("article");
-  turn.className = `cgTurn cgTurn--${role} wbTurn wbTurn--fallback wbTurn--${role}`;
+  const modeClass = mode === "rich" ? "wbTurn--rich" : "wbTurn--fallback";
+  turn.className = `cgTurn cgTurn--${role} wbTurn ${modeClass} wbTurn--${role}`;
   turn.setAttribute(TESTID_ATTR, meta.turnNo > 0 ? `${TURN_TESTID}-${meta.turnNo}` : TURN_TESTID);
   turn.setAttribute("data-turn", role);
   applyTurnAccessibility(turn, role);
-
-  const messageEl = buildCanonicalMessage(role, text, meta);
   if (role === "assistant" && meta.answerIdx > 0){
     turn.dataset.turnIdx = String(meta.answerIdx);
   }
+  return turn;
+}
+
+function buildMessageHost(role, mode, meta = {}){
+  const messageEl = document.createElement("div");
+  if (mode === "rich"){
+    /* Neutral H2O message host only. The role modifier is deliberately omitted
+     * for rich replay: cgMsg--user carries the canonical bubble skin (padding,
+     * background, radius), which would wrap a second bubble around provider
+     * content that already contains .user-message-bubble-color. The
+     * owner-derived role attribute below stays - rich-replay CSS keys on it,
+     * and it is structural metadata, not presentation. Migrating that bubble
+     * boundary is the remaining S3A work, not this slice. */
+    messageEl.className = "cgMsg";
+  } else {
+    messageEl.className = `cgMsg cgMsg--${role}`;
+  }
+  messageEl.setAttribute(ROLE_ATTR, role);
+
+  if (mode === "rich"){
+    if (role === "assistant" && meta.answerIdx > 0){
+      try { messageEl.dataset.turnIdx = String(meta.answerIdx); } catch {}
+    }
+    /* Owner-derived identity with collision dedupe: provider markup never
+     * decides which identity a replayed message claims. */
+    claimReplayIdentity(messageEl, MESSAGE_ID_ATTR, meta.messageId, meta.seenMessageIds);
+    claimReplayIdentity(messageEl, TURN_ID_ATTR, meta.turnId, meta.seenTurnIds);
+  } else {
+    if (meta.messageId) messageEl.setAttribute(MESSAGE_ID_ATTR, String(meta.messageId));
+    if (meta.turnId) messageEl.setAttribute(TURN_ID_ATTR, String(meta.turnId));
+    if (meta.dir) messageEl.setAttribute("dir", String(meta.dir));
+    if (meta.answerIdx && role === "assistant"){
+      messageEl.dataset.turnIdx = String(meta.answerIdx);
+    }
+  }
+  return messageEl;
+}
+
+function buildCanonicalTurn(role, text, meta = {}){
+  const turn = buildTurnShell(role, "canonical", meta);
+  const messageEl = buildCanonicalMessage(role, text, meta);
   stampReplayTurnMeta(turn, messageEl, meta.createTime, meta.turnNo);
   turn.appendChild(messageEl);
   if (role === "user") attachUserAttachmentsToTurn(turn, messageEl, meta.attachments);
@@ -791,30 +861,9 @@ function buildCanonicalTurn(role, text, meta = {}){
  * downstream consumers and the accepted user-bubble geometry still key on them.
  */
 function buildRichTurnShell(role, meta = {}){
-  const turn = document.createElement("article");
-  turn.className = `cgTurn cgTurn--${role} wbTurn wbTurn--rich wbTurn--${role}`;
-  turn.setAttribute(TESTID_ATTR, meta.turnNo > 0 ? `${TURN_TESTID}-${meta.turnNo}` : TURN_TESTID);
-  turn.setAttribute("data-turn", role);
-  applyTurnAccessibility(turn, role);
-
-  const messageEl = document.createElement("div");
-  /* Neutral H2O message host only. The role modifier is deliberately omitted
-   * here: cgMsg--user carries the canonical bubble skin (padding, background,
-   * radius), which would wrap a second bubble around provider content that
-   * already contains .user-message-bubble-color. The owner-derived role
-   * attribute below stays — rich-replay CSS keys on it, and it is structural
-   * metadata, not presentation. */
-  messageEl.className = "cgMsg";
-  messageEl.setAttribute(ROLE_ATTR, role);
-
-  if (role === "assistant" && meta.answerIdx > 0){
-    turn.dataset.turnIdx = String(meta.answerIdx);
-    try { messageEl.dataset.turnIdx = String(meta.answerIdx); } catch {}
-  }
-  claimReplayIdentity(messageEl, MESSAGE_ID_ATTR, meta.messageId, meta.seenMessageIds);
-  claimReplayIdentity(messageEl, TURN_ID_ATTR, meta.turnId, meta.seenTurnIds);
+  const turn = buildTurnShell(role, "rich", meta);
+  const messageEl = buildMessageHost(role, "rich", meta);
   stampReplayTurnMeta(turn, messageEl, meta.createTime, meta.turnNo);
-
   turn.appendChild(messageEl);
   return { turn, messageEl };
 }
@@ -1147,20 +1196,7 @@ function render(inputRaw, options){
   /* Resolved before normalizeInput so typed v3 content[] is never flattened. */
   const semanticConversation = semanticV3Conversation(inputRaw);
   const input = normalizeInput(inputRaw);
-  const root = document.createElement("div");
-  root.className = "cgFrame";
-  root.dataset.chatTitle = input.title;
-  root.dataset.chatId = input.chatId;
-  root.dataset.projectId = input.projectId;
-  root.innerHTML = `
-    <div class="cgBody">
-      <div class="cgThread">
-        <section class="cgScroll" data-testid="${TURNS_TESTID}" aria-label="Conversation transcript"></section>
-      </div>
-    </div>
-  `;
-
-  const turnsEl = root.querySelector(".cgScroll");
+  const { root, turnsEl } = buildConversationShell(input);
   if (!(turnsEl instanceof Element)){
     throw new Error("Studio Chat Renderer could not create the conversation root");
   }
