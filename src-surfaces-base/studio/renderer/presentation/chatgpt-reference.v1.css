@@ -1,5 +1,5 @@
 /*
- * @version 1.0.1
+ * @version 1.0.2
  * H2O Studio Renderer — chatgpt-reference PresentationProfile stylesheet.
  *
  * Owner:   L-STUDIO-RENDERER
@@ -108,6 +108,61 @@
    override still follows it in the cascade after relocation. */
 @media (max-width: 720px){
   :where([data-h2o-presentation-profile="chatgpt-reference"]) .cgMsg--user{
+    width:fit-content;
+    max-width:min(100%, 42rem);
+  }
+}
+
+/* Rich-replay shell presentation: transcript spacing, root text color, child
+   containment, provider-turn margin normalization, the H2O rich user bubble
+   skin, the assistant host and the user host side placement. The no-bubble
+   user host fallback skin and the rich user-turn flex placement stay in
+   studio.css for now (source-order coupling with Reader rules). */
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .cgScroll.is-rich > *{
+  margin-bottom:14px;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot{
+  color:var(--wb-text);
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot > *{
+  max-width:100%;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot :where(
+  article[data-testid="conversation-turn"],
+  article[data-testid^="conversation-turn-"],
+  section[data-testid="conversation-turn"],
+  section[data-testid^="conversation-turn-"],
+  div[data-testid="conversation-turn"],
+  div[data-testid^="conversation-turn-"]
+){
+  margin:0;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot :where(.user-message-bubble-color){
+  max-width:min(var(--wb-user-w), 44rem);
+  width:fit-content;
+  margin-left:auto;
+  padding:10px 20px;
+  border-radius:var(--wb-radius-xl);
+  background:var(--wb-user-bg);
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot :where([data-message-author-role="assistant"]){
+  width:100%;
+  margin-right:auto;
+}
+
+:where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot .cgTurn--user [data-message-author-role="user"]{
+  margin-left:auto;
+}
+
+/* Narrow-viewport rich user bubble. Kept beside its base rule so the override
+   still follows it in the cascade after relocation. */
+@media (max-width: 720px){
+  :where([data-h2o-presentation-profile="chatgpt-reference"]) .wbRichRoot :where(.user-message-bubble-color){
     width:fit-content;
     max-width:min(100%, 42rem);
   }

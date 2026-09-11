@@ -2335,9 +2335,8 @@ body[data-layout="wide"] .cgScroll > *{
   width:min(var(--wb-thread-wide), 100%);
 }
 
-.cgScroll.is-rich > *{
-  margin-bottom:14px;
-}
+/* Rich transcript spacing (.cgScroll.is-rich > *) is owned by the Renderer
+   stylesheet renderer/presentation/chatgpt-reference.v1.css. */
 
 .cgTurn{
   min-width:0;
@@ -2391,24 +2390,14 @@ body[data-layout="wide"] .cgScroll > *{
   max-width:100%;
 }
 
-.wbRichRoot{
-  color:var(--wb-text);
-}
-
-.wbRichRoot > *{
-  max-width:100%;
-}
-
-.wbRichRoot :where(
-  article[data-testid="conversation-turn"],
-  article[data-testid^="conversation-turn-"],
-  section[data-testid="conversation-turn"],
-  section[data-testid^="conversation-turn-"],
-  div[data-testid="conversation-turn"],
-  div[data-testid^="conversation-turn-"]
-){
-  margin:0;
-}
+/* Rich shell presentation (.wbRichRoot color, .wbRichRoot > * containment,
+   provider-turn margin normalization, the H2O rich user bubble skin
+   .wbRichRoot :where(.user-message-bubble-color) and the assistant host) is
+   owned by the Renderer stylesheet renderer/presentation/chatgpt-reference.v1.css.
+   The no-bubble user host fallback below stays global: its max-width shares
+   specificity with the later Reader appearance rule
+   `.wbReader [data-message-author-role]`, which must keep winning by source
+   order. */
 
 .wbRichRoot :where([data-message-author-role="user"]):not(:has(.user-message-bubble-color)){
   max-width:min(var(--wb-user-w), 44rem);
@@ -2417,20 +2406,6 @@ body[data-layout="wide"] .cgScroll > *{
   padding:10px 20px;
   border-radius:var(--wb-radius-xl);
   background:var(--wb-user-bg);
-}
-
-.wbRichRoot :where(.user-message-bubble-color){
-  max-width:min(var(--wb-user-w), 44rem);
-  width:fit-content;
-  margin-left:auto;
-  padding:10px 20px;
-  border-radius:var(--wb-radius-xl);
-  background:var(--wb-user-bg);
-}
-
-.wbRichRoot :where([data-message-author-role="assistant"]){
-  width:100%;
-  margin-right:auto;
 }
 
 .wbRichRoot :where(p, li, blockquote){
@@ -2945,8 +2920,7 @@ body[data-route="reader"] .cgScroll .cgxui-mnmp-wash-orange::before{ background:
     padding:10px 6px 48px;
   }
 
-  .wbRichRoot :where([data-message-author-role="user"]):not(:has(.user-message-bubble-color)),
-  .wbRichRoot :where(.user-message-bubble-color){
+  .wbRichRoot :where([data-message-author-role="user"]):not(:has(.user-message-bubble-color)){
     width:fit-content;
     max-width:min(100%, 42rem);
   }
@@ -3890,16 +3864,16 @@ body[data-route="reader"][data-layout="wide"] .cgScroll > :where(
   max-width:var(--wb-thread-wide);
 }
 
-/* Keep stamped role wrappers authoritative for side placement parity */
+/* Keep stamped role wrappers authoritative for side placement parity. The
+   turn placement stays global: its display shares specificity with the later
+   Reader collapsed-section rule `.wbReader [data-turn].is-in-collapsed-section`,
+   which must keep winning by source order. The user host side placement
+   (margin-left) is owned by renderer/presentation/chatgpt-reference.v1.css. */
 .wbRichRoot .cgTurn--user[data-testid^="conversation-turn"] {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
   justify-content: flex-start;
-}
-
-.wbRichRoot .cgTurn--user [data-message-author-role="user"] {
-  margin-left: auto;
 }
 
 /* The message content div */

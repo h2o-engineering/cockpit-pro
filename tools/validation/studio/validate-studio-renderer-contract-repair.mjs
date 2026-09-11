@@ -21,6 +21,7 @@ const STUDIO_HTML_REL = 'src-surfaces-base/studio/studio.html';
 const ARCHIVE_REL = 'src-surfaces-base/studio/S0D3a. 🎬 Transcript Archive Engine - Studio.js';
 const SANITIZER_REL = 'src-surfaces-base/studio/platform/html-sanitizer.js';
 const PRESENTATION_PROFILE_REL = 'src-surfaces-base/studio/renderer/presentation/presentation-profile.v1.js';
+const PRESENTATION_CSS_REL = 'src-surfaces-base/studio/renderer/presentation/chatgpt-reference.v1.css';
 /* Semantic sources: parse/ingress/IR. The content renderer is the DOM
  * presentation sink downstream of accepted IR and may consult the profile. */
 const SEMANTIC_SOURCE_RELS = Object.freeze([
@@ -1421,6 +1422,62 @@ function validatePresentationProfileContract() {
   assert.throws(() => bare.api.buildTurnShell('user', 'rich', { turnNo: 1 }), /reference PresentationProfile is unavailable/, 'J: an unresolvable reference profile fails clearly');
 }
 
+/*
+ * M03 P3 S3C T7 slice C: the rich shell / bubble skin in the Renderer
+ * stylesheet keys on exactly the class hooks the profile JS emits, and the
+ * executed rich shells still produce those hooks (one H2O bubble, rich root
+ * mode classes). The stylesheet is read as text; the CSS ownership parser and
+ * cascade checks live in the content-renderer validator.
+ */
+function validateRichShellPresentationOwnership() {
+  const css = readRepo(PRESENTATION_CSS_REL).replace(/\/\*[\s\S]*?\*\//g, ' ');
+  const context = vm.createContext({});
+  const profile = installPresentationProfile(context).reference();
+  const scope = ':where([data-h2o-presentation-profile="chatgpt-reference"])';
+  const [bubbleHook] = profile.userBubbleClasses();
+  assert.equal(bubbleHook, 'user-message-bubble-color');
+  assert.ok(css.includes(`${scope} .wbRichRoot :where(.${bubbleHook}){`), 'the bubble skin keys on the profile bubble hook');
+  assert.ok(new RegExp(`@media \\(max-width: 720px\\)\\{\\s*${scope.replace(/[[\]()]/g, '\\$&')} \\.wbRichRoot :where\\(\\.${bubbleHook}\\)\\{`).test(css), 'the narrow bubble override keys on the same hook');
+  for (const cls of profile.transcriptClasses('rich')) assert.ok(css.includes(`.${cls}`), `rich transcript hook ${cls} is skinned by the profile stylesheet`);
+  assert.ok(css.includes(`${scope} .cgScroll.is-rich > *{`), 'rich transcript spacing keys on the is-rich mode hook');
+  assert.ok(css.includes(`${scope} .wbRichRoot :where([data-message-author-role="assistant"]){`), 'assistant host skin keys on the owner role attribute');
+  assert.ok(css.includes(`${scope} .wbRichRoot .cgTurn--user [data-message-author-role="user"]{`), 'user host side placement keys on the structural turn class and owner role attribute');
+  /* The stylesheet never invents hooks the JS does not emit. */
+  assert.doesNotMatch(css, /\.cgMsg--rich|\.wbTurn--edited|\.cgTurn--has-attachments|\.cgUserAttachment/, 'no stale or non-profile hooks in the profile stylesheet');
+  /* Executed: the rich shells still emit exactly those hooks. */
+  const seams = vm.createContext({
+    document: { createElement: (tagName) => new FakeDomElement(tagName) },
+    Element: FakeDomElement, String, Number, Set, Array, Object,
+    TESTID_ATTR: 'data-testid', TURN_TESTID: 'conversation-turn', TURNS_TESTID: 'conversation-turns',
+    ROLE_ATTR: 'data-message-author-role', MESSAGE_ID_ATTR: 'data-message-id', TURN_ID_ATTR: 'data-turn-id', ROLES: roleContract,
+    stampReplayTurnMeta: () => {},
+  });
+  Object.assign(seams, presentationProfileGlobals(seams));
+  vm.runInContext([
+    extractFunction(rendererSource, 'activePresentationProfile'),
+    extractFunction(rendererSource, 'normalizeRole'),
+    extractFunction(rendererSource, 'getAccessibleRoleLabel'),
+    extractFunction(rendererSource, 'applyTurnAccessibility'),
+    extractFunction(rendererSource, 'claimReplayIdentity'),
+    extractFunction(rendererSource, 'buildTurnShell'),
+    extractFunction(rendererSource, 'buildMessageHost'),
+    extractFunction(rendererSource, 'buildRichTurnShell'),
+    extractFunction(rendererSource, 'buildRichUserBubbleShell'),
+    extractConst(rendererSource, 'USER_BUBBLE_H2O_CLASSES'),
+    extractFunction(rendererSource, 'adoptRichUserBubble'),
+    'this.api = { buildRichTurnShell, adoptRichUserBubble };',
+  ].join('\n'), seams);
+  const { turn, messageEl } = seams.api.buildRichTurnShell('user', { turnNo: 1, answerIdx: 0, createTime: 1, messageId: 'm', turnId: 't', seenMessageIds: new Set(), seenTurnIds: new Set() });
+  const text = new FakeTextNode('hello'); messageEl.appendChild(text);
+  assert.equal(seams.api.adoptRichUserBubble(messageEl), true);
+  const bubbles = messageEl.querySelectorAll(`.${bubbleHook}`);
+  assert.equal(bubbles.length, 1, 'G: exactly one H2O bubble carries the hook the stylesheet skins');
+  assert.equal(bubbles[0].className, `cgBubble cgBubble--user ${bubbleHook}`);
+  assert.equal(turn.className, 'cgTurn cgTurn--user wbTurn wbTurn--rich wbTurn--user', 'H: rich turn classes unchanged');
+  assert.equal(messageEl.className, 'cgMsg', 'H: rich host stays neutral');
+  assert.equal(messageEl.getAttribute('data-message-author-role'), 'user');
+}
+
 function validateExtractedRendererBoundary() {
   const sanitizerTag = '<script src="./platform/html-sanitizer.js"></script>';
   const rendererTag = '<script src="./renderer/chat-renderer.studio.js"></script>';
@@ -1450,6 +1507,7 @@ validateBuildFallbackDecision();
 validateStructuralShellAuthority();
 validateRichUserBubbleAuthority();
 validatePresentationProfileContract();
+validateRichShellPresentationOwnership();
 validateExtractedRendererBoundary();
 
 console.log('Studio renderer contract repair validation passed');
