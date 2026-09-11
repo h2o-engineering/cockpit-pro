@@ -455,7 +455,8 @@ check('studio.css keeps only structural .cgMsg sizing and the rich halves of the
   assert.ok(rules.some((r) => members(r).includes('body[data-route="reader"] .cgMsg--user')), 'I: Reader-route user rule remains global');
   assert.equal(rules.some((r) => members(r).some((m) => m.includes('.cgMsg--edited'))), false, 'I: the persisted edit accent no longer lives in studio.css (slice E)');
   assert.ok(rules.some((r) => members(r).includes('.wbReader[data-edit-mode="on"] [data-turn].wbTurn--editing .cgMsg--user')), 'I: edit-mode user rule remains global');
-  assert.ok(rules.some((r) => r.selector === '.cgMsg--rich'), 'stale .cgMsg--rich left untouched in this slice');
+  /* S3C slice G: the stale .cgMsg--rich rule is gone (no producer exists; rich message modifiers are empty). */
+  assert.equal(rules.some((r) => members(r).some((m) => m.includes('.cgMsg--rich'))), false, 'B: no .cgMsg--rich rule remains in studio.css (slice G)');
 });
 
 const RICH_SHELL_RULES = {
@@ -616,9 +617,14 @@ const IMAGE_UNIT = [
   ['.cgUserAttachmentGrid', { '--cg-user-attachment-size': '112px', display: 'grid', 'grid-template-columns': 'repeat(auto-fit, minmax(var(--cg-user-attachment-size), var(--cg-user-attachment-size)))', 'justify-content': 'end', gap: '8px', width: 'fit-content', 'max-width': 'min(100%, calc((var(--cg-user-attachment-size) * 3) + 16px))', margin: '0 0 8px auto' }],
   ['.cgUserAttachmentCard', { width: 'var(--cg-user-attachment-size)', height: 'var(--cg-user-attachment-size)', overflow: 'hidden', 'border-radius': '18px', border: '1px solid rgba(255,255,255,.12)', background: 'rgba(255,255,255,.08)' }],
   ['.cgUserAttachmentCard img', { display: 'block', width: '100%', height: '100%', 'max-width': 'none', 'object-fit': 'cover', 'border-radius': 'inherit' }],
-  ['.cgTurn--user .grid:has(img), .cgTurn--user [data-message-attachment-id]:has(img), .wbRichRoot .cgTurn--user .grid:has(img), .wbRichRoot .cgTurn--user [data-message-attachment-id]:has(img)', { display: 'flex', 'flex-wrap': 'wrap', 'justify-content': 'flex-end', gap: '8px', width: 'fit-content', 'max-width': 'min(100%, 352px)', margin: '0 0 8px auto' }],
-  ['.cgTurn--user .grid:has(img) img, .cgTurn--user [data-message-attachment-id]:has(img) img, .wbRichRoot .cgTurn--user .grid:has(img) img, .wbRichRoot .cgTurn--user [data-message-attachment-id]:has(img) img', { display: 'block', width: '112px', height: '112px', 'max-width': 'none', 'object-fit': 'cover', 'border-radius': '18px' }],
 ];
+/* S3C slice G: the user-turn provider attachment fallback (`.cgTurn--user
+ * .grid:has(img)` / `[data-message-attachment-id]:has(img)` and their img
+ * members) was dead CSS - the Renderer strips native user images at extraction
+ * and projects user attachments only through cgUserAttachmentGrid / Card - and
+ * was removed. The provider rich image grid (`.wbRichRoot .grid:has(> img)`)
+ * stays live. */
+const DEAD_USER_FALLBACK = /\.cgTurn--user (\.grid|\[data-message-attachment-id\]):has\(img\)/;
 const READER_ATTACHMENT_ALIGNMENT = 'body[data-route="reader"] .cgUserAttachmentGrid, body[data-route="reader"] .wbRichRoot .cgTurn--user .cgUserAttachmentGrid, body[data-route="reader"] .wbRichRoot .wbTurn--user .cgUserAttachmentGrid, body[data-route="reader"] .wbRichRoot [data-turn="user"] .cgUserAttachmentGrid, body[data-route="reader"] :where(.cgTurn--user, .wbTurn--user, [data-turn="user"]) .cgUserAttachmentGrid';
 
 check('image / attachment presentation lives in the profile stylesheet as one ordered unit after the provider-content layer (S3C slice F)', () => {
@@ -646,6 +652,9 @@ check('image / attachment presentation lives in the profile stylesheet as one or
   /* K: every member of the unit is profile-root scoped (raw selector members carry the scope). */
   for (const [plain] of IMAGE_UNIT) for (const m of splitMembers(find(plain)[0].selector)) assert.ok(m.startsWith(SCOPE), `K: scoped member: ${m}`);
   for (const m of splitMembers(media[0].selector)) assert.ok(m.startsWith(SCOPE), `K: scoped member: ${m}`);
+  /* D (slice G): the dormant user-turn fallback is gone from the profile sheet; F: the provider rich image grid stays. */
+  assert.equal(rules.filter((r) => DEAD_USER_FALLBACK.test(r.plain)).length, 0, 'D: no user-turn attachment fallback selector remains in the profile stylesheet (slice G)');
+  assert.equal(rules.filter((r) => r.plain.includes(':has(img)')).length, 0, 'D: no :has(img) fallback member remains');
   /* H: Reader-route attachment alignment is not in the profile sheet; I: cgTurn--has-attachments stays unstyled. */
   assert.equal(rules.filter((r) => r.selector.includes('body[data-route="reader"]')).length, 0, 'H: no Reader-route rule in the profile stylesheet');
   assert.equal(rules.filter((r) => r.selector.includes('.cgTurn--has-attachments')).length, 0, 'I: cgTurn--has-attachments has no profile rule');
@@ -661,6 +670,7 @@ check('global studio.css keeps only the Reader-route attachment alignment and no
   const globalMembers = new Set(); for (const r of glob) for (const m of splitMembers(r.selector)) globalMembers.add(m);
   for (const [plain] of IMAGE_UNIT) for (const m of splitMembers(norm(plain))) assert.equal(globalMembers.has(m), false, `J: ${m} no longer declared in studio.css`);
   assert.equal(globalMembers.has('.wbRichRoot :where(img, video, canvas, svg)'), false, 'J: rich media containment no longer global');
+  assert.equal([...globalMembers].some((m) => DEAD_USER_FALLBACK.test(m) || m.includes('.cgMsg--rich')), false, 'slice G: dead fallback / .cgMsg--rich not resurrected globally');
   /* I: cgTurn--has-attachments has no rule anywhere; the safety rule is untouched. */
   assert.equal(glob.filter((r) => r.selector.includes('.cgTurn--has-attachments')).length, 0, 'I: cgTurn--has-attachments unstyled in studio.css');
   assert.ok(glob.some((r) => r.selector === '.wbRichRoot :where(button, input, textarea, select, summary)'), 'replay-interaction safety stays global');

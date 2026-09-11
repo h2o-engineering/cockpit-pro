@@ -1682,6 +1682,22 @@ function validateAttachmentPresentationOwnership() {
   assert.ok(cssMembersOf(globalAttachment[0].selector).every((m) => m.startsWith('body[data-route="reader"]')), 'H: the global attachment rule is the Reader-route alignment');
   assert.ok(globalAttachment[0].decls.every((d) => /!important$/.test(d)), 'H: Reader-route alignment keeps !important');
   assert.equal(profileRules.filter((r) => r.selector.includes('body[data-route="reader"]')).length, 0, 'H: no Reader-route rule in the profile stylesheet');
+  /* S3C slice G (hygiene): dead presentation removed and provably unproducible.
+   * A/C: no executable source emits cgMsg--rich and the rich message modifiers
+   * stay empty; B: no .cgMsg--rich rule in either sheet; D: the user-turn
+   * attachment fallback is gone while the Renderer keeps stripping native user
+   * images at extraction (so nothing can reach such a rule). */
+  const codeOnly = (src) => src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/.*$/gm, '');
+  for (const [name, src] of [['chat-renderer', rendererSource], ['studio.js', studioSource], ['presentation-profile', presentationProfileSource], ['content-renderer', readRepo(CONTENT_RENDERER_REL)]]) {
+    assert.doesNotMatch(codeOnly(src), /cgMsg--rich/, `A: ${name} emits no cgMsg--rich`);
+  }
+  for (const role of ['user', 'assistant', 'system', 'tool']) assert.deepEqual([...profile.messageClasses(role, 'rich')], [], `C: rich message modifier stays empty (${role})`);
+  for (const [name, sheet] of [['profile', profileRules], ['studio.css', studioRules]]) {
+    assert.equal(sheet.filter((r) => cssMembersOf(r.selector).some((m) => m.includes('.cgMsg--rich'))).length, 0, `B: no .cgMsg--rich rule in ${name}`);
+    assert.equal(sheet.filter((r) => cssMembersOf(r.selector).some((m) => /\.cgTurn--user (\.grid|\[data-message-attachment-id\]):has\(img\)/.test(m))).length, 0, `D: no user-turn attachment fallback rule in ${name}`);
+  }
+  assert.match(extractFunction(rendererSource, 'extractRichTurnContentHtml'), /if \(normalizeRole\(ownerRole\) === \(ROLES\.USER \|\| "user"\)\) removeNativeUserAttachmentImages\(turnEl\);/, 'D: rich user replay still strips native attachment images at extraction (the fallback stays unreachable)');
+  assert.ok(profileRules.some((r) => r.selector === `${scope} .wbRichRoot .grid:has(> img), ${scope} .wbRichRoot [data-message-attachment-id]:has(> img)`), 'F: the live provider rich image grid rule is preserved');
 }
 
 function validateExtractedRendererBoundary() {

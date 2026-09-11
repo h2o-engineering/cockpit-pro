@@ -2359,10 +2359,6 @@ body[data-layout="wide"] .cgScroll > *{
   min-width:0;
 }
 
-.cgMsg--rich{
-  width:100%;
-}
-
 /* Rich content presentation (.wbRichRoot pre / code / inline code and the
    content baseline below the user-host fallback) is owned by the Renderer
    stylesheet renderer/presentation/chatgpt-reference.v1.css. */
