@@ -2371,20 +2371,10 @@ body[data-layout="wide"] .cgScroll > *{
    provider-turn margin normalization, the H2O rich user bubble skin
    .wbRichRoot :where(.user-message-bubble-color) and the assistant host) is
    owned by the Renderer stylesheet renderer/presentation/chatgpt-reference.v1.css.
-   The no-bubble user host fallback below stays global: its max-width shares
-   specificity with the later Reader appearance rule
-   `.wbReader [data-message-author-role]`, which must keep winning by source
-   order. */
-
-.wbRichRoot :where([data-message-author-role="user"]):not(:has(.user-message-bubble-color)){
-  max-width:min(var(--wb-user-w), 44rem);
-  width:fit-content;
-  margin-left:auto;
-  padding:10px 20px;
-  border-radius:var(--wb-radius-xl);
-  background:var(--wb-user-bg);
-}
-
+   The former no-bubble rich user host fallback was removed as dead: every
+   successful rich user host carries exactly one H2O-owned bubble with the
+   profile marker, and the canonical user host is skinned by the profile
+   .cgMsg--user rule. */
 
 /* Rich media containment (.wbRichRoot :where(img, video, canvas, svg)) is
    owned by the Renderer stylesheet renderer/presentation/chatgpt-reference.v1.css. */
@@ -2818,11 +2808,6 @@ body[data-route="reader"] .cgScroll .cgxui-mnmp-wash-orange::before{ background:
 
   .cgScroll{
     padding:10px 6px 48px;
-  }
-
-  .wbRichRoot :where([data-message-author-role="user"]):not(:has(.user-message-bubble-color)){
-    width:fit-content;
-    max-width:min(100%, 42rem);
   }
 }
 

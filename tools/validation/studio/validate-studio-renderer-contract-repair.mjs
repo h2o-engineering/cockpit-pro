@@ -1700,6 +1700,89 @@ function validateAttachmentPresentationOwnership() {
   assert.ok(profileRules.some((r) => r.selector === `${scope} .wbRichRoot .grid:has(> img), ${scope} .wbRichRoot [data-message-attachment-id]:has(> img)`), 'F: the live provider rich image grid rule is preserved');
 }
 
+/* S3C slice H: final Renderer / Reader CSS boundary. Executed: every
+ * successful rich user host carries exactly one H2O-owned bubble with the
+ * profile marker (marker present, absent, nested, unrelated duplicates), so the
+ * former no-bubble user host fallback E can never match a rich user host; the
+ * rich path fails the transcript closed when adoption fails. Static: E is gone
+ * from both sheets, H1 / provider outer structure / replay safety stay global
+ * and out of the profile sheet, the profile sheet is unchanged at 1.0.6. */
+function validateFinalRendererCssBoundary() {
+  const scope = ':where([data-h2o-presentation-profile="chatgpt-reference"])';
+  const profileCss = readRepo(PRESENTATION_CSS_REL);
+  const studioCss = readRepo(STUDIO_CSS_REL);
+  const context = vm.createContext({});
+  const profile = installPresentationProfile(context).reference();
+  const marker = profile.userBubbleMarkerClass();
+  assert.equal(marker, 'user-message-bubble-color');
+  /* A (executed): the real adoption seam on four fragment shapes. */
+  const seams = vm.createContext({
+    document: { createElement: (tagName) => new FakeDomElement(tagName) },
+    Element: FakeDomElement, String, Number, Set, Array, Object,
+    TESTID_ATTR: 'data-testid', TURN_TESTID: 'conversation-turn', TURNS_TESTID: 'conversation-turns',
+    ROLE_ATTR: 'data-message-author-role', MESSAGE_ID_ATTR: 'data-message-id', TURN_ID_ATTR: 'data-turn-id', ROLES: roleContract,
+    stampReplayTurnMeta: () => {},
+  });
+  Object.assign(seams, presentationProfileGlobals(seams));
+  vm.runInContext([
+    extractFunction(rendererSource, 'activePresentationProfile'),
+    extractFunction(rendererSource, 'normalizeRole'),
+    extractFunction(rendererSource, 'getAccessibleRoleLabel'),
+    extractFunction(rendererSource, 'applyTurnAccessibility'),
+    extractFunction(rendererSource, 'claimReplayIdentity'),
+    extractFunction(rendererSource, 'buildTurnShell'),
+    extractFunction(rendererSource, 'buildMessageHost'),
+    extractFunction(rendererSource, 'buildRichUserBubbleShell'),
+    extractConst(rendererSource, 'USER_BUBBLE_H2O_CLASSES'),
+    extractFunction(rendererSource, 'adoptRichUserBubble'),
+    'this.api = { buildMessageHost, adoptRichUserBubble };',
+  ].join('\n'), seams);
+  const el = (tag, cls) => { const node = new FakeDomElement(tag); if (cls) node.className = cls; return node; };
+  const shapes = {
+    markerPresent: () => { const wrap = el('div', 'flex w-full flex-col'); const provider = el('div', `relative rounded-3xl ${marker}`); provider.appendChild(new FakeTextNode('hi')); wrap.appendChild(provider); return [wrap]; },
+    markerAbsent: () => { const wrap = el('div', 'flex w-full flex-col'); const inner = el('div', 'relative rounded-3xl'); inner.appendChild(new FakeTextNode('no marker')); wrap.appendChild(inner); return [wrap]; },
+    nestedMarkers: () => { const outer = el('div', marker); const inner = el('div', marker); inner.appendChild(new FakeTextNode('nested')); outer.appendChild(inner); return [outer]; },
+    twoUnrelatedMarkers: () => { const a = el('div', marker); a.appendChild(new FakeTextNode('a')); const b = el('div', marker); b.appendChild(new FakeTextNode('b')); return [a, b]; },
+    plainText: () => [new FakeTextNode('bare text')],
+  };
+  for (const [name, build] of Object.entries(shapes)) {
+    const host = seams.api.buildMessageHost('user', 'rich', { seenMessageIds: new Set(), seenTurnIds: new Set(), messageId: 'm-' + name, turnId: 't-' + name });
+    for (const node of build()) host.appendChild(node);
+    assert.equal(seams.api.adoptRichUserBubble(host), true, `A: adoption succeeds (${name})`);
+    const bubbles = host.querySelectorAll(`.${marker}`);
+    assert.equal(bubbles.length, 1, `A: exactly one marked element after adoption (${name})`);
+    assert.equal(bubbles[0].className, `cgBubble cgBubble--user ${marker}`, `A: the marked element is the H2O-owned bubble (${name})`);
+    assert.equal(host.textContent, build().map((n) => n.textContent ?? '').join('') || host.textContent, `A: content preserved (${name})`);
+  }
+  assert.match(rendererSource, /if \(role === "user" && !adoptRichUserBubble\(messageEl\)\) return fallbackResult;/, 'A: a rich user host that cannot adopt a bubble fails the transcript closed (no bare rich user host is ever mounted)');
+  assert.match(extractFunction(rendererSource, 'adoptRichUserBubble'), /const rail = document\.createElement\("div"\);\s*rail\.className = "cgBubbleRail";/, 'A: the no-marker path wraps content in the H2O rail + bubble');
+  /* B/C: the dead no-bubble fallback is gone from both sheets. */
+  const DEAD = /:not\(:has\(\.user-message-bubble-color\)\)/;
+  const studioRules = cssRulesOf(studioCss), profileRules = cssRulesOf(profileCss);
+  assert.equal(studioRules.filter((r) => cssMembersOf(r.selector).some((m) => DEAD.test(m) && !m.startsWith('body[data-route="reader"]'))).length, 0, 'B: the no-bubble user host fallback (and its narrow member) is gone from studio.css');
+  assert.equal(profileRules.filter((r) => DEAD.test(r.selector)).length, 0, 'C: no no-bubble fallback in the profile stylesheet');
+  /* D/E: H1 stays global, verbatim, and out of the profile. */
+  const H1 = '.wbRichRoot .cgTurn--user[data-testid^="conversation-turn"]';
+  assert.deepEqual(cssDeclarationsOf(studioCss, H1), ['display: flex', 'flex-direction: column', 'align-items: flex-end', 'justify-content: flex-start'], 'D: H1 rich user-turn placement stays global, verbatim (Renderer replay structural compatibility)');
+  assert.equal(profileRules.filter((r) => r.selector.includes(H1)).length, 0, 'E: H1 is not in the profile stylesheet');
+  /* F/G: Reader-route rich integration stays global and out of the profile. */
+  /* Reader-route rich alignment rules (other-lane cgxui feature rules under the same route are not part of this set). */
+  const readerRich = studioRules.filter((r) => cssMembersOf(r.selector).some((m) => m.startsWith('body[data-route="reader"]') && /wbRichRoot|cgMsg--user|cgUserAttachmentGrid/.test(m)) && !/data-cgxui/.test(r.selector));
+  assert.ok(readerRich.length >= 6, `F: Reader-route rich integration rules stay global (found ${readerRich.length})`);
+  assert.ok(readerRich.every((r) => r.decls.every((d) => /!important$/.test(d)) || r.selector.includes('.cgScroll >')), 'F: Reader-route rich alignment keeps its !important behaviour');
+  assert.equal(profileRules.filter((r) => /data-route="reader"|^\.wbReader\b/.test(r.selector)).length, 0, 'G: no Reader-route / Reader integration rule in the profile stylesheet');
+  assert.ok(studioRules.some((r) => r.selector === '.wbReader [data-turn].is-in-collapsed-section' && r.decls.includes('display:none')), 'F: Reader collapsed-section rule still global');
+  /* H: provider outer structure stays global; I: replay interaction safety stays global and out of the profile. */
+  for (const sel of ['.text-message', '.agent-turn', '.user-turn', '[data-testid^="conversation-turn"]', '.result-streaming']) assert.ok(studioRules.some((r) => cssMembersOf(r.selector).includes(sel)), `H: provider outer-structure rule stays global: ${sel}`);
+  assert.deepEqual(cssDeclarationsOf(studioCss, '.wbRichRoot :where(button, input, textarea, select, summary)'), ['pointer-events:none'], 'I: replay interaction safety stays global, verbatim');
+  assert.equal(profileRules.filter((r) => /:where\(button, input, textarea, select, summary\)|^\.text-message$|^\.agent-turn$|^\.user-turn$/.test(r.selector.replace(`${scope} `, ''))).length, 0, 'H/I: structural and safety rules are absent from the profile stylesheet');
+  /* K: profile stylesheet unchanged at 1.0.6 and referenced as such. */
+  assert.match(profileCss, /@version 1\.0\.6\b/, 'K: profile stylesheet version 1.0.6');
+  assert.match(studioHtmlSource, /chatgpt-reference\.v1\.css\?v=1\.0\.6"/, 'K: studio.html references the 1.0.6 profile stylesheet');
+  /* L: the Renderer still owns the structural vocabulary the boundary relies on. */
+  assert.match(rendererSource, /turn\.className = \["cgTurn", `cgTurn--\$\{role\}`, \.\.\.activePresentationProfile\(\)\.turnClasses\(role, mode\)\]\.join\(" "\);|cgTurn--\$\{role\}/, 'L: the Renderer stamps cgTurn--<role> structurally');
+}
+
 function validateExtractedRendererBoundary() {
   const sanitizerTag = '<script src="./platform/html-sanitizer.js"></script>';
   const rendererTag = '<script src="./renderer/chat-renderer.studio.js"></script>';
@@ -1732,6 +1815,7 @@ validatePresentationProfileContract();
 validateRichShellPresentationOwnership();
 validatePersistedEditPresentationOwnership();
 validateAttachmentPresentationOwnership();
+validateFinalRendererCssBoundary();
 validateExtractedRendererBoundary();
 
 console.log('Studio renderer contract repair validation passed');

@@ -445,11 +445,9 @@ check('studio.css keeps only structural .cgMsg sizing and the rich halves of the
     assert.equal(rules.filter((r) => r.media === null && splitMembers(r.selector).includes(rich)).length, 0, `E: ${rich} no longer global`);
   }
   /* Slice C moved the bubble member of the narrow rule to the profile
-   * stylesheet; the deferred user-host member stays global. */
-  const narrowRich = rules.filter((r) => r.media === '(max-width: 720px)' && r.selector.includes('.wbRichRoot :where('));
-  assert.equal(narrowRich.length, 1, 'E: the narrow rich user-host rule stays global');
-  assert.deepEqual(narrowRich[0].declarations, NARROW_USER_OVERRIDE);
-  assert.equal(narrowRich[0].selector.includes('.cgMsg--user'), false, 'C: the canonical member left the global narrow rule');
+   * stylesheet; slice H removed the dead no-bubble user-host member, so no
+   * global narrow rich rule remains at all. */
+  assert.equal(rules.filter((r) => r.media === '(max-width: 720px)' && r.selector.includes('.wbRichRoot :where(')).length, 0, 'E: no global narrow rich user-host rule remains (slice H)');
   /* I: Reader-route and interactive edit-mode rules were not absorbed (the
    * persisted .cgMsg--edited accent moved in S3C slice E). */
   assert.ok(rules.some((r) => members(r).includes('body[data-route="reader"] .cgMsg--user')), 'I: Reader-route user rule remains global');
@@ -468,14 +466,17 @@ const RICH_SHELL_RULES = {
   '.wbRichRoot :where([data-message-author-role="assistant"])': { width: '100%', 'margin-right': 'auto' },
   '.wbRichRoot .cgTurn--user [data-message-author-role="user"]': { 'margin-left': 'auto' },
 };
-/* Deferred for cascade coupling (stay global, verbatim): the no-bubble user
- * host fallback shares specificity (0,2,0) with the later Reader appearance
- * rule `.wbReader [data-message-author-role]`, and the user-turn flex
- * placement shares (0,3,0) with the later `.wbReader [data-turn].is-in-collapsed-section`. */
+/* Final boundary (S3C slice H). H1, the rich user-turn placement, is Renderer
+ * replay STRUCTURAL compatibility and stays global, verbatim: its display
+ * shares (0,3,0) with the later Reader `.wbReader [data-turn].is-in-collapsed-section`
+ * rule, which must keep winning by source order. The former no-bubble user
+ * host fallback E is dead (every successful rich user host carries exactly one
+ * H2O-owned marked bubble; the canonical user host is skinned by the profile
+ * .cgMsg--user rule) and was removed from studio.css. */
 const DEFERRED_GLOBAL_RULES = {
-  '.wbRichRoot :where([data-message-author-role="user"]):not(:has(.user-message-bubble-color))': { 'max-width': 'min(var(--wb-user-w), 44rem)', width: 'fit-content', 'margin-left': 'auto', padding: '10px 20px', 'border-radius': 'var(--wb-radius-xl)', background: 'var(--wb-user-bg)' },
   '.wbRichRoot .cgTurn--user[data-testid^="conversation-turn"]': { display: 'flex', 'flex-direction': 'column', 'align-items': 'flex-end', 'justify-content': 'flex-start' },
 };
+const DEAD_NO_BUBBLE_FALLBACK = '.wbRichRoot :where([data-message-author-role="user"]):not(:has(.user-message-bubble-color))';
 
 check('rich-replay shell / bubble presentation lives in the profile stylesheet with its narrow override (S3C slice C)', () => {
   const rules = parseRules(read(PROFILE_CSS_REL)).map((r) => ({ ...r, selector: norm(r.selector) }));
@@ -490,7 +491,8 @@ check('rich-replay shell / bubble presentation lives in the profile stylesheet w
   assert.equal(narrow.length, 1, 'I: the narrow rich-bubble override migrated with its base rule');
   assert.deepEqual(narrow[0].declarations, NARROW_USER_OVERRIDE);
   assert.ok(narrow[0].index > base.index, 'I: the override follows the base rule');
-  for (const sel of Object.keys(DEFERRED_GLOBAL_RULES)) assert.equal(rules.filter((r) => r.selector.includes(norm(sel))).length, 0, `deferred rule must not be in the profile stylesheet: ${sel}`);
+  for (const sel of Object.keys(DEFERRED_GLOBAL_RULES)) assert.equal(rules.filter((r) => r.selector.includes(norm(sel))).length, 0, `E: structural rule must not be in the profile stylesheet: ${sel}`);
+  assert.equal(rules.filter((r) => r.selector.includes(norm(DEAD_NO_BUBBLE_FALLBACK))).length, 0, 'C: the dead no-bubble fallback is not in the profile stylesheet (slice H)');
   /* Slice D moved content typography and the provider compatibility layer here
    * as one ordered unit; its own check below proves order and membership. */
 });
@@ -502,14 +504,14 @@ check('studio.css keeps the deferred rich rules, the prose/Tailwind layer, Reade
     const dup = rules.filter((r) => r.media === null && members(r).includes(norm(sel)));
     assert.equal(dup.length, 0, `B: studio.css must not declare ${sel}`);
   }
-  const narrowRich = rules.filter((r) => r.media === '(max-width: 720px)' && members(r).some((m) => m.includes('.wbRichRoot :where(')));
-  assert.equal(narrowRich.length, 1, 'the narrow rich rule remains for the deferred user-host member only');
-  assert.deepEqual(members(narrowRich[0]), [norm('.wbRichRoot :where([data-message-author-role="user"]):not(:has(.user-message-bubble-color))')]);
-  assert.deepEqual(narrowRich[0].declarations, NARROW_USER_OVERRIDE);
+  /* B (slice H): the dead no-bubble fallback and its narrow member are gone from studio.css. */
+  assert.equal(rules.filter((r) => members(r).some((m) => m.includes(':not(:has(.user-message-bubble-color))') && !m.startsWith('body[data-route="reader"]'))).length, 0, 'B: no non-Reader no-bubble fallback member remains in studio.css (slice H)');
+  assert.equal(rules.filter((r) => r.media === '(max-width: 720px)' && members(r).some((m) => m.includes('.wbRichRoot :where('))).length, 0, 'B: no global narrow rich rule remains');
+  /* D: H1 stays global, verbatim (Renderer replay structural compatibility). */
   for (const [sel, decls] of Object.entries(DEFERRED_GLOBAL_RULES)) {
     const found = rules.filter((r) => r.selector === norm(sel) && r.media === null);
-    assert.equal(found.length, 1, `deferred rule stays global: ${sel}`);
-    assert.deepEqual(found[0].declarations, decls, `deferred rule unchanged: ${sel}`);
+    assert.equal(found.length, 1, `D: structural rule stays global: ${sel}`);
+    assert.deepEqual(found[0].declarations, decls, `D: structural rule unchanged: ${sel}`);
   }
   /* The later competitors that force the deferrals still exist as they were. */
   assert.ok(rules.some((r) => members(r).includes('.wbReader [data-message-author-role]') && 'max-width' in r.declarations), 'Reader appearance width rule still global');
@@ -674,6 +676,61 @@ check('global studio.css keeps only the Reader-route attachment alignment and no
   /* I: cgTurn--has-attachments has no rule anywhere; the safety rule is untouched. */
   assert.equal(glob.filter((r) => r.selector.includes('.cgTurn--has-attachments')).length, 0, 'I: cgTurn--has-attachments unstyled in studio.css');
   assert.ok(glob.some((r) => r.selector === '.wbRichRoot :where(button, input, textarea, select, summary)'), 'replay-interaction safety stays global');
+});
+
+/* S3C slice H: the final Renderer / Reader CSS boundary. Every remaining
+ * studio.css rule whose selector touches the Renderer / replay vocabulary must
+ * fall into exactly one accepted non-profile category; the reference profile
+ * owns all chatgpt-reference presentation. A rule that matches none of the
+ * category patterns is reported as stranded presentation and fails. */
+const RENDERER_FAMILY = /cgFrame|cgBody|cgThread|cgScroll|cgTurn|cgMsg|cgBubble|cgUserAttachment|wbRichRoot|wbTurn|data-message-author-role|data-testid\^?="conversation-turn|\[data-turn|\.text-message|\.agent-turn|\.user-turn|user-message-bubble-color|result-streaming|data-message-id|\.markdown|\.prose|\.flex-col|\.relative/;
+const BOUNDARY_CATEGORIES = [
+  ['READER_INTEGRATION', (sel) => /^body\[data-route="reader"\]|^\.wbReader\b|^html\[data-h2o-runtime="tauri"\] \.wbReader|^#viewReader/.test(sel) && !/data-cgxui|cgxui-/.test(sel)],
+  ['OTHER_LANE_OWNED_FEATURE_INTEGRATION', (sel) => /data-cgxui|cgxui-|data-at-collapsed/.test(sel)],
+  ['APPLICATION_SHELL_STRUCTURE', (sel) => /^\.cgFrame$|^\.cgBody$|^\.cgThread$|^\.cgScroll(::-webkit-scrollbar[\w-]*(:hover)?)?$|^\.cgScroll > \*$|^body\[data-layout="wide"\] \.cgScroll > \*$|^\.wbHistory::-webkit-scrollbar|^\.wbSideLabel$|^\.wbSideMeta$|^\.wbRouteEyebrow$|^\.cgKicker$|^\.cgMsgMeta$|^\.wbTurn$|^\.wbTurn:hover \.wbEditBtn$|^\.wbTurn--editing \.wbEditBtn$/.test(sel)],
+  /* Replay interaction safety: inert replayed controls and hidden provider action affordances (edit / response actions / action buttons). */
+  ['RENDERER_REPLAY_INTERACTION_SAFETY_NON_PROFILE', (sel) => /^\.wbRichRoot :where\(button, input, textarea, select, summary\)$|^\.wbRichRoot \[data-testid(="[\w-]+-turn-action-button"|\*="action-button")\]$|^\.wbRichRoot \[aria-label="(Edit message|Response actions|Your message actions)"\](\[role="group"\])?$|^\.result-streaming$/.test(sel)],
+  ['RENDERER_STRUCTURAL_OR_REPLAY_COMPATIBILITY_NON_PROFILE', (sel) => /^\.cgTurn$|^\.cgTurn--user$|^\.cgMsg$|^\.wbRichRoot \.cgTurn--user\[data-testid\^="conversation-turn"\]$|^\.text-message$|^\.agent-turn$|^\.user-turn$|^\[data-testid\^="conversation-turn"\]$|^\[data-message-author-role="(assistant|user)"\] \.relative$|^\.wbRichRoot (\[data-message-author-role(="(user|assistant)")?\](\.text-message| \.text-message( > \*)?| :where\(\.markdown, \.prose, ul, ol, li\)| > div| \.flex-col)|\.text-message|\.result-streaming::after|\[class\*="streaming"\])$/.test(sel)],
+];
+const DEAD_SELECTORS = [DEAD_NO_BUBBLE_FALLBACK, '.cgMsg--rich'];
+
+check('final Renderer / Reader CSS boundary: no reference-profile presentation is stranded in studio.css (S3C slice H)', () => {
+  const rules = parseRules(read(STUDIO_CSS_REL)).map((r) => ({ ...r, selector: norm(r.selector) }));
+  const stranded = []; const tally = {};
+  for (const r of rules) {
+    for (const m of splitMembers(r.selector)) {
+      if (!RENDERER_FAMILY.test(m)) continue;
+      const hit = BOUNDARY_CATEGORIES.find(([, test]) => test(m));
+      if (!hit) { stranded.push(`${m} { ${Object.entries(r.declarations).map(([k, v]) => `${k}:${v}`).join('; ')} }`); continue; }
+      tally[hit[0]] = (tally[hit[0]] || 0) + 1;
+    }
+  }
+  assert.deepEqual(stranded, [], `J: REFERENCE_PROFILE_PRESENTATION stranded in studio.css (count ${stranded.length})`);
+  for (const cat of ['READER_INTEGRATION', 'APPLICATION_SHELL_STRUCTURE', 'RENDERER_STRUCTURAL_OR_REPLAY_COMPATIBILITY_NON_PROFILE', 'RENDERER_REPLAY_INTERACTION_SAFETY_NON_PROFILE', 'OTHER_LANE_OWNED_FEATURE_INTEGRATION']) assert.ok(tally[cat] > 0, `boundary category populated: ${cat}`);
+  /* B/D/F/H/I: the dead rules are gone; the structural, Reader and safety rules are exactly where the boundary says. */
+  for (const dead of DEAD_SELECTORS) assert.equal(rules.filter((r) => splitMembers(r.selector).includes(norm(dead))).length, 0, `B: dead rule absent from studio.css: ${dead}`);
+  const global = (sel) => rules.filter((r) => r.media === null && r.selector === norm(sel));
+  assert.deepEqual(global('.wbRichRoot .cgTurn--user[data-testid^="conversation-turn"]')[0]?.declarations, { display: 'flex', 'flex-direction': 'column', 'align-items': 'flex-end', 'justify-content': 'flex-start' }, 'D: H1 structural placement stays global, verbatim');
+  assert.deepEqual(global('.wbRichRoot :where(button, input, textarea, select, summary)')[0]?.declarations, { 'pointer-events': 'none' }, 'I: replay interaction safety stays global, verbatim');
+  for (const sel of ['.text-message', '.agent-turn', '.user-turn', '[data-testid^="conversation-turn"]', '.result-streaming', '.wbRichRoot .text-message']) assert.ok(rules.some((r) => splitMembers(r.selector).includes(sel)), `H: provider outer-structure rule stays global: ${sel}`);
+  assert.ok(rules.some((r) => splitMembers(r.selector).includes('[data-message-author-role="assistant"] .relative')), 'H: provider .relative position normalization stays global');
+  const readerRich = rules.filter((r) => splitMembers(r.selector).some((m) => m.startsWith('body[data-route="reader"]') && /wbRichRoot|cgMsg--user|cgUserAttachmentGrid|cgTurn/.test(m)));
+  assert.ok(readerRich.length >= 6, `F: Reader-route rich integration rules stay global (found ${readerRich.length})`);
+  assert.ok(rules.some((r) => r.selector === '.wbReader [data-turn].is-in-collapsed-section' && r.declarations.display === 'none'), 'F: Reader collapsed-section rule still global');
+  assert.ok(rules.some((r) => splitMembers(r.selector).includes('.wbReader [data-message-author-role]') && 'max-width' in r.declarations), 'F: Reader appearance width rule still global');
+  /* C/E/G/I: none of the non-profile families live in the profile sheet. */
+  const prof = parseRules(read(PROFILE_CSS_REL)).map((r) => ({ ...r, plain: unscopedSelector(norm(r.selector)) }));
+  for (const [label, re] of [['G: Reader-route', /^body\[data-route="reader"\]|^\.wbReader\b/], ['E: H1 structural placement', /^\.wbRichRoot \.cgTurn--user\[data-testid/], ['C: dead no-bubble fallback', /:not\(:has\(\.user-message-bubble-color\)\)/], ['I: replay interaction safety', /:where\(button, input, textarea, select, summary\)/], ['H: provider outer structure', /^\.text-message$|^\.agent-turn$|^\.user-turn$|^\[data-testid\^="conversation-turn"\]$|^\.result-streaming$/]]) {
+    assert.equal(prof.filter((r) => splitMembers(r.plain).some((m) => re.test(m))).length, 0, `${label} rules are absent from the profile stylesheet`);
+  }
+});
+
+check('profile stylesheet is the sole chatgpt-reference presentation authority and is pinned at 1.0.6 for the boundary closure (S3C slice H)', () => {
+  const css = read(PROFILE_CSS_REL);
+  assert.equal(/@version\s+(\d+\.\d+\.\d+)/.exec(css)?.[1], '1.0.6', 'K: profile stylesheet version unchanged by the boundary slice');
+  const rules = parseRules(css).map((r) => ({ ...r, selector: norm(r.selector) }));
+  for (const r of rules) for (const m of splitMembers(r.selector)) assert.ok(m === SCOPE || m.startsWith(`${SCOPE} `), `every profile member is scoped: ${m}`);
+  assert.ok(rules.length >= 250, `profile sheet carries the migrated presentation (${rules.length} rules)`);
 });
 
 check('profile stylesheet @version and the studio.html cache query match exactly', () => {
