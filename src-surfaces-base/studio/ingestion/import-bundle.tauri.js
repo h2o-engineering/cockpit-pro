@@ -709,6 +709,37 @@
     };
   }
 
+  /* Last-turn authority. ChatGPT-origin per-turn times travel in the exact
+   * keep-list pickRichExtras persists (createTime / userCreateTime /
+   * assistantCreateTime / messageTimes) and are SECONDS; the Studio shell's
+   * toTimestampMs rule (< 1e10 => seconds) normalizes them to epoch ms. The
+   * latest valid time across the transcript's turns is the chat's actual
+   * last-turn time - never updatedAt, never the import moment. */
+  function turnTimeToEpochMs(value) {
+    var n = typeof value === 'number' ? value
+      : (typeof value === 'string' && value.trim() ? Number(value) : NaN);
+    if (!isFinite(n) || n <= 0) return 0;
+    return n < 10000000000 ? Math.round(n * 1000) : Math.round(n);
+  }
+  function deriveTranscriptLastMessageAt(snapshot) {
+    var turns = buildTurnsFromSnapshot(snapshot);
+    var latest = 0;
+    for (var i = 0; i < turns.length; i += 1) {
+      var meta = turns[i] && turns[i].meta && typeof turns[i].meta === 'object' ? turns[i].meta : {};
+      var candidates = [meta.assistantCreateTime, meta.userCreateTime, meta.createTime];
+      var times = meta.messageTimes && typeof meta.messageTimes === 'object' ? meta.messageTimes : null;
+      if (times) {
+        for (var key in times) {
+          if (Object.prototype.hasOwnProperty.call(times, key)) candidates.push(times[key]);
+        }
+      }
+      for (var c = 0; c < candidates.length; c += 1) {
+        latest = Math.max(latest, turnTimeToEpochMs(candidates[c]));
+      }
+    }
+    return latest;
+  }
+
   function snapshotCombinedPayloadTurnCount(existing) {
     var turns = Array.isArray(existing && existing.turns) ? existing.turns : [];
     var count = 0;
@@ -822,6 +853,15 @@
     var canonicalCreatedAt = earliestPayloadSnapshot ? isoToEpochMs(earliestPayloadSnapshot.createdAt) : 0;
     var effectiveCreatedAt = indexCreatedAt || (missingSnapshotPayload ? 0 : canonicalCreatedAt);
     var createdAtSource = indexCreatedAt ? 'chat-index' : (effectiveCreatedAt ? 'canonical-snapshot' : '');
+    /* Last turn: an explicit incoming value wins; otherwise the latest actual
+     * turn time of the transcript payload. Distinct from createdAt (creation)
+     * and from meta.importedAt (when the row entered Studio). */
+    var indexLastMessageAt = isoToEpochMs(chatIndex.lastMessageAt || chatIndex.last_message_at
+      || chat && (chat.lastMessageAt || chat.last_message_at)
+      || chatMeta.lastMessageAt || chatMeta.last_message_at);
+    var transcriptLastMessageAt = (latest && !missingSnapshotPayload) ? deriveTranscriptLastMessageAt(latest) : 0;
+    var effectiveLastMessageAt = indexLastMessageAt || transcriptLastMessageAt;
+    var lastMessageAtSource = indexLastMessageAt ? 'chat-index' : (effectiveLastMessageAt ? 'transcript-turns' : '');
 
     var title = friendlyShellTitle([
       latestMeta.title,
@@ -900,6 +940,7 @@
       answerCount: effectiveAnswerCount,
       lastCapturedAt: latest ? isoToEpochMs(latest.createdAt) : 0,
       createdAt: effectiveCreatedAt || undefined,
+      lastMessageAt: effectiveLastMessageAt || undefined,
       folderId: indexFolderId,
       categoryId: indexOrg.categoryId || '',
       linkSourceHref: chatIndex.linkSourceHref || '',
@@ -931,6 +972,7 @@
         sourceAnswerCount: indexAnswerCount,
         countsDerivedFromTranscript: countsDerivedFromTranscript,
         createdAtSource: createdAtSource,
+        lastMessageAtSource: lastMessageAtSource,
         sourceIsSaved: !!indexState.isSaved,
         f19SnapshotPayloadMissing: missingSnapshotPayload,
         f19ChromeDesktopMinimalRow: isMinimalLibraryIndexRow,
@@ -1009,6 +1051,10 @@
       next.createdAt = incomingCreatedAt;
       changed = true;
     }
+    /* Last turn: a missing / zero value is populated from the canonical turn
+     * evidence and a newer actual turn time wins (the Chat Registry merge
+     * contract, pickNewerIso); an established later value is never lowered. */
+    maybeSetMax('lastMessageAt');
     if (patch.isSaved === true && existing.isSaved !== true) {
       next.isSaved = true;
       changed = true;
@@ -1025,6 +1071,9 @@
     /* createdAt provenance describes the row's createdAt, not the payload's
      * derivation: keep the established source when createdAt is untouched. */
     if (next.createdAt === undefined && existingCreatedAtSource) next.meta.createdAtSource = existingCreatedAtSource;
+    /* importedAt is the Studio-add authority: the moment this row first
+     * entered Studio. A replay merge must not move it to the replay moment. */
+    if (numericCount(existingMeta.importedAt)) next.meta.importedAt = numericCount(existingMeta.importedAt);
     return next;
   }
 
@@ -1142,6 +1191,7 @@
     if (hasPatchField('userTurnCount')) setColumn('user_turn_count', numericCount(patch && patch.userTurnCount));
     if (hasPatchField('assistantTurnCount')) setColumn('assistant_turn_count', numericCount(patch && patch.assistantTurnCount));
     if (hasPatchField('createdAt') && numericCount(patch && patch.createdAt)) setColumn('created_at', numericCount(patch && patch.createdAt));
+    if (hasPatchField('lastMessageAt') && numericCount(patch && patch.lastMessageAt)) setColumn('last_message_at', numericCount(patch && patch.lastMessageAt));
     if (hasPatchField('isSaved')) setColumn('is_saved', patch.isSaved ? 1 : 0);
     if (hasPatchField('isLinked')) setColumn('is_linked', patch.isLinked ? 1 : 0);
     assignments.push('updated_at = ?');
@@ -3336,13 +3386,14 @@
    * and prepareExistingChatEvidencePatch apply on an ordinary replay (explicit
    * index counts win, zeros are repaired from the transcript, counts never
    * shrink, createdAt is only ever lowered on an importer-created row and never
-   * past an index-sourced value), and writes through the same identity-gated
+   * past an index-sourced value, lastMessageAt only ever advances to the
+   * latest actual turn time), and writes through the same identity-gated
    * existing-evidence writer. It never inserts rows, never touches snapshots,
    * turns, folders, categories, links, saved/linked flags or the canonical
    * pointer, and fails closed whenever the local chat, its canonical snapshot,
    * the authorized writer or importer provenance is missing. */
   var METADATA_RECONCILIATION_SCHEMA = 'h2o.studio.importedChatMetadataReconciliation.v1';
-  var METADATA_RECONCILIATION_FIELDS = ['messageCount', 'turnCount', 'userTurnCount', 'assistantTurnCount', 'answerCount', 'createdAt'];
+  var METADATA_RECONCILIATION_FIELDS = ['messageCount', 'turnCount', 'userTurnCount', 'assistantTurnCount', 'answerCount', 'createdAt', 'lastMessageAt'];
   var METADATA_RECONCILIATION_COUNT_FIELDS = ['messageCount', 'turnCount', 'userTurnCount', 'assistantTurnCount', 'answerCount'];
 
   function metadataReconciliationEntry(chatId, status, extra) {
@@ -3422,7 +3473,7 @@
           metadataReconciledAt: Date.now(),
           metadataReconciledFrom: cleanString(opts.source) || 'imported-chat-metadata-reconciliation'
         };
-        if (fields.some(function (name) { return name !== 'createdAt'; })) {
+        if (fields.some(function (name) { return METADATA_RECONCILIATION_COUNT_FIELDS.indexOf(name) !== -1; })) {
           for (var c = 0; c < METADATA_RECONCILIATION_COUNT_FIELDS.length; c += 1) {
             var countField = METADATA_RECONCILIATION_COUNT_FIELDS[c];
             boundedMeta[countField] = bounded[countField] !== undefined
@@ -3433,8 +3484,12 @@
         if (fields.indexOf('createdAt') !== -1) {
           boundedMeta.createdAtSource = cleanString(evidenceMeta.createdAtSource) || 'canonical-snapshot';
         }
+        if (fields.indexOf('lastMessageAt') !== -1) {
+          boundedMeta.lastMessageAtSource = cleanString(evidenceMeta.lastMessageAtSource) || 'transcript-turns';
+        }
         bounded.meta = boundedMeta;
         var previousCreatedAt = numericCount(existing.createdAt);
+        var previousLastMessageAt = numericCount(existing.lastMessageAt);
         var diagnostics = { warnings: [], errors: [], sample: emptySample() };
         await applyExistingChatEvidencePatch(chatStore, existing, bounded, { result: diagnostics, chat: chat, identity: identity });
         entries.push(metadataReconciliationEntry(chatId, 'reconciled', {
@@ -3446,6 +3501,9 @@
           },
           createdAt: fields.indexOf('createdAt') !== -1
             ? { previous: previousCreatedAt, next: numericCount(bounded.createdAt), source: boundedMeta.createdAtSource }
+            : null,
+          lastMessageAt: fields.indexOf('lastMessageAt') !== -1
+            ? { previous: previousLastMessageAt, next: numericCount(bounded.lastMessageAt), source: boundedMeta.lastMessageAtSource }
             : null
         }));
       } catch (error) {

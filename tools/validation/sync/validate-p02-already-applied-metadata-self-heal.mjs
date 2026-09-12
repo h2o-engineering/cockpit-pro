@@ -265,8 +265,8 @@ try {
       'A3 reconciliation fails closed without the identity-gated writer (no upsert fallback)');
     check(importer.includes("if (!cleanString(existingMeta.importedFrom)) { entries.push(metadataReconciliationEntry(chatId, 'untouched', { code: 'not-importer-created' })); continue; }"),
       'A4 a row without importer provenance is never touched');
-    check(importer.includes("var METADATA_RECONCILIATION_FIELDS = ['messageCount', 'turnCount', 'userTurnCount', 'assistantTurnCount', 'answerCount', 'createdAt'];"),
-      'A5 the reconciliation is bounded to the six importer-owned metadata fields');
+    check(importer.includes("var METADATA_RECONCILIATION_FIELDS = ['messageCount', 'turnCount', 'userTurnCount', 'assistantTurnCount', 'answerCount', 'createdAt', 'lastMessageAt'];"),
+      'A5 the reconciliation is bounded to the seven importer-owned metadata fields (counts, createdAt, lastMessageAt)');
     check(runtime.includes("var metadataReconciliation = p02AlreadyApplied\n          ? await reconcileAlreadyAppliedMetadata(objectId, envelope.payload) : null;"),
       'A6 the runtime self-heals only the exact already-applied P02 revision, after the convergence proof and commit');
     check(runtime.includes('var applied = await apply(envelope.payload, \'merge\', { round2aContentOnly: true });') &&

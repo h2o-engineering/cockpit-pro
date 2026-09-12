@@ -2640,14 +2640,30 @@ function projectLibraryIndexRowToWorkbenchInput(liRow){
 
   // LI carries timestamps as epoch ms (capturedAt, updatedAt);
   // normalizeWorkbenchRow expects ISO strings. Same conversion edge as
-  // M2a-3i's projectSqliteSnapshotToCanonical.
-  function toIso(epochMs){
-    if (!epochMs || typeof epochMs !== 'number' || epochMs <= 0) return '';
-    try { return new Date(epochMs).toISOString(); }
+  // M2a-3i's projectSqliteSnapshotToCanonical. The shared LibraryIndexCore
+  // string-normalizes the epoch values it carries, so a numeric epoch STRING
+  // is accepted alongside a finite epoch number; arbitrary text stays
+  // rejected (no Date.parse of free-form values at this seam).
+  function toIso(epoch){
+    const numericString = typeof epoch === 'string' && /^\s*\d+(?:\.\d+)?\s*$/.test(epoch);
+    if (typeof epoch !== 'number' && !numericString) return '';
+    const value = typeof epoch === 'number' ? epoch : Number(epoch);
+    if (!Number.isFinite(value) || value <= 0) return '';
+    const ms = toTimestampMs(value);
+    if (!ms) return '';
+    try { return new Date(ms).toISOString(); }
     catch { return ''; }
   }
   const updatedAtIso = toIso(liRow.updatedAt);
   const capturedAtIso = toIso(liRow.capturedAt);
+  // Three distinct authorities carried by the Desktop Library Index
+  // (S0F1c projectChatToCompactRow): the chats-store creation time, the
+  // importer's Studio-add time and the latest actual turn time. Each is
+  // projected onto the semantic field its resolver reads FIRST, so none of
+  // them can collapse onto updatedAt / capturedAt fallbacks.
+  const originalCreatedAtIso = toIso(liRow.createdAt);
+  const studioAddedAtIso = toIso(liRow.studioAddedAt);
+  const lastTurnAtIso = toIso(liRow.lastMessageAt);
 
   const labelNames = Array.isArray(liRow.labels) ? liRow.labels : [];
   const tagNames   = Array.isArray(liRow.tags)   ? liRow.tags   : [];
@@ -2659,6 +2675,9 @@ function projectLibraryIndexRowToWorkbenchInput(liRow){
     title: liRow.title || '',
     createdAt: capturedAtIso || updatedAtIso || '',
     updatedAt: updatedAtIso || '',
+    originalCreatedAt: originalCreatedAtIso,
+    studioAddedAt: studioAddedAtIso,
+    lastTurnAt: lastTurnAtIso,
     messageCount: Number(liRow.messageCount || 0),
     answerCount: Number(liRow.answerCount || 0),
     pinned: !!liRow.pinned,

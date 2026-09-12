@@ -104,6 +104,15 @@
         row.userTurnCount = numericCount(row.userTurnCount || raw.userTurnCount);
         row.assistantTurnCount = numericCount(row.assistantTurnCount || raw.assistantTurnCount);
         row.answerCount = numericCount(row.answerCount || raw.answerCount);
+        /* Three distinct timestamp authorities carried as epoch ms beside the
+         * shared core's string-normalized capturedAt / updatedAt:
+         *   createdAt     - the chats-store creation authority (Created)
+         *   studioAddedAt - when an importer-created row entered Studio (Added)
+         *   lastMessageAt - the latest actual conversation turn (Last turn)
+         * The shared core's timestamp representation is deliberately untouched. */
+        row.createdAt = numericCount(row.createdAt || raw.createdAt);
+        row.studioAddedAt = numericCount(row.studioAddedAt || raw.studioAddedAt);
+        row.lastMessageAt = numericCount(row.lastMessageAt || raw.lastMessageAt);
       }
       return applyDisplayClassification(row);
     }
@@ -151,6 +160,9 @@
       linkSourceHref: cleanString(r.linkSourceHref),
       capturedAt: cleanString(r.capturedAt),
       updatedAt: cleanString(r.updatedAt),
+      createdAt: numericCount(r.createdAt),
+      studioAddedAt: numericCount(r.studioAddedAt),
+      lastMessageAt: numericCount(r.lastMessageAt),
     };
   }
 
@@ -266,6 +278,7 @@
         messageCount: r.messageCount, turnCount: r.turnCount,
         userTurnCount: r.userTurnCount, assistantTurnCount: r.assistantTurnCount,
         answerCount: r.answerCount, pinned: r.pinned, archived: r.archived,
+        createdAt: r.createdAt, studioAddedAt: r.studioAddedAt, lastMessageAt: r.lastMessageAt,
         displayView: r.displayView, badgeKind: r.badgeKind, readerKind: r.readerKind,
       }));
       const ts = Date.now();
@@ -1161,6 +1174,15 @@
       answerCount,
       pinned: !!chat?.isPinned,
       archived: !!chat?.isArchived,
+      // Three distinct timestamp authorities (epoch ms; 0 = absent):
+      //   createdAt     — chats-store creation authority (Created)
+      //   studioAddedAt — importer-created rows only: meta.importedAt, the
+      //                   time the row entered Studio (Added to Studio); a
+      //                   captured row carries 0 and keeps its own fallback
+      //   lastMessageAt — latest actual conversation turn (Last turn)
+      createdAt: numericCount(chat?.createdAt),
+      studioAddedAt: cleanString(meta.importedFrom) ? numericCount(meta.importedAt) : 0,
+      lastMessageAt: numericCount(chat?.lastMessageAt),
       // Desktop-only enrichment — not part of the compact contract but the
       // Reader / Library UI may consume these later (M2a-3i+):
       href,
