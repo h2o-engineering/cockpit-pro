@@ -700,6 +700,223 @@ html[data-cgxui-ats-collapsed-hover-mode="title-right"] ${SEL_.ASSIST_MSG}[data-
     }
   }
 
+  /* ───────────────────────────── 5b) STUDIO GOVERNED PATH (M03 P4 S4C T8 slice B) ─────────────────────────────
+   * In a current M03 Studio Reader render the Renderer exposes, through the Reader
+   * bridge, a read-only Semantic Index (target authority) and a per-render
+   * DecorationContribution lifecycle (mutation authority). On that path the
+   * assistant targets are the index's assistant MESSAGE projections - never a
+   * provider-selector scan - and every stamp create / update / remove happens
+   * inside one registered contribution per assistant message (owner
+   * `studio-answer-timestamp`, id = the message projectionKey). Label semantics
+   * (UI_AT_buildLabel), classes, cgxui attributes, dataset.fullLabel and the
+   * collapsed-hover anchor variables are the accepted ones, unchanged. The
+   * legacy DOM path below stays as the compatibility fallback (non-Studio,
+   * no current Reader render, older host). Handles live only for the current
+   * lifecycle instance; Reader disposeAll cleans up a discarded render.
+   * ───────────────────────────────────────────────────────────────────────── */
+
+  /** @core Consumer identity for the DecorationContribution lifecycle (deterministic, per render) */
+  const GOV_ = Object.freeze({
+    OWNER: 'studio-answer-timestamp',
+    INDEX_SCHEMA: 'h2o.renderer.semantic-index',
+    LIFECYCLE_SCHEMA: 'h2o.renderer.decoration-contribution',
+    DIAG_ERR_MAX: 8,
+  });
+
+  // Consumer-local, ephemeral: handles for the CURRENT lifecycle only. Not a registry, never persisted.
+  const STORE_AT_governed = { lifecycle: null, handles: new Map() };
+
+  /** @helper bounded diagnostics for the governed path (H2O.AT.answrts.diag.governed) */
+  function GOV_AT_diag(op, key, error) {
+    try {
+      const g = DIAG.governed = DIAG.governed || { errors: [], lastError: null };
+      const entry = { op: String(op), key: String(key || ''), message: String((error && error.message) || error || '') };
+      g.lastError = entry;
+      g.errors.push(entry);
+      if (g.errors.length > GOV_.DIAG_ERR_MAX) g.errors.splice(0, g.errors.length - GOV_.DIAG_ERR_MAX);
+    } catch {}
+  }
+
+  /** @critical The current Reader render's contracts, or null (-> compatibility fallback). */
+  function GOV_AT_currentRender() {
+    if (!UTIL_AT_isStudioMode()) return null;
+    const studio = W.H2O?.Studio;
+    if (typeof studio?.getReaderSemanticIndex !== 'function' || typeof studio?.getReaderDecorationContributions !== 'function') return null;
+    let semanticIndex = null;
+    let root = null;
+    let lifecycle = null;
+    try {
+      semanticIndex = studio.getReaderSemanticIndex();
+      if (!semanticIndex || semanticIndex.schema !== GOV_.INDEX_SCHEMA || typeof semanticIndex.messages !== 'function' || typeof semanticIndex.getConversation !== 'function') return null;
+      root = semanticIndex.getConversation()?.target || null;
+      if (!root || root.nodeType !== 1 || !root.isConnected) return null;
+      // Root-bound: the lifecycle must be the one the Reader holds for THIS root, and it must be bound to this index.
+      lifecycle = studio.getReaderDecorationContributions(root);
+    } catch {
+      return null;
+    }
+    if (!lifecycle || lifecycle.schema !== GOV_.LIFECYCLE_SCHEMA || typeof lifecycle.register !== 'function' || typeof lifecycle.get !== 'function') return null;
+    if (lifecycle.semanticIndex !== semanticIndex) return null;
+    return { root, semanticIndex, lifecycle };
+  }
+
+  /** @helper Handles are scoped to one lifecycle instance; a new render forgets the stale ones (Reader disposeAll owns the old cleanup). */
+  function GOV_AT_handlesFor(lifecycle) {
+    const store = STORE_AT_governed;
+    if (store.lifecycle !== lifecycle) {
+      store.lifecycle = lifecycle;
+      store.handles = new Map();
+    }
+    return store.handles;
+  }
+
+  /** @helper Release the handles this module owns (module dispose): stamps go with them. */
+  function GOV_AT_releaseHandles() {
+    const store = STORE_AT_governed;
+    const handles = Array.from(store.handles.values());
+    store.lifecycle = null;
+    store.handles = new Map();
+    for (const handle of handles) {
+      try { handle.dispose(); } catch (e) { GOV_AT_diag('dispose', handle?.contributionKey, e); }
+    }
+  }
+
+  /** @helper Assistant message projections of the index, in projection order (the target authority). */
+  function GOV_AT_assistantProjections(semanticIndex) {
+    let records = [];
+    try { records = semanticIndex.messages() || []; } catch (e) { GOV_AT_diag('messages', '', e); return []; }
+    const out = [];
+    for (const record of records) {
+      if (!record || record.kind !== 'message' || record.role !== 'assistant') continue;
+      const target = record.target;
+      if (!record.projectionKey || !target || target.nodeType !== 1) continue;
+      out.push(record);
+    }
+    return out;
+  }
+
+  /** @helper Same numbering fallback as DOM_AT_rebuildDomAIndexMap, fed by projections instead of a selector scan. */
+  function GOV_AT_rebuildDomAIndexMap(projections) {
+    const map = new WeakMap();
+    let idx = 0;
+    for (const record of projections) {
+      idx += 1;
+      map.set(record.target, idx);
+    }
+    MOD.state.domAIndexMap = map;
+    MOD.state.domAIndexCounter = idx;
+  }
+
+  /** @helper Our stamp under the exact target: adopt an existing one (own/legacy class) or create it with the accepted classes/attributes. */
+  function GOV_AT_ensureStamp(msgEl) {
+    let stamp =
+      msgEl.querySelector(SEL_.STAMP_OURS) ||
+      msgEl.querySelector(SEL_.STAMP_LEGACY) ||
+      null;
+    if (!stamp) {
+      stamp = DOC.createElement('div');
+      stamp.className = `${CSS_.STAMP_CLASS_LEGACY} ${CSS_.STAMP_CLASS_OURS}`;
+      stamp.setAttribute(ATTR_.OWNER, SkID);
+      stamp.setAttribute(ATTR_.UI, `${SkID}-stamp`);
+      msgEl.appendChild(stamp);
+    } else {
+      if (!stamp.classList.contains(CSS_.STAMP_CLASS_OURS)) stamp.classList.add(CSS_.STAMP_CLASS_OURS);
+      if (!stamp.classList.contains(CSS_.STAMP_CLASS_LEGACY)) stamp.classList.add(CSS_.STAMP_CLASS_LEGACY);
+      if (!stamp.getAttribute(ATTR_.OWNER)) stamp.setAttribute(ATTR_.OWNER, SkID);
+      if (!stamp.getAttribute(ATTR_.UI)) stamp.setAttribute(ATTR_.UI, `${SkID}-stamp`);
+    }
+    return stamp;
+  }
+
+  /** @critical The accepted per-message mutation (label, dataset.fullLabel, anchors) bound to ONE contribution target. */
+  function GOV_AT_syncStamp(msgEl, stampRef) {
+    const fullLabel = UI_AT_buildLabel(msgEl);
+    if (!fullLabel) return; // no create time yet: no stamp (same as the legacy path)
+
+    if (!stampRef.el || stampRef.el.parentNode !== msgEl) stampRef.el = GOV_AT_ensureStamp(msgEl);
+    const stamp = stampRef.el;
+
+    if (stamp.dataset.fullLabel !== fullLabel) {
+      stamp.textContent = fullLabel;
+      stamp.dataset.fullLabel = fullLabel;
+      CORE_AT_perfInc('labelsUpdated');
+    }
+
+    const titleEl = msgEl.querySelector?.(TITLE_BAR_SEL_) || null;
+    if (String(msgEl.getAttribute('data-at-collapsed') || '') === '1' && titleEl) {
+      DOM_AT_syncAnchorVars(msgEl, titleEl);
+    } else {
+      DOM_AT_clearAnchorVars(msgEl);
+    }
+  }
+
+  /** @critical DecorationContribution application factory: apply once, then update / dispose through the lifecycle. */
+  function GOV_AT_applyStamp(context) {
+    const msgEl = context.target; // the exact indexed assistant message Element
+    const stampRef = { el: null };
+    GOV_AT_syncStamp(msgEl, stampRef);
+    return {
+      update() {
+        GOV_AT_syncStamp(msgEl, stampRef);
+      },
+      dispose() {
+        const stamp = stampRef.el;
+        stampRef.el = null;
+        if (stamp && stamp.parentNode === msgEl) {
+          try { stamp.remove(); } catch {}
+        }
+        DOM_AT_clearAnchorVars(msgEl);
+      },
+    };
+  }
+
+  /** @critical Governed reconciliation: one contribution per assistant projection; repeats update, never duplicate. */
+  function GOV_AT_reconcile(render) {
+    const { semanticIndex, lifecycle } = render;
+    const handles = GOV_AT_handlesFor(lifecycle);
+    const projections = GOV_AT_assistantProjections(semanticIndex);
+    GOV_AT_rebuildDomAIndexMap(projections);
+
+    for (const record of projections) {
+      const key = record.projectionKey;
+      const handle = handles.get(key);
+      if (handle) {
+        if (lifecycle.get(handle.contributionKey)) {
+          try { handle.update({ reason: 'reconcile' }); } catch (e) { GOV_AT_diag('update', key, e); }
+          continue;
+        }
+        handles.delete(key); // disposed elsewhere: register afresh below
+      }
+      try {
+        const registered = lifecycle.register({
+          owner: GOV_.OWNER,
+          id: key,
+          targetKey: key,
+          value: { reason: 'reconcile' },
+          apply: GOV_AT_applyStamp,
+        });
+        handles.set(key, registered);
+      } catch (e) {
+        GOV_AT_diag('register', key, e);
+      }
+    }
+    return projections.length;
+  }
+
+  /** @helper Mutations produced by our own stamps never re-trigger a reconciliation. */
+  function GOV_AT_mutationsOwned(muts) {
+    for (const m of muts) {
+      const target = m.target;
+      if (target && target.nodeType === 1 && target.getAttribute?.(ATTR_.OWNER) === SkID) continue;
+      const added = m.addedNodes;
+      if (!added || !added.length) continue;
+      for (const n of added) {
+        if (n.nodeType !== 1 || n.getAttribute?.(ATTR_.OWNER) !== SkID) return false;
+      }
+    }
+    return true;
+  }
+
   /* ───────────────────────────── 6) SCHEDULER (no spam) ───────────────────────────── */
 
   const STORE_AT_pendingRoots = new Set();
@@ -737,6 +954,19 @@ html[data-cgxui-ats-collapsed-hover-mode="title-right"] ${SEL_.ASSIST_MSG}[data-
     const st = MOD.state;
     let roots = Array.from(STORE_AT_pendingRoots);
     STORE_AT_pendingRoots.clear();
+
+    // M03 S4C slice B: a governed Studio render reconciles its assistant projections
+    // through the Semantic Index + DecorationContribution; no selector-based target
+    // discovery and no direct DOM_AT_addOrUpdateOne on this path.
+    const governed = GOV_AT_currentRender();
+    if (governed) {
+      if (st.pendingFullScan) {
+        st.pendingFullScan = false;
+        CORE_AT_perfInc('fullScans');
+      }
+      GOV_AT_reconcile(governed);
+      return;
+    }
 
     if (st.pendingFullScan) {
       st.pendingFullScan = false;
@@ -859,6 +1089,14 @@ html[data-cgxui-ats-collapsed-hover-mode="title-right"] ${SEL_.ASSIST_MSG}[data-
     CORE_AT_detachFallbackMO();
 
     const mo = new MutationObserver((muts) => {
+      // M03 S4C slice B: under a governed Studio render the observer is only a
+      // render-change trigger - targets come from the Semantic Index, never
+      // from matching provider selectors here; our own stamp mutations are ignored.
+      if (GOV_AT_currentRender()) {
+        if (!GOV_AT_mutationsOwned(muts)) DOM_AT_queueAllAssistantsDebounced();
+        return;
+      }
+
       const hit = new Set();
       let needRepair = false;
 
@@ -915,6 +1153,8 @@ html[data-cgxui-ats-collapsed-hover-mode="title-right"] ${SEL_.ASSIST_MSG}[data-
     });
     st.cleanup.push(() => CORE_AT_detachFallbackMO());
     st.cleanup.push(() => CORE_AT_stopPerfTicker());
+    // M03 S4C slice B: the contributions this module registered go with it.
+    st.cleanup.push(() => GOV_AT_releaseHandles());
 
     // initial scan (kept, but queued)
     const t = setTimeout(DOM_AT_queueAllAssistants, CFG_.INITIAL_SCAN_DELAY_MS);

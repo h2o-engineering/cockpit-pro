@@ -175,11 +175,37 @@ function createRenderHarness() {
     rowsCache: [],
     currentReaderSnapshot: null,
     currentReaderEditOverrides: null,
+    /* M03 S4C: the current-render bridge ({ root, semanticIndex, decorationContributions }). */
+    currentReaderRender: null,
     selectedSnapshotId: '',
     selectedChatId: '',
     lastView: 'saved',
     lastFolderId: '',
     activeRoute: 'list',
+  };
+  /* M03 S4C slice B: every stubbed render carries a fake read-only index and a
+   * spy DecorationContribution lifecycle, bound through the REAL
+   * bindReaderSemanticIndex so the real unmount seam is what disposes them. */
+  const lifecycles = [];
+  const warnings = [];
+  let failNextDisposeAll = false;
+  const makeSpyLifecycle = (root, semanticIndex) => {
+    const lifecycle = {
+      schema: 'h2o.renderer.decoration-contribution', schemaVersion: 1, version: 'spy',
+      semanticIndex, root, disposeAllCalls: 0, bindingAtDispose: [], active: 1,
+      register() { throw new Error('the Reader never registers'); },
+      get() { return null; },
+      list() { return lifecycle.active ? [{ contributionKey: 'decoration:spy:x' }] : []; },
+      disposeAll() {
+        lifecycle.disposeAllCalls += 1;
+        lifecycle.bindingAtDispose.push(state.currentReaderRender);
+        lifecycle.active = 0;
+        if (failNextDisposeAll) { failNextDisposeAll = false; throw new Error('spy cleanup failure'); }
+        return [];
+      },
+    };
+    lifecycles.push(lifecycle);
+    return lifecycle;
   };
 
   const rendererProjection = (snapshot) => {
@@ -233,7 +259,7 @@ function createRenderHarness() {
     Object,
     Promise,
     Map,
-    console,
+    console: { log: console.log, error: console.error, warn(...args) { warnings.push(args.map(String).join(' ')); } },
     CustomEvent: class CustomEvent { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
     STUDIO_BOOT_AUX_TIMEOUT_MS: 1,
     setStudioRouteScope(name, opts) {
@@ -267,6 +293,9 @@ function createRenderHarness() {
       const turns = new FakeNode(`${root.snapshotId}-turns`);
       root.appendChild(turns);
       roots.push(root);
+      /* The Renderer result shape the real seam binds: root + read-only index + lifecycle. */
+      const semanticIndex = Object.freeze({ schema: 'h2o.renderer.semantic-index', schemaVersion: 1, version: '0.2.0-m03-s4a', getConversation: () => ({ kind: 'conversation', target: root }), messages: () => [] });
+      sandbox.bindReaderSemanticIndex({ root, turnsEl: turns, scrollEl: turns, semanticIndex, decorationContributions: makeSpyLifecycle(root, semanticIndex) });
       studioHost.mount({ readerRoot: root, turnsEl: turns, scrollEl: turns, snapshot: snap });
       return root;
     },
@@ -280,6 +309,11 @@ function createRenderHarness() {
 
   const lifecycleFunctions = [
     'getStudioChatRenderer',
+    /* M03 S4C: the current-render bridge is part of the unmount seam. */
+    'bindReaderSemanticIndex',
+    'getReaderSemanticIndex',
+    'getReaderDecorationContributions',
+    'disposeReaderRenderDecorations',
     'studioHostUnmount',
     'studioHostUnmountPreservingRouteHash',
     'isCurrentReaderRoot',
@@ -312,6 +346,13 @@ function createRenderHarness() {
     location,
     history,
     events,
+    /* M03 S4C */
+    lifecycles,
+    warnings,
+    failNextDisposeAll() { failNextDisposeAll = true; },
+    getReaderSemanticIndex: sandbox.getReaderSemanticIndex,
+    getReaderDecorationContributions: sandbox.getReaderDecorationContributions,
+    bindReaderSemanticIndex: sandbox.bindReaderSemanticIndex,
   };
 }
 
@@ -332,7 +373,7 @@ function createRouteHashHarness() {
     location.hash = '#/read/A';
     return true;
   };
-  vm.runInContext(`${extractFunction(studioSource, 'studioHostUnmount')}\n${extractFunction(studioSource, 'studioHostUnmountPreservingRouteHash')}\nthis.leave = studioHostUnmountPreservingRouteHash;`, sandbox);
+  vm.runInContext(`${extractFunction(studioSource, 'disposeReaderRenderDecorations')}\n${extractFunction(studioSource, 'studioHostUnmount')}\n${extractFunction(studioSource, 'studioHostUnmountPreservingRouteHash')}\nthis.leave = studioHostUnmountPreservingRouteHash;`, sandbox);
   return { leave: sandbox.leave, readerEl, oldRoot, location, getUnmounts: () => unmounts };
 }
 
@@ -742,6 +783,67 @@ await check('non-Reader routes and late overlay work use lifecycle guards', () =
   const overlayApply = studioSource.indexOf('__applier(root, snap, __overlay || null)');
   assert.ok(overlayGuard >= 0 && overlayGuard < overlayApply,
     'late overlay result must be gated before it can touch a superseded base root');
+});
+
+/* M03 P4 S4C T8 slice B - the Reader current-render bridge carries the
+ * DecorationContribution lifecycle and the real unmount seam disposes it. */
+await check('S4C: current-render bridge exposes the exact Semantic Index + DecorationContribution lifecycle of the mounted render; wrong root -> null', async () => {
+  const h = createRenderHarness();
+  assert.equal(h.getReaderSemanticIndex(), null); assert.equal(h.getReaderDecorationContributions(), null, 'no active Reader render -> null');
+  h.setLoad('A', makeSnapshot('A'));
+  await h.renderReader('A');
+  const root = h.readerEl.children[0];
+  const lifecycle = h.lifecycles[0];
+  assert.equal(h.state.currentReaderRender.root, root, 'bound to the mounted Renderer root');
+  assert.equal(h.getReaderDecorationContributions(root), lifecycle, 'A: the exact lifecycle the Renderer result carried');
+  assert.equal(h.getReaderDecorationContributions(), lifecycle, 'unqualified call answers for the current render');
+  assert.equal(h.getReaderSemanticIndex(root), lifecycle.semanticIndex, 'the index of the same render');
+  assert.equal(h.getReaderDecorationContributions(new FakeNode('foreign')), null, 'B: wrong root -> null'); assert.equal(h.getReaderDecorationContributions(null), null); assert.equal(h.getReaderSemanticIndex(new FakeNode('foreign')), null);
+  assert.deepEqual(Object.keys(h.state.currentReaderRender), ['root', 'semanticIndex', 'decorationContributions'], 'one bounded current-render record'); assert.equal(Object.isFrozen(h.state.currentReaderRender), true);
+  /* missing lifecycle on a result -> null, never manufactured */
+  h.bindReaderSemanticIndex({ root, semanticIndex: lifecycle.semanticIndex });
+  assert.equal(h.getReaderDecorationContributions(root), null, 'missing lifecycle -> null'); assert.equal(h.getReaderSemanticIndex(root), lifecycle.semanticIndex);
+  h.bindReaderSemanticIndex({ root, semanticIndex: lifecycle.semanticIndex, decorationContributions: lifecycle });
+  assert.equal(lifecycle.disposeAllCalls, 0, 'binding never disposes');
+});
+
+await check('S4C: Reader unmount disposes the current lifecycle exactly once BEFORE clearing the binding; replacement and route leave dispose only their own render', async () => {
+  const h = createRenderHarness();
+  h.setLoad('A', makeSnapshot('A'));
+  h.setLoad('B', makeSnapshot('B'));
+  await h.renderReader('A');
+  const [lifeA] = h.lifecycles;
+  await h.renderReader('B');
+  const lifeB = h.lifecycles[1];
+  assert.equal(lifeA.disposeAllCalls, 1, 'C: A disposed once when B replaced it'); assert.equal(lifeA.bindingAtDispose[0]?.decorationContributions, lifeA, 'C: the binding was still A at disposal time (cleanup precedes forgetting)');
+  assert.equal(lifeB.disposeAllCalls, 0, 'B is alive'); assert.equal(h.getReaderDecorationContributions(h.readerEl.children[0]), lifeB);
+  await h.renderReader('B');
+  assert.equal(lifeB.disposeAllCalls, 0, 'an equivalent fast refresh keeps B mounted and undisposed'); assert.equal(h.lifecycles.length, 2);
+  h.leaveReader('test:leave');
+  assert.equal(lifeB.disposeAllCalls, 1, 'C: route leave disposes B once'); assert.equal(lifeA.disposeAllCalls, 1, 'A is not disposed again');
+  assert.equal(h.state.currentReaderRender, null, 'binding cleared after disposal'); assert.equal(h.getReaderDecorationContributions(), null); assert.equal(h.getReaderSemanticIndex(), null);
+  h.leaveReader('test:leave-again');
+  assert.equal(lifeB.disposeAllCalls, 1, 'a repeated discard finds nothing to dispose'); assert.deepEqual(h.warnings, []);
+});
+
+await check('S4C: a failing decoration cleanup is diagnosed and never blocks Reader teardown', async () => {
+  const h = createRenderHarness();
+  h.setLoad('A', makeSnapshot('A'));
+  h.setLoad('B', makeSnapshot('B'));
+  await h.renderReader('A');
+  const [lifeA] = h.lifecycles;
+  h.failNextDisposeAll();
+  await h.renderReader('B');
+  assert.equal(lifeA.disposeAllCalls, 1, 'D: cleanup attempted once'); assert.equal(h.warnings.length, 1, 'D: failure diagnosed'); assert.match(h.warnings[0], /reader decoration cleanup reported a failure/);
+  assert.equal(h.readerEl.children.length, 1); assert.equal(h.readerEl.children[0].snapshotId, 'B', 'D: teardown and replacement continued'); assert.equal(h.hostState.unmountCount, 1); assert.equal(h.state.currentReaderRender.decorationContributions, h.lifecycles[1], 'the new render is bound');
+  h.failNextDisposeAll();
+  h.leaveReader('test:leave');
+  assert.equal(h.lifecycles[1].disposeAllCalls, 1); assert.equal(h.warnings.length, 2); assert.equal(h.state.currentReaderRender, null, 'D: binding cleared despite the failure'); assert.equal(h.readerEl.children.length, 0); assert.equal(h.hostState.unmountCount, 2);
+  /* static: order inside the seam + no double dispose path */
+  const unmount = extractFunction(studioSource, 'studioHostUnmount');
+  assert.ok(unmount.indexOf('disposeReaderRenderDecorations(reason);') < unmount.indexOf('state.currentReaderRender = null;'), 'C: dispose precedes forgetting the binding');
+  assert.equal((studioSource.match(/disposeReaderRenderDecorations\(/g) || []).length, 2, 'exactly one disposal call site (definition + studioHostUnmount)');
+  assert.doesNotMatch(extractFunction(studioSource, 'disposeReaderRenderDecorations'), /querySelector|getElementById|scrollTo|location\.|createLifecycle/, 'the disposer only reaches the bound lifecycle');
 });
 
 await check('mounted Reader listener retains only primitive snapshot identity', () => {

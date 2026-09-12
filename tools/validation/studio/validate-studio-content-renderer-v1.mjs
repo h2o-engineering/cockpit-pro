@@ -22,6 +22,20 @@ const RENDERER_REL = 'renderer/chat-renderer.studio.js';
 const PROFILE_REL = 'renderer/presentation/presentation-profile.v1.js';
 const PROFILE_CSS_REL = 'renderer/presentation/chatgpt-reference.v1.css';
 const STUDIO_CSS_REL = 'studio.css';
+/* M03 S4C slice B: the Answer Timestamp consumer and the studio.js Reader bridge it consumes. */
+const STUDIO_JS_REL = 'studio.js';
+const ANSWER_TIMESTAMP_REL = 'S1Z1a. \u{1F3AC} Answer Timestamp - Studio.js';
+function extractStudioFunction(source, name) {
+  const match = new RegExp(`\\bfunction\\s+${name}\\s*\\(`).exec(source);
+  if (!match) throw new Error(`studio.js function ${name} not found`);
+  const braceOpen = source.indexOf('{', match.index);
+  let depth = 0;
+  for (let i = braceOpen; i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') { depth -= 1; if (depth === 0) return source.slice(match.index, i + 1); }
+  }
+  throw new Error(`studio.js function ${name} unterminated`);
+}
 const STUDIO_HTML_REL = 'studio.html';
 const PACK_STUDIO_ABS = path.join(REPO_ROOT, 'tools/product/studio/pack-studio.mjs');
 const PROFILE_MARKER = 'data-h2o-presentation-profile="chatgpt-reference"';
@@ -801,6 +815,29 @@ if (!chromium) {
       res.end(`<!doctype html><meta charset="utf-8"><title>t5</title>${links}\n${tags}\n<div id="host" ${PROFILE_MARKER}></div><div id="unscoped"></div>`);
       return;
     }
+    /* M03 S4C slice B: a second page for the Answer Timestamp consumer. */
+    if (rel === '__studio_bridge__.js') {
+      const studioSource = read(STUDIO_JS_REL);
+      const bridge = ['bindReaderSemanticIndex', 'getReaderSemanticIndex', 'getReaderDecorationContributions', 'disposeReaderRenderDecorations', 'studioHostUnmount'].map((name) => extractStudioFunction(studioSource, name)).join('\n');
+      res.writeHead(200, { 'Content-Type': 'text/javascript' });
+      res.end(`(() => { const state = { currentReaderEditOverrides: null, currentReaderRender: null }; const W = { H2O: window.H2O }; window.__unmounts = []; window.__warnings = []; W.H2O.studioHost = { unmount(reason) { window.__unmounts.push(reason); } }; const console = { warn: (...a) => window.__warnings.push(a.map(String).join(' ')) };\n${bridge}\nwindow.H2O.Studio.getReaderSemanticIndex = getReaderSemanticIndex; window.H2O.Studio.getReaderDecorationContributions = getReaderDecorationContributions; window.__bridge = { bind: bindReaderSemanticIndex, unmount: studioHostUnmount, state }; })();`);
+      return;
+    }
+    if (rel === '__answer_timestamp__.js') { res.writeHead(200, { 'Content-Type': 'text/javascript' }); res.end(read(ANSWER_TIMESTAMP_REL)); return; }
+    if (rel === '__timestamp_harness__') {
+      const variant = new URL(req.url, 'http://x').searchParams.get('variant');
+      const chain = [
+        'platform/selectors.contract.js', 'platform/html-sanitizer.js', 'renderer/safety/sanitizer-policy.v1.js', 'renderer/safety/vendor/dompurify/purify.js', 'renderer/safety/html-sanitizer.v2.js',
+        'renderer/markdown/vendor/markdown-it/markdown-it.umd.min.js', 'renderer/markdown/h2o-gfm.v1.js', 'renderer/markdown/markdown-engine.v1.js', 'renderer/markdown/markdown-ir-adapter.v1.js',
+        'renderer/semantic/render-ir.v1.js', 'renderer/semantic/semantic-ingress.v1.js', 'renderer/semantic/semantic-index.v1.js', 'renderer/decoration/decoration-contribution.v1.js',
+        'renderer/presentation/presentation-profile.v1.js', CONTENT_REL, RENDERER_REL,
+        ...(variant === 'governed' ? ['__studio_bridge__.js'] : []), '__answer_timestamp__.js',
+      ].map((r) => `<script src="./${r}"></script>`).join('\n');
+      /* Studio mode marker + a bus stub so the module's core hooks install; the assistant-selector spy counts compatibility scans. */
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<!doctype html><meta charset="utf-8"><title>ts</title><link rel="stylesheet" href="./${STUDIO_CSS_REL}"><link rel="stylesheet" href="./${PROFILE_CSS_REL}"><body data-h2o-studio-mode="1"><script>window.H2O = { bus: { on() {} } }; window.__scans = []; for (const proto of [Element.prototype, Document.prototype]) { const orig = proto.querySelectorAll; proto.querySelectorAll = function (sel) { if (String(sel) === 'div[data-message-author-role="assistant"]') window.__scans.push(1); return orig.call(this, sel); }; }</script>\n${chain}\n<section id="viewReader" class="wbReader" ${PROFILE_MARKER}></section>`);
+      return;
+    }
     const file = path.join(STUDIO, rel);
     if (!file.startsWith(STUDIO) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end('nf'); return; }
     res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
@@ -1473,6 +1510,92 @@ if (!chromium) {
     assert.deepEqual(s4bDeco.disposeOne, { first: true, second: false, disposedCalls: 1, gone: null, count: 4, handleSnapshot: { contributionKey: 'decoration:smoke:text', owner: 'smoke', id: 'text', targetKey: s4bDeco.disposeOne.handleSnapshot.targetKey, targetKind: 'text', revision: 1, active: false }, markers: 4 }, 'P / Q / R: idempotent dispose, cleanup once, gone from the registry');
     assert.deepEqual(s4bDeco.disposeAll, { swept: ['decoration:smoke:block', 'decoration:smoke:message', 'decoration:smoke:turn', 'decoration:smoke:conversation'], remaining: 0, disposedCalls: [1, 1, 1, 1], markers: 0 }, 'T / U / V: reverse registration order, every cleanup once, registry empty');
     assert.deepEqual(s4bDeco.parity, { outerHTMLRestored: true, textRestored: true, noDecorationMarkup: true, attrs: [] }, 'X / AB: the render carries no decoration markup and the fixture DOM returns to its pre-registration state');
+  });
+
+  /* M03 P4 S4C T8 slice B: the Answer Timestamp consumer on a real Studio-mode
+   * render. A second page carries the production chain plus the REAL studio.js
+   * current-render bridge (extracted bind / accessors / unmount seam) and the
+   * REAL Answer Timestamp module. The `governed` variant proves the Semantic
+   * Index + DecorationContribution path; the `fallback` variant (same module,
+   * no Reader bridge) is the accepted legacy path and the parity oracle. */
+  const timestampRuns = {};
+  for (const variant of ['fallback', 'governed']) {
+    const tsPage = await browser.newPage();
+    const tsErrors = [];
+    tsPage.on('pageerror', (e) => tsErrors.push(String(e)));
+    await tsPage.goto(`${base}/__timestamp_harness__?variant=${variant}`, { waitUntil: 'load' });
+    const FIXTURE = `({ chatId: 'chat-ts', snapshotId: 'snap-ts', messages: [ { role: 'user', text: 'question one', messageId: 'u1', turnId: 't1', createTime: 1757664000 }, { role: 'assistant', text: 'answer **one**', messageId: 'a1', turnId: 't1', createTime: 1757664060 }, { role: 'system', text: 'sys', messageId: 's1' }, { role: 'tool', text: 'tool', messageId: 'tl1' }, { role: 'user', text: 'question two', messageId: 'u2', turnId: 't2', createTime: 1757664120 }, { role: 'assistant', text: 'answer two', messageId: 'a2', turnId: 't2', createTime: 1757664180 }, { role: 'assistant', text: 'orphan answer without time', messageId: 'a3', turnId: 't3' } ] })`;
+    const SUMMARY = `(() => { const host = document.getElementById('viewReader'); const stamps = Array.from(host.querySelectorAll('[data-cgxui-owner="ats"]')); return { count: stamps.length, stamps: stamps.map((s) => ({ text: s.textContent, fullLabel: s.dataset.fullLabel, className: s.className, owner: s.getAttribute('data-cgxui-owner'), ui: s.getAttribute('data-cgxui'), parentIsHost: s.parentElement.classList.contains('cgMsg'), parentRole: s.parentElement.getAttribute('data-message-author-role'), parentMessageId: s.parentElement.getAttribute('data-message-id'), isLastChild: s.parentElement.lastElementChild === s })), nonAssistantWithStamp: Array.from(host.querySelectorAll('.cgMsg')).filter((m) => m.getAttribute('data-message-author-role') !== 'assistant' && m.querySelector('[data-cgxui-owner="ats"]')).length }; })()`;
+    const out = { variant };
+    await tsPage.evaluate(`(() => { const r = H2O.Studio.chatRenderer.render(${FIXTURE}, { getEditOverride: () => null }); window.__r1 = r; if (window.__bridge) window.__bridge.bind(r); window.__beforeHTML = r.root.outerHTML; document.getElementById('viewReader').replaceChildren(r.root); window.__scans.length = 0; H2O.AT.answrts.api.rescan(); })()`);
+    await tsPage.waitForTimeout(600);
+    out.scansAfterMount = await tsPage.evaluate('window.__scans.length'); out.afterMount = await tsPage.evaluate(SUMMARY);
+    out.contributions = await tsPage.evaluate("(() => { const lc = window.__r1.decorationContributions; const ix = window.__r1.semanticIndex; return { active: lc.list().map((s) => ({ key: s.contributionKey, owner: s.owner, id: s.id, targetKey: s.targetKey, kind: s.targetKind, revision: s.revision })), assistantKeys: ix.messages().filter((m) => m.role === 'assistant').map((m) => m.projectionKey), targetsAreIndexed: lc.list().every((s) => { const rec = ix.getMessage(s.targetKey); return !!rec && rec.role === 'assistant' && rec.target.classList.contains('cgMsg') && (!rec.target.querySelector('[data-cgxui-owner=\"ats\"]') || rec.target.querySelector('[data-cgxui-owner=\"ats\"]').parentElement === rec.target); }) }; })()");
+    await tsPage.evaluate("window.__scans.length = 0; window.__stampNodes = Array.from(document.querySelectorAll('[data-cgxui-owner=\"ats\"]')); H2O.AT.answrts.api.rescan();"); await tsPage.waitForTimeout(500);
+    out.scansAfterRescan = await tsPage.evaluate('window.__scans.length'); out.afterRescan = await tsPage.evaluate(SUMMARY);
+    out.sameNodes = await tsPage.evaluate("Array.from(document.querySelectorAll('[data-cgxui-owner=\"ats\"]')).every((s, i) => s === window.__stampNodes[i]) && window.__stampNodes.length === document.querySelectorAll('[data-cgxui-owner=\"ats\"]').length");
+    out.revisionsAfterRescan = await tsPage.evaluate('window.__r1.decorationContributions.list().map((s) => s.revision)');
+    await tsPage.evaluate("document.querySelector('.cgMsg[data-message-id=\"a1\"]').setAttribute('data-h2o-create-time', '1757750400'); window.__scans.length = 0; H2O.AT.answrts.api.rescan();"); await tsPage.waitForTimeout(500);
+    out.scansAfterUpdate = await tsPage.evaluate('window.__scans.length'); out.afterUpdate = await tsPage.evaluate(SUMMARY);
+    out.sameNodesAfterUpdate = await tsPage.evaluate("Array.from(document.querySelectorAll('[data-cgxui-owner=\"ats\"]')).every((s, i) => s === window.__stampNodes[i])"); out.revisionsAfterUpdate = await tsPage.evaluate('window.__r1.decorationContributions.list().map((s) => s.revision)');
+    await tsPage.evaluate("const h = document.querySelector('.cgMsg[data-message-id=\"a2\"]'); const t = document.createElement('div'); t.setAttribute('data-cgxui', 'atns-answer-title'); t.setAttribute('data-cgxui-owner', 'atns'); t.textContent = 'Title bar'; t.style.cssText = 'display:block;width:180px;height:28px;margin:6px 0;'; h.insertBefore(t, h.firstChild); h.setAttribute('data-at-collapsed', '1'); H2O.AT.answrts.api.rescan();"); await tsPage.waitForTimeout(500);
+    out.anchors = await tsPage.evaluate("(() => { const h = document.querySelector('.cgMsg[data-message-id=\"a2\"]'); const vars = ['--cgxui-ats-anchor-left','--cgxui-ats-anchor-top','--cgxui-ats-anchor-width','--cgxui-ats-anchor-height','--cgxui-ats-under-top','--cgxui-ats-under-max','--cgxui-ats-right-left','--cgxui-ats-right-max']; return { vars: Object.fromEntries(vars.map((v) => [v, h.style.getPropertyValue(v)])), hidden: getComputedStyle(h.querySelector('[data-cgxui-owner=\"ats\"]')).visibility, otherHostStyle: document.querySelector('.cgMsg[data-message-id=\"a1\"]').style.cssText }; })()");
+    out.contentUnchanged = await tsPage.evaluate("(() => { const clone = window.__r1.root.cloneNode(true); clone.querySelectorAll('[data-cgxui-owner=\"ats\"], [data-cgxui-owner=\"atns\"]').forEach((n) => n.remove()); const h2 = clone.querySelector('.cgMsg[data-message-id=\"a2\"]'); h2.removeAttribute('data-at-collapsed'); h2.removeAttribute('style'); clone.querySelector('.cgMsg[data-message-id=\"a1\"]').setAttribute('data-h2o-create-time', '1757664060'); return clone.outerHTML === window.__beforeHTML; })()");
+    if (variant === 'governed') {
+      await tsPage.evaluate(`(() => { const r2 = H2O.Studio.chatRenderer.render(${FIXTURE}, { getEditOverride: () => null }); window.__r2 = r2; window.__bridge.bind(r2); window.__scans.length = 0; H2O.AT.answrts.api.rescan(); })()`); await tsPage.waitForTimeout(500);
+      out.foreign = await tsPage.evaluate("({ r2: window.__r2.decorationContributions.list().length, r1: window.__r1.decorationContributions.list().length, scans: window.__scans.length, stamps: document.querySelectorAll('[data-cgxui-owner=\"ats\"]').length })");
+      await tsPage.evaluate("window.__bridge.bind({ root: window.__r1.root, semanticIndex: window.__r1.semanticIndex, decorationContributions: window.__r2.decorationContributions }); window.__scans.length = 0; H2O.AT.answrts.api.rescan();"); await tsPage.waitForTimeout(500);
+      out.mismatch = await tsPage.evaluate("({ r2: window.__r2.decorationContributions.list().length, scans: window.__scans.length })");
+      await tsPage.evaluate("window.__bridge.bind(window.__r1); window.__scans.length = 0; H2O.AT.answrts.api.rescan();"); await tsPage.waitForTimeout(500);
+      out.rebound = await tsPage.evaluate("({ r1: window.__r1.decorationContributions.list().length, scans: window.__scans.length, stamps: document.querySelectorAll('[data-cgxui-owner=\"ats\"]').length })");
+      out.unmount = await tsPage.evaluate("(() => { window.__bridge.unmount('validator:leave'); return { unmounts: window.__unmounts, active: window.__r1.decorationContributions.list().length, stamps: document.querySelectorAll('[data-cgxui-owner=\"ats\"]').length, a2Style: document.querySelector('.cgMsg[data-message-id=\"a2\"]').style.cssText, accessorIndex: H2O.Studio.getReaderSemanticIndex(), accessorDeco: H2O.Studio.getReaderDecorationContributions(), binding: window.__bridge.state.currentReaderRender, warnings: window.__warnings }; })()");
+      out.api = await tsPage.evaluate('Object.keys(H2O.AT.answrts.api)'); out.diag = await tsPage.evaluate('JSON.stringify(H2O.AT.answrts.diag.governed || null)');
+      out.rendererGlobals = await tsPage.evaluate("Object.keys(H2O.Studio.Renderer).filter((k) => /current|registry|timestamp|decorations$/i.test(k))");
+    }
+    out.errors = tsErrors;
+    timestampRuns[variant] = out;
+    await tsPage.close();
+  }
+
+  check('Answer Timestamp: the governed Studio path registers one DecorationContribution per assistant projection (Semantic Index targets, zero assistant-selector scans) (S4C slice B)', () => {
+    const g = timestampRuns.governed;
+    assert.deepEqual(g.errors, [], 'no page errors');
+    assert.equal(g.contributions.active.length, 3, 'F/I: one contribution per assistant projection (incl. the answer without create time), none for user/system/tool');
+    assert.deepEqual(g.contributions.active.map((a) => a.id), g.contributions.assistantKeys, 'E/G/K: ids and targetKeys are the assistant message projection keys, in index order');
+    assert.ok(g.contributions.active.every((a) => a.owner === 'studio-answer-timestamp' && a.targetKey === a.id && a.kind === 'message' && a.key === `decoration:studio-answer-timestamp:${encodeURIComponent(a.id)}`), 'K: deterministic owner/id/key');
+    assert.equal(g.contributions.targetsAreIndexed, true, 'H: the stamp sits directly under the exact indexed assistant message Element');
+    assert.equal(g.scansAfterMount, 0, 'W: no querySelectorAll("div[data-message-author-role=\\"assistant\\"]") on the governed path'); assert.equal(g.scansAfterRescan, 0); assert.equal(g.scansAfterUpdate, 0);
+    assert.equal(g.afterMount.count, 2, 'L: stamps created inside apply for the two timed answers'); assert.equal(g.afterMount.nonAssistantWithStamp, 0);
+    assert.deepEqual(g.rendererGlobals, [], 'no Renderer-side registry / current lifecycle'); assert.deepEqual(g.api, ['boot', 'dispose', 'rescan', 'getConfig', 'applySetting'], 'public module API unchanged'); assert.equal(g.diag, 'null', 'no governed-path errors');
+  });
+
+  check('Answer Timestamp: repeated reconcile never duplicates; updates flow through the contribution handle (revision advances, same stamp node) (S4C slice B)', () => {
+    const g = timestampRuns.governed;
+    assert.equal(g.afterRescan.count, 2, 'J: no duplicate stamps'); assert.equal(g.sameNodes, true, 'J/M: the same stamp nodes'); assert.ok(g.revisionsAfterRescan.every((r) => r >= 1), 'M: reconcile is an update, not a re-register');
+    assert.notEqual(g.afterUpdate.stamps[0].text, g.afterMount.stamps[0].text, 'M/Q: a changed create time updates the label'); assert.equal(g.sameNodesAfterUpdate, true, 'M: node identity preserved'); assert.ok(g.revisionsAfterUpdate.every((r, i) => r > g.revisionsAfterRescan[i]), 'M: through handle.update');
+    assert.equal(g.afterUpdate.count, 2);
+  });
+
+  check('Answer Timestamp: governed output equals the legacy compatibility path - label, classes, cgxui attributes, dataset.fullLabel, placement, collapsed anchors; content DOM untouched (S4C slice B)', () => {
+    const g = timestampRuns.governed; const f = timestampRuns.fallback;
+    assert.deepEqual(f.errors, []);
+    assert.ok(f.scansAfterMount > 0, 'X/Y: the compatibility path still discovers targets through the assistant selector');
+    assert.equal(f.afterMount.count, 2, 'X: legacy stamps present without the Reader contracts');
+    const shape = (s) => s.stamps.map((x) => ({ text: x.text, fullLabel: x.fullLabel, className: x.className, owner: x.owner, ui: x.ui, parentIsHost: x.parentIsHost, parentRole: x.parentRole, parentMessageId: x.parentMessageId, isLastChild: x.isLastChild }));
+    assert.deepEqual(shape(g.afterMount), shape(f.afterMount), 'Q/R: identical stamps on mount'); assert.deepEqual(shape(g.afterUpdate), shape(f.afterUpdate), 'Q: identical updated labels');
+    assert.ok(g.afterMount.stamps.every((s) => s.className === 'chatgpt-timestamp cgxui-ats-ts' && s.owner === 'ats' && s.ui === 'ats-stamp' && s.fullLabel === s.text && s.parentIsHost && s.parentRole === 'assistant'), 'R: accepted classes / attributes / fullLabel / placement');
+    assert.deepEqual(g.anchors, f.anchors, 'S: collapsed-hover anchor variables identical'); assert.equal(g.anchors.hidden, 'hidden', 'S: collapsed stamp hidden'); assert.ok(Object.values(g.anchors.vars).every((v) => /px$/.test(v)), 'S: anchor vars set'); assert.equal(g.anchors.otherHostStyle, '', 'S: non-collapsed hosts carry no vars');
+    assert.equal(g.contentUnchanged, true, 'P: author/content DOM unchanged outside the decoration'); assert.equal(f.contentUnchanged, true);
+    assert.equal(f.contributions.active.length, 0, 'X: the legacy path registers nothing');
+  });
+
+  check('Answer Timestamp: stale / foreign contracts are never used; Reader unmount disposes every timestamp decoration and clears the bridge (S4C slice B)', () => {
+    const g = timestampRuns.governed;
+    assert.deepEqual(g.foreign, { r2: 0, r1: 3, scans: g.foreign.scans, stamps: 2 }); assert.ok(g.foreign.scans > 0, 'an unmounted render bound as current is not governed: the mounted render is served by the compatibility scan');
+    assert.equal(g.mismatch.r2, 0, 'a mismatched index/lifecycle pair is rejected'); assert.ok(g.mismatch.scans > 0);
+    assert.deepEqual(g.rebound, { r1: 3, scans: 0, stamps: 2 }, 'the real pair rebound -> governed again');
+    assert.equal(g.unmount.active, 0, 'N/O: disposeAll removed every active contribution'); assert.equal(g.unmount.stamps, 0, 'N/O: every owned stamp removed'); assert.equal(g.unmount.a2Style, '', 'N: anchor vars cleared on dispose');
+    assert.equal(g.unmount.accessorIndex, null); assert.equal(g.unmount.accessorDeco, null); assert.equal(g.unmount.binding, null, 'bridge cleared'); assert.deepEqual(g.unmount.unmounts, ['validator:leave'], 'host unmount continued'); assert.deepEqual(g.unmount.warnings, []);
   });
 
   await browser.close();

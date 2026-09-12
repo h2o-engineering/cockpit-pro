@@ -2236,7 +2236,11 @@ function validateDecorationContributionLifecycle() {
   assert.equal((rendererSource.match(/\.createLifecycle\(/g) || []).length, 1, 'B: exactly one lifecycle creation site per render'); assert.equal((rendererSource.match(/\.register\(/g) || []).length, 0, 'D: the Renderer registers no Product contribution');
   assert.match(extractFunction(rendererSource, 'activeDecorationContributionModule'), /no embedded decoration fallback exists/, 'missing module fails clearly');
   assert.doesNotMatch(rendererSource, /currentDecorations|globalRegistry|singletonController|DECORATION_REGISTRY|ACTIVE_DECORATION/, 'AA: no global current lifecycle in the Renderer');
-  assert.doesNotMatch(studioSource, /decorationContribution|decorationContributions/, 'studio.js is untouched: no Reader lifecycle integration in S4B');
+  /* S4C slice B retired the S4B stage guard: the Reader now integrates the lifecycle, but only through
+   * its current-render bridge (bind / accessor / disposeAll on unmount) - it never creates a lifecycle
+   * or registers a contribution of its own. */
+  assert.doesNotMatch(studioSource, /createLifecycle\(|decorationContributions\??\.register\(|Renderer\.decorationContribution\b/, 'studio.js neither creates lifecycles nor registers contributions');
+  assert.match(studioSource, /function disposeReaderRenderDecorations\(reason\)\{[\s\S]*?lifecycle\.disposeAll\(\);/, 'the Reader disposes the current render lifecycle on its unmount seam (S4C slice B)');
   /* The decision harness (stubbed modules) proves the binding flows through render(). */
   const harness = createRendererBuildHarness({ mountedTurnCount: 0, assistantTurnEls: [], fallbackRequired: true });
   const decided = harness.fn({ snapshotId: 's', messages: [{ role: 'user' }, { role: 'assistant' }] }, {});

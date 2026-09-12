@@ -141,7 +141,7 @@ const state = {
   lastTagFilter: "",
   renderToken: 0,
   currentReaderEditOverrides: null,
-  /* S4C: the currently mounted Reader render's { root, semanticIndex } (read-only bridge; cleared on unmount). */
+  /* S4C: the currently mounted Reader render's { root, semanticIndex, decorationContributions } (read-only bridge; disposed + cleared on unmount). */
   currentReaderRender: null,
   titleStateByChat: {},
   interfaceMetaByChat: {},
@@ -202,9 +202,11 @@ let activeRailPopoverButton = null;
     return { snapshotId: "", chatId: "", source: "none", eligible: false };
   };
 
-  // M03 S4C: read-only bridge to the CURRENT Reader render's Semantic Index
-  // for compatibility consumers (Reader & Notes). See getReaderSemanticIndex.
+  // M03 S4C: read-only bridges to the CURRENT Reader render's Semantic Index
+  // (Reader & Notes) and DecorationContribution lifecycle (Answer Timestamp).
+  // See getReaderSemanticIndex / getReaderDecorationContributions.
   H2O.Studio.getReaderSemanticIndex = getReaderSemanticIndex;
+  H2O.Studio.getReaderDecorationContributions = getReaderDecorationContributions;
 })();
 
 function esc(s){
@@ -304,26 +306,36 @@ installFolderOperatorModeApi();
 
 function studioHostUnmount(reason = "studio:unmount") {
   state.currentReaderEditOverrides = null;
+  /* S4C slice B: the render's decorations are disposed BEFORE the binding is
+   * forgotten; a cleanup error is diagnosed and never blocks the teardown. */
+  disposeReaderRenderDecorations(reason);
   state.currentReaderRender = null;
   try { W.H2O?.studioHost?.unmount?.(reason); } catch {}
 }
 
-/* M03 P4 S4C T8 (slice A) — current-render Semantic Index bridge.
+/* M03 P4 S4C T8 (slices A + B) — current-render bridge.
  *
- * buildReaderDOM binds the Renderer result's read-only Semantic Index to the
- * Renderer root it describes; studioHostUnmount clears the binding, so every
- * Reader discard path (route leave, replace, missing, error) drops it with the
- * DOM. The accessor answers only for the current render: an unmatched root
- * yields null, nothing is searched in the DOM, and no index is ever created
- * or mutated here. This is Reader-owned current-render integration state -
- * never persisted, never a process-wide singleton, never a durable identity.
- * Nothing else of the render result (decoration lifecycle, navigation,
- * scrolling, Reader internals) is exposed. */
+ * buildReaderDOM binds the Renderer result's read-only Semantic Index and its
+ * DecorationContribution lifecycle to the Renderer root they describe;
+ * studioHostUnmount disposes that lifecycle once and clears the binding, so
+ * every Reader discard path (route leave, replace, missing, error) drops the
+ * decorations with the DOM. The accessors answer only for the current render:
+ * an unmatched root yields null, nothing is searched in the DOM, and no index
+ * or lifecycle is ever created or mutated here. This is Reader-owned
+ * current-render integration state - never persisted, never a process-wide
+ * singleton, never a durable identity. Reader owns WHEN its render is
+ * discarded; the lifecycle itself stays Renderer-owned. Nothing else of the
+ * render result (navigation, scrolling, Reader internals) is exposed. */
 function bindReaderSemanticIndex(rendererResult){
   const root = rendererResult?.root;
   const semanticIndex = rendererResult?.semanticIndex;
+  const decorationContributions = rendererResult?.decorationContributions;
   state.currentReaderRender = root && semanticIndex && typeof semanticIndex === "object"
-    ? Object.freeze({ root, semanticIndex })
+    ? Object.freeze({
+      root,
+      semanticIndex,
+      decorationContributions: decorationContributions && typeof decorationContributions === "object" ? decorationContributions : null,
+    })
     : null;
 }
 
@@ -332,6 +344,26 @@ function getReaderSemanticIndex(root){
   if (!current) return null;
   if (root !== undefined && root !== current.root) return null;
   return current.semanticIndex;
+}
+
+function getReaderDecorationContributions(root){
+  const current = state.currentReaderRender;
+  if (!current) return null;
+  if (root !== undefined && root !== current.root) return null;
+  return current.decorationContributions || null;
+}
+
+/* Dispose the current render's decorations exactly once per discard: the
+ * binding is cleared right after, so a repeated unmount finds nothing to
+ * dispose; another render's lifecycle is never reached from here. */
+function disposeReaderRenderDecorations(reason){
+  const lifecycle = state.currentReaderRender?.decorationContributions;
+  if (!lifecycle || typeof lifecycle.disposeAll !== "function") return;
+  try {
+    lifecycle.disposeAll();
+  } catch (error) {
+    try { console.warn("[studio] reader decoration cleanup reported a failure", reason, error); } catch {}
+  }
 }
 
 function studioHostUnmountPreservingRouteHash(reason = "studio:route-leave") {
@@ -4840,7 +4872,7 @@ function buildReaderDOM(snap, rendererInputRaw){
     scrollEl: scrollRoot,
     assistantTurnEls,
   } = rendererResult;
-  /* S4C: expose this render's Semantic Index to compatibility consumers. */
+  /* S4C: expose this render's Semantic Index + decoration lifecycle to consumers. */
   bindReaderSemanticIndex(rendererResult);
 
   try {

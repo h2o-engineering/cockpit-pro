@@ -819,12 +819,14 @@ check('S4C: studio.js exposes a read-only current-render Semantic Index bridge o
   const bind = extractStudioFunction(studio, 'bindReaderSemanticIndex');
   const get = extractStudioFunction(studio, 'getReaderSemanticIndex');
   for (const [name, text] of [['bindReaderSemanticIndex', bind], ['getReaderSemanticIndex', get]]) {
-    for (const token of ['querySelector', 'getElementById', 'document.', 'localStorage', 'sessionStorage', 'indexedDB', 'decorationContributions', 'scrollTo', 'scrollIntoView', 'createShellIndex', 'Object.assign(', 'JSON.parse']) {
+    for (const token of ['querySelector', 'getElementById', 'document.', 'localStorage', 'sessionStorage', 'indexedDB', 'scrollTo', 'scrollIntoView', 'createShellIndex', 'createLifecycle', 'Object.assign(', 'JSON.parse']) {
       hasNot(text, token, `${name} must not contain ${token}`);
     }
   }
+  hasNot(get, 'decorationContributions', 'the index accessor exposes the index only');
   has(get, 'if (root !== undefined && root !== current.root) return null;', 'an unmatched root yields null');
-  has(bind, 'Object.freeze({ root, semanticIndex })', 'binding is a frozen root/index pair');
+  /* S4C slice B extended the SAME bounded record additively with the render's decoration lifecycle. */
+  has(bind, 'Object.freeze({\n      root,\n      semanticIndex,\n      decorationContributions:', 'binding is one frozen current-render record (root, index, decoration lifecycle)');
   assert.equal((studio.match(/bindReaderSemanticIndex\(/g) || []).length, 2, 'exactly one binding call site (definition + buildReaderDOM)');
 });
 
@@ -836,16 +838,18 @@ check('S4C: current Reader Semantic Index accessor returns the exact bound index
   vm.runInContext([
     extractStudioFunction(studio, 'bindReaderSemanticIndex'),
     extractStudioFunction(studio, 'getReaderSemanticIndex'),
+    /* S4C slice B: the real unmount seam disposes the bound decoration lifecycle first. */
+    extractStudioFunction(studio, 'disposeReaderRenderDecorations'),
     extractStudioFunction(studio, 'studioHostUnmount'),
     'this.bind = bindReaderSemanticIndex; this.get = getReaderSemanticIndex; this.unmount = studioHostUnmount;',
   ].join('\n'), sandbox);
   const rootA = { tag: 'cgFrame-A' }; const rootB = { tag: 'cgFrame-B' };
   const ixA = Object.freeze({ schema: SEMANTIC_INDEX_SCHEMA, id: 'A' }); const ixB = Object.freeze({ schema: SEMANTIC_INDEX_SCHEMA, id: 'B' });
   assert.equal(sandbox.get(), null, 'no current render -> null'); assert.equal(sandbox.get(rootA), null);
-  sandbox.bind({ root: rootA, semanticIndex: ixA, turnsEl: {}, decorationContributions: { list() { return []; } } });
+  sandbox.bind({ root: rootA, semanticIndex: ixA, turnsEl: {}, decorationContributions: { list() { return []; }, disposeAll() { return []; } } });
   assert.equal(sandbox.get(rootA), ixA, '1: the exact index of the current render'); assert.equal(sandbox.get(), ixA, 'unqualified call returns the current index');
   assert.equal(sandbox.get(rootB), null, '2: a foreign root receives nothing'); assert.equal(sandbox.get(null), null, 'null is not the current root'); assert.equal(sandbox.get({ ...rootA }), null, 'identity, not shape');
-  assert.equal(Object.isFrozen(state.currentReaderRender), true, 'bound pair frozen'); assert.deepEqual(Object.keys(state.currentReaderRender), ['root', 'semanticIndex'], 'only root + index are tracked (no decoration lifecycle, no Reader internals)');
+  assert.equal(Object.isFrozen(state.currentReaderRender), true, 'bound pair frozen'); assert.deepEqual(Object.keys(state.currentReaderRender), ['root', 'semanticIndex', 'decorationContributions'], 'one bounded current-render record (root, index, decoration lifecycle - no Reader internals)');
   sandbox.bind({ root: rootB, semanticIndex: ixB });
   assert.equal(sandbox.get(rootA), null, 'a replaced render no longer answers for the old root'); assert.equal(sandbox.get(rootB), ixB, 'the new render answers');
   sandbox.unmount('studio:test');
