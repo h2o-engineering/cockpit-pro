@@ -297,6 +297,8 @@ check('studio.html, publisher and activator agree on the semantic load order', (
     'renderer/semantic/semantic-ingress.v1.js',
     /* S4A/T8: the Semantic Index is a hard Renderer dependency, so the publish-time load-order contract enumerates it. */
     'renderer/semantic/semantic-index.v1.js',
+    /* S4B/T8: the DecorationContribution lifecycle is the next hard Renderer dependency. */
+    'renderer/decoration/decoration-contribution.v1.js',
     'renderer/content/content-renderer.v1.js',
     'renderer/chat-renderer.studio.js',
   ]) {
@@ -310,6 +312,10 @@ check('studio.html, publisher and activator agree on the semantic load order', (
     'the Semantic Index must load after semantic ingress');
   assert.ok(refs.indexOf('renderer/chat-renderer.studio.js') > refs.indexOf('renderer/semantic/semantic-index.v1.js'),
     'the Renderer must load after the Semantic Index it consumes');
+  assert.ok(refs.indexOf('renderer/decoration/decoration-contribution.v1.js') > refs.indexOf('renderer/semantic/semantic-index.v1.js'),
+    'the DecorationContribution lifecycle must load after the Semantic Index it resolves targets through');
+  assert.ok(refs.indexOf('renderer/chat-renderer.studio.js') > refs.indexOf('renderer/decoration/decoration-contribution.v1.js'),
+    'the Renderer must load after the DecorationContribution lifecycle it consumes');
   assert.ok(refs.indexOf('renderer/content/content-renderer.v1.js') > refs.indexOf('renderer/semantic/semantic-ingress.v1.js'),
     'the ContentRenderer must load after semantic ingress');
   assert.ok(refs.indexOf('renderer/chat-renderer.studio.js')

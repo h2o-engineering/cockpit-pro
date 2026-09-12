@@ -808,6 +808,18 @@ function activeSemanticIndexModule(){
   return api;
 }
 
+/* S4B: the DecorationContribution module is the same kind of passive Renderer
+ * dependency. It governs consumer decoration registration / update / disposal
+ * over the Semantic Index of ONE render result; the Renderer creates one
+ * lifecycle per result and registers nothing itself. No embedded fallback. */
+function activeDecorationContributionModule(){
+  const api = Studio.Renderer && Studio.Renderer.decorationContribution;
+  if (!api || api.__installed !== true || typeof api.createLifecycle !== "function"){
+    throw new Error("Studio Chat Renderer requires H2O.Studio.Renderer.decorationContribution (renderer/decoration/decoration-contribution.v1.js); no embedded decoration fallback exists");
+  }
+  return api;
+}
+
 /* Projection metadata the Renderer knows while it builds each turn shell (role,
  * turn number, source ids as supplied by the normalized input). Kept beside the
  * element, never on it: no DOM attribute is emitted for it, and the entries die
@@ -1441,6 +1453,13 @@ function renderWithCollector(inputRaw, options, contentCollector){
     contentBodies: contentCollector.bodies,
   });
 
+  /* S4B: one DecorationContribution lifecycle per render result, bound to this
+   * result's Semantic Index only. Consumers register / update / dispose their
+   * decorations through it against indexed projection targets; the Renderer
+   * registers nothing, so an ordinary render carries zero contributions and
+   * the lifecycle is owned by this result, never stored on the Renderer. */
+  const decorationContributions = activeDecorationContributionModule().createLifecycle({ semanticIndex });
+
   return {
     root,
     turnsEl,
@@ -1450,6 +1469,7 @@ function renderWithCollector(inputRaw, options, contentCollector){
     renderMode,
     semanticSource: semanticConversation ? "savedChatSnapshotV3" : "",
     semanticIndex,
+    decorationContributions,
   };
 }
 

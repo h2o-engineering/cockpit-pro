@@ -35,6 +35,9 @@ const SEMANTIC_SOURCE_RELS = Object.freeze([
 const CONTENT_RENDERER_REL = 'src-surfaces-base/studio/renderer/content/content-renderer.v1.js';
 const SEMANTIC_INDEX_REL = 'src-surfaces-base/studio/renderer/semantic/semantic-index.v1.js';
 const RENDER_IR_REL = 'src-surfaces-base/studio/renderer/semantic/render-ir.v1.js';
+const DECORATION_REL = 'src-surfaces-base/studio/renderer/decoration/decoration-contribution.v1.js';
+const PUBLISHER_REL = 'tools/publish/lean-publisher.mjs';
+const ACTIVATOR_REL = 'tools/publish/lean-activator.mjs';
 const PACK_STUDIO_REL = 'tools/product/studio/pack-studio.mjs';
 
 function readRepo(rel) {
@@ -771,6 +774,9 @@ function createRendererBuildHarness(richResult) {
      * module; the decision harness records the call and returns a marker. */
     TURN_PROJECTION_META: new WeakMap(),
     activeSemanticIndexModule: () => ({ createShellIndex: (input) => ({ __stubIndex: true, renderMode: input.renderMode, semanticConversation: input.semanticConversation }) }),
+    /* S4B: render() then binds one DecorationContribution lifecycle to that
+     * index through the installed module; the harness records the binding. */
+    activeDecorationContributionModule: () => ({ createLifecycle: (input) => ({ __stubLifecycle: true, semanticIndex: input.semanticIndex }) }),
     mountRichTurns: (container) => {
       richMountCalls += 1;
       for (let i = 0; i < richResult.mountedTurnCount; i += 1) container.appendChild({ kind: 'rich' });
@@ -1894,7 +1900,8 @@ function validateSemanticIndexFoundation() {
   const renderFn = extractFunction(rendererSource, 'render') + '\n' + extractFunction(rendererSource, 'renderWithCollector');
   assert.match(renderFn, /const semanticIndex = activeSemanticIndexModule\(\)\.createShellIndex\(\{/, 'render() builds the index through the installed module');
   assert.match(renderFn, /semanticConversation: renderMode === "canonical" \? semanticConversation : null/, 'the semantic conversation reaches the index only on the canonical (semantic-v3) path');
-  assert.match(renderFn, /semanticSource: semanticConversation \? "savedChatSnapshotV3" : "",\s*semanticIndex,\s*\};/, 'the index is returned additively as semanticIndex');
+  /* S4B: the DecorationContribution lifecycle follows the index additively; both are result-owned. */
+  assert.match(renderFn, /semanticSource: semanticConversation \? "savedChatSnapshotV3" : "",\s*semanticIndex,\s*decorationContributions,\s*\};/, 'the index is returned additively as semanticIndex (followed by the S4B lifecycle)');
   assert.match(extractFunction(rendererSource, 'activeSemanticIndexModule'), /no embedded index fallback exists/, 'no embedded index fallback');
   assert.match(rendererSource, /const TURN_PROJECTION_META = new WeakMap\(\);/, 'projection meta lives in a WeakMap beside the shells');
   assert.match(extractFunction(rendererSource, 'buildTurnShell'), /TURN_PROJECTION_META\.set\(turn, Object\.freeze\(\{/, 'buildTurnShell records frozen projection meta');
@@ -2035,6 +2042,217 @@ function validateSemanticIndexContentProjections() {
   assert.doesNotMatch(indexSource.replace(/\/\*[\s\S]*?\*\//g, ' '), /querySelector|TreeWalker|textContent|innerHTML|outerHTML/, 'O: the index never walks or reads DOM content');
 }
 
+/* M03 P4 S4B T8 slice A - DecorationContribution lifecycle foundation.
+ *
+ * Executes the REAL decoration module against a REAL Semantic Index built over
+ * the REAL ContentRenderer output (fake document, FakeDomElement /
+ * FakeTextNode nodes), so every lifecycle rule is proven on the bytes that
+ * ship: per-render lifecycle bound to one index, index-only target resolution
+ * over all five projection kinds, deterministic owner+id identity, apply /
+ * update / dispose / disposeAll semantics with rollback-safe failures, the
+ * bounded application context, and the zero-Product-delta contract (nothing
+ * registered by the Renderer, no wrapper, no attribute, no global registry).
+ * Letters follow the S4B proof list (A..AB). */
+function validateDecorationContributionLifecycle() {
+  const deep = (actual, expected, message) => assert.equal(JSON.stringify(actual), JSON.stringify(expected), message);
+  const decorationSource = readRepo(DECORATION_REL);
+  const indexSource = readRepo(SEMANTIC_INDEX_REL);
+  const irSource = readRepo(RENDER_IR_REL);
+  const contentSource = readRepo(CONTENT_RENDERER_REL);
+  const packSource = readRepo(PACK_STUDIO_REL);
+  const publisherSource = readRepo(PUBLISHER_REL);
+  const activatorSource = readRepo(ACTIVATOR_REL);
+  const codeOnly = decorationSource.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/.*$/gm, '');
+
+  /* A / AA / X / Y (static): frozen factory module, no DOM / persistence / navigation / observer / random identity, no module-level registry. */
+  assert.match(decorationSource, /^\/\/ @version 0\.1\.0-m03-s4b\n"use strict";/, 'A: module version comment convention');
+  const context = vm.createContext({});
+  vm.runInContext(`${irSource}\n${indexSource}\n${contentSource}\n${decorationSource}\nthis.__ir = this.H2O.Studio.Renderer.renderIR; this.__ix = this.H2O.Studio.Renderer.semanticIndex; this.__content = this.H2O.Studio.Renderer.contentRenderer; this.__deco = this.H2O.Studio.Renderer.decorationContribution; this.__renderer = this.H2O.Studio.Renderer;`, context);
+  const api = context.__deco; const ixApi = context.__ix; const ir = context.__ir; const content = context.__content;
+  assert.equal(api.__installed, true); assert.equal(api.__version, '0.1.0-m03-s4b'); assert.equal(api.schema, 'h2o.renderer.decoration-contribution'); assert.equal(api.schemaVersion, 1);
+  assert.equal(Object.isFrozen(api), true, 'A: module namespace frozen');
+  deep(Object.keys(api).sort(), ['__installed', '__version', 'contributionKeyOf', 'createLifecycle', 'schema', 'schemaVersion', 'targetKinds'], 'A: factory-only module surface');
+  deep([...api.targetKinds], ['conversation', 'turn', 'message', 'block', 'text'], 'F: the five Semantic Index kinds are the eligible targets');
+  assert.doesNotMatch(codeOnly, /querySelector|querySelectorAll|TreeWalker|createTreeWalker|textContent|innerHTML|outerHTML|data-testid|closest\(|getElementsBy|matches\(/, 'E: no DOM scraping or selector-based target resolution');
+  assert.doesNotMatch(codeOnly, /createElement|createTextNode|setAttribute|removeAttribute|appendChild|insertBefore|replaceWith|replaceChild|removeChild|insertAdjacent|classList|\.dataset|\.style\b/, 'X: the foundation never creates, wraps, attributes or restyles DOM');
+  assert.doesNotMatch(codeOnly, /scrollIntoView|scrollTo\(|scrollBy|\.focus\(|navigate|router|location\.|history\./, 'Y: no navigation, scrolling, focus or routing authority');
+  assert.doesNotMatch(codeOnly, /MutationObserver|ResizeObserver|IntersectionObserver|addEventListener|setTimeout|setInterval|requestAnimationFrame|Promise|async |await /, 'no observer, event, timer or async lifecycle daemon');
+  assert.doesNotMatch(codeOnly, /localStorage|sessionStorage|indexedDB|JSON\.parse|structuredClone/, 'no persistence and no reinterpretation of consumer values');
+  assert.doesNotMatch(codeOnly, /Date\.now|Math\.random|randomUUID|crypto\.|performance\.now/, 'I: no non-deterministic identity');
+  assert.doesNotMatch(codeOnly, /currentDecorations|globalRegistry|singletonController|Renderer\.current|currentLifecycle/, 'AA: no singleton current lifecycle');
+  assert.doesNotMatch(codeOnly, /^  (const|let|var) \w+ = new (Map|WeakMap|Set)\(/m, 'AA: no module-level registry (the registry lives inside createLifecycle only)');
+  assert.doesNotMatch(codeOnly, /semanticIndex\.\w+\s*=[^=]|index\.\w+\s*=[^=]|Object\.assign\(index|Object\.defineProperty/, 'Z: the bound index is never written to');
+  deep(Object.keys(context.__renderer).filter((k) => /current|registry|singleton|decorations$/i.test(k)), [], 'AA: no global decoration registry on the Renderer namespace');
+  /* Non-vacuity of the code-only predicates. */
+  assert.match('  const REGISTRY = new Map();', /^  (const|let|var) \w+ = new (Map|WeakMap|Set)\(/m); assert.match('el.querySelector(".x")', /querySelector/); assert.match('target.setAttribute("a", 1)', /setAttribute/);
+
+  /* Real Semantic Index over real ContentRenderer output (fake document). */
+  const doc = { createElement: (tag) => new FakeDomElement(tag), createTextNode: (text) => new FakeTextNode(text), createDocumentFragment: () => new FakeDomElement('#fragment') };
+  const urlPolicy = { classifyUrl: (value) => (/^https:\/\//.test(String(value)) ? { ok: true } : { ok: false, reason: 'denied' }) };
+  const presentationProfile = installPresentationProfile(vm.createContext({})).reference();
+  const buildFrame = (messageIds) => {
+    const root = new FakeDomElement('div'); root.className = 'cgFrame'; const turnsEl = new FakeDomElement('section'); turnsEl.className = 'cgScroll wbRichRoot'; root.appendChild(turnsEl);
+    const meta = new Map(); const projections = []; const bodies = new Set();
+    messageIds.forEach((messageId, i) => {
+      const role = i % 2 === 0 ? 'user' : 'assistant';
+      const turn = new FakeDomElement('article'); turn.className = `cgTurn cgTurn--${role}`; turn.setAttribute('data-turn', role);
+      const host = new FakeDomElement('div'); host.className = `cgMsg cgMsg--${role}`; host.setAttribute('data-message-author-role', role); const body = new FakeDomElement('div'); body.className = 'cgMsgBody'; host.appendChild(body); turn.appendChild(host); turnsEl.appendChild(turn);
+      meta.set(turn, { role, turnNo: i + 1, messageId, turnId: `t-${messageId}` });
+      const conversation = ir.createConversation({ id: 'h2o.render', messages: [{ id: 'h2o.message', role, blocks: [{ kind: 'paragraph', children: [{ kind: 'text', text: `plain ${messageId} ` }, { kind: 'text', text: 'strong', marks: [{ kind: 'strong' }] }] }, { kind: 'codeBlock', language: 'js', code: 'x' }] }] });
+      assert.equal(ir.validate(conversation).ok, true);
+      body.appendChild(content.renderBlocks(conversation.messages[0].blocks, { document: doc, urlPolicy, presentationProfile, projectionSink: (report) => projections.push({ report, bodyEl: body }) }));
+      bodies.add(body);
+    });
+    const index = ixApi.createShellIndex({ root, turnsEl, renderMode: 'canonical', source: { chatId: 'chat', snapshotId: `snap-${messageIds.join('-')}` }, semanticConversation: null, describeTurn: (el) => meta.get(el) || null, contentProjections: projections, contentBodies: bodies });
+    return { root, turnsEl, index };
+  };
+  const shape = (node) => node instanceof FakeTextNode ? `#${node.nodeValue}` : `${node.tagName}[${[...node.attrs.entries()].map(([k, v]) => `${k}=${v}`).join(',')}|${node.className}](${node.children.map(shape).join('')})`;
+  const frameA = buildFrame(['m-u1', 'm-a1']); const frameB = buildFrame(['m-u1', 'm-a1']);
+  const ixA = frameA.index; const ixB = frameB.index;
+  assert.equal(ixA.texts().length, 4, 'fixture: text projections present'); assert.equal(ixA.blocks().length, 4, 'fixture: block projections present');
+  /* Z: the Semantic Index contract is untouched by S4B (same read-only surface as accepted in S4A). */
+  deep(Object.keys(ixA).sort(), ['basis', 'blocks', 'getBlock', 'getConversation', 'getGeometry', 'getMessage', 'getText', 'getTurn', 'messages', 'renderMode', 'schema', 'schemaVersion', 'semanticCorrespondenceLost', 'texts', 'turns', 'version'], 'Z: no mutation method reached the Semantic Index');
+  assert.equal(ixApi.__version, '0.2.0-m03-s4a', 'Z: Semantic Index API version unchanged'); assert.equal(Object.isFrozen(ixA), true);
+
+  /* B / C: one lifecycle per index, distinct, bound to that index only. */
+  const lcA = api.createLifecycle({ semanticIndex: ixA }); const lcA2 = api.createLifecycle({ semanticIndex: ixA }); const lcB = api.createLifecycle({ semanticIndex: ixB });
+  assert.notEqual(lcA, lcA2, 'B: each createLifecycle call is a distinct controller'); assert.notEqual(lcA, lcB);
+  assert.equal(lcA.semanticIndex, ixA, 'C: bound to the exact index'); assert.equal(lcB.semanticIndex, ixB);
+  assert.equal(Object.isFrozen(lcA), true, 'controller frozen'); deep(Object.keys(lcA).sort(), ['disposeAll', 'get', 'list', 'register', 'schema', 'schemaVersion', 'semanticIndex', 'version'], 'compact controller API');
+  for (const forbidden of ['scrollTo', 'scrollIntoView', 'navigate', 'focus', 'select', 'entries', 'registry', 'set', 'delete', 'clear']) assert.equal(forbidden in lcA, false, `Y: no ${forbidden} on the controller`);
+  assert.equal(lcA.schema, 'h2o.renderer.decoration-contribution'); assert.equal(lcA.version, '0.1.0-m03-s4b');
+  deep(lcA.list(), [], 'D: a fresh lifecycle carries zero contributions'); assert.equal(lcA.get('decoration:x:y'), null);
+  for (const bad of [null, undefined, {}, { semanticIndex: null }, { semanticIndex: { schema: 'other', schemaVersion: 1 } }, { semanticIndex: { schema: 'h2o.renderer.semantic-index', schemaVersion: 1 } }]) assert.throws(() => api.createLifecycle(bad), { name: 'TypeError' }, 'C: a lifecycle needs a real Semantic Index');
+  /* Keys of the two equivalent renders are identical, yet a target key resolves only through ITS OWN lifecycle's index. */
+  deep([...ixA.texts().map((t) => t.projectionKey)], [...ixB.texts().map((t) => t.projectionKey)], 'equivalent renders share projection keys');
+  const noop = () => ({ update() {}, dispose() {} });
+  const seenTargets = [];
+  const hB = lcB.register({ owner: 'probe', id: 'bound', targetKey: ixB.texts()[0].projectionKey, apply: (ctx) => { seenTargets.push(ctx.target); return noop(); } });
+  assert.equal(seenTargets[0], ixB.texts()[0].target, 'C: lifecycle B hands out index B\'s Text node'); assert.notEqual(seenTargets[0], ixA.texts()[0].target, 'C: never index A\'s node for the same key'); hB.dispose();
+
+  /* E: resolution goes through the index lookups only (spy index delegating to the real one). */
+  const lookups = []; const spyIndex = Object.freeze({ schema: ixA.schema, schemaVersion: ixA.schemaVersion, version: ixA.version, renderMode: ixA.renderMode, basis: ixA.basis, semanticCorrespondenceLost: false, turns: () => ixA.turns(), messages: () => ixA.messages(), blocks: () => ixA.blocks(), texts: () => ixA.texts(), getConversation: () => { lookups.push('getConversation'); return ixA.getConversation(); }, getTurn: (k) => { lookups.push('getTurn'); return ixA.getTurn(k); }, getMessage: (k) => { lookups.push('getMessage'); return ixA.getMessage(k); }, getBlock: (k) => { lookups.push('getBlock'); return ixA.getBlock(k); }, getText: (k) => { lookups.push('getText'); return ixA.getText(k); }, getGeometry: (k) => { lookups.push('getGeometry'); return { sentinel: k }; } });
+  const lcSpy = api.createLifecycle({ semanticIndex: spyIndex });
+  const keysA = { conversation: ixA.getConversation().projectionKey, turn: ixA.turns()[1].projectionKey, message: ixA.messages()[1].projectionKey, block: ixA.blocks()[2].projectionKey, text: ixA.texts()[3].projectionKey };
+  const contexts = {};
+  const handlesSpy = Object.entries(keysA).map(([kind, key]) => lcSpy.register({ owner: 'reader-probe', id: kind, targetKey: key, value: { kind }, apply: (ctx, value) => { contexts[kind] = { ctx, value }; return noop(); } }));
+  /* F: all five kinds registered; W: the text target is the exact Text node; the context is the bounded 7-field frozen object. */
+  deep(handlesSpy.map((h) => h.snapshot().targetKind), ['conversation', 'turn', 'message', 'block', 'text'], 'F: all five projection kinds are targetable');
+  for (const [kind, key] of Object.entries(keysA)) {
+    const { ctx, value } = contexts[kind]; const record = kind === 'conversation' ? ixA.getConversation() : ixA[`get${kind[0].toUpperCase()}${kind.slice(1)}`](key);
+    assert.equal(Object.isFrozen(ctx), true, 'context frozen'); deep(Object.keys(ctx).sort(), ['contributionKey', 'getGeometry', 'id', 'owner', 'projection', 'target', 'targetKey'], 'Y: bounded context - identity, projection, target, geometry only');
+    assert.equal(ctx.projection, record, `${kind}: the exact immutable projection record`); assert.equal(ctx.target, record.target, `${kind}: the exact indexed target`); assert.equal(ctx.targetKey, key); assert.equal(ctx.owner, 'reader-probe'); assert.equal(ctx.id, kind); assert.equal(ctx.contributionKey, `decoration:reader-probe:${kind}`);
+    deep(ctx.getGeometry(), { sentinel: key }, 'Y: getGeometry is bound to the targetKey and delegates to the index'); assert.equal(value.kind, kind, 'the opaque value reaches apply untouched');
+  }
+  assert.equal(contexts.text.ctx.target instanceof FakeTextNode, true, 'W: text target is the Text node itself'); assert.equal(contexts.text.ctx.target.parentNode.tagName, 'STRONG', 'W: still beneath its mark, no wrapper inserted');
+  assert.equal(lookups.filter((n) => n === 'getGeometry').length, 5, 'geometry read only when the context asks'); assert.ok(lookups.every((n) => /^get(Conversation|Turn|Message|Block|Text|Geometry)$/.test(n)), 'E: only index lookups were used to resolve targets');
+  assert.equal(lookups.filter((n) => n !== 'getGeometry').length > 0, true);
+  /* X: registering and disposing through a no-op application changes nothing in the tree. */
+  const shapeBefore = shape(frameA.root);
+  for (const h of handlesSpy) assert.equal(h.dispose(), true);
+  assert.equal(shape(frameA.root), shapeBefore, 'X / AB: no wrapper, attribute or node introduced by the foundation');
+  deep(lcSpy.list(), [], 'R: all disposed');
+
+  /* G / H / I: unknown target, duplicate owner+id, deterministic key. */
+  const lc = api.createLifecycle({ semanticIndex: ixA });
+  for (const unknown of ['turn:source:nope', 'message:source:m-u1:ordinal:9', 'decoration:x:y', ixB.getConversation().projectionKey.replace('snap-m-u1-m-a1', 'other'), ' ', '']) assert.throws(() => lc.register({ owner: 'o', id: 'i', targetKey: unknown, apply: noop }), /not a projection of this render's Semantic Index|non-empty targetKey/, `G: unknown target rejected (${JSON.stringify(unknown)})`);
+  assert.equal(lc.get('decoration:o:i'), null, 'G: no fake target, no registration'); deep(lc.list(), []);
+  const h1 = lc.register({ owner: 'reader-highlights', id: 'h/1 ä', targetKey: keysA.block, apply: noop });
+  assert.equal(h1.contributionKey, 'decoration:reader-highlights:h%2F1%20%C3%A4', 'I: key = decoration:<encoded owner>:<encoded id>'); assert.equal(api.contributionKeyOf('reader-highlights', 'h/1 ä'), h1.contributionKey, 'I: deterministic, computable ahead of registration');
+  assert.equal(api.createLifecycle({ semanticIndex: ixB }).register({ owner: 'reader-highlights', id: 'h/1 ä', targetKey: keysA.block, apply: noop }).contributionKey, h1.contributionKey, 'I: the same owner+id yields the same key in another render');
+  assert.throws(() => lc.register({ owner: 'reader-highlights', id: 'h/1 ä', targetKey: keysA.turn, apply: noop }), /already registered/, 'H: duplicate owner+id rejected, not overwritten');
+  assert.equal(lc.get(h1.contributionKey).targetKey, keysA.block, 'H: the first registration stays intact'); assert.equal(lc.list().length, 1);
+  lc.register({ owner: 'reader-highlights', id: 'h/2', targetKey: keysA.block, apply: noop }); lc.register({ owner: 'minimap', id: 'h/1 ä', targetKey: keysA.block, apply: noop });
+  assert.equal(lc.list().length, 3, 'H: a different id or owner is a different contribution on the same target');
+  for (const bad of [{}, { owner: '', id: 'x', targetKey: keysA.turn, apply: noop }, { owner: 'o', id: '  ', targetKey: keysA.turn, apply: noop }, { owner: 'o', id: 'x', targetKey: keysA.turn }, { owner: 'o', id: 'x', targetKey: keysA.turn, apply: 'nope' }, { owner: 7, id: 'x', targetKey: keysA.turn, apply: noop }, null]) assert.throws(() => lc.register(bad), { name: 'TypeError' }, 'owner / id / targetKey / apply are required and explicit');
+  deep(lc.list().map((s) => s.contributionKey), ['decoration:reader-highlights:h%2F1%20%C3%A4', 'decoration:reader-highlights:h%2F2', 'decoration:minimap:h%2F1%20%C3%A4'], 'list() is registration order');
+  for (const s of lc.list()) { assert.equal(Object.isFrozen(s), true, 'read-only snapshots'); deep(Object.keys(s), ['contributionKey', 'owner', 'id', 'targetKey', 'targetKind', 'revision', 'active'], 'bounded snapshot - no consumer value'); }
+  assert.equal(Object.isFrozen(lc.list()), true); assert.equal(Object.isFrozen(h1), true, 'handle frozen'); deep(Object.keys(h1).sort(), ['contributionKey', 'dispose', 'id', 'owner', 'snapshot', 'targetKey', 'update'], 'handle surface: identity + update / dispose / snapshot');
+  lc.disposeAll();
+
+  /* J / K / L: apply failure and invalid lifecycles leave no registration; success invokes apply exactly once. */
+  let applyCalls = 0;
+  assert.throws(() => lc.register({ owner: 'o', id: 'throws', targetKey: keysA.turn, apply: () => { applyCalls += 1; throw new RangeError('apply exploded'); } }), RangeError, 'J: the consumer error propagates');
+  assert.equal(lc.get('decoration:o:throws'), null, 'J: no half-registered entry'); deep(lc.list(), []);
+  for (const [label, factory] of [['undefined', () => undefined], ['null', () => null], ['string', () => 'x'], ['no update', () => ({ dispose() {} })], ['no dispose', () => ({ update() {} })], ['non-function members', () => ({ update: 1, dispose: 2 })]]) {
+    assert.throws(() => lc.register({ owner: 'o', id: `invalid-${label}`, targetKey: keysA.message, apply: factory }), /apply\(\) must return a lifecycle object with update\(nextValue\) and dispose\(\) functions/, `K: invalid lifecycle (${label}) rejected`);
+    assert.equal(lc.get(`decoration:o:invalid-${label}`), null, `K: no registration for ${label}`);
+  }
+  deep(lc.list(), [], 'K: registry untouched by failed registrations');
+  applyCalls = 0; const life = { updates: [], disposes: 0 };
+  const hL = lc.register({ owner: 'o', id: 'ok', targetKey: keysA.text, value: 'v0', apply: (ctx, value) => { applyCalls += 1; life.applied = value; return { update(next) { life.updates.push(next); }, dispose() { life.disposes += 1; } }; } });
+  assert.equal(applyCalls, 1, 'L: apply invoked exactly once'); assert.equal(life.applied, 'v0'); deep(hL.snapshot(), { contributionKey: 'decoration:o:ok', owner: 'o', id: 'ok', targetKey: keysA.text, targetKind: 'text', revision: 0, active: true });
+  assert.equal(lc.get('decoration:o:ok').revision, 0); hL.update('v1'); assert.equal(applyCalls, 1, 'L: update never re-applies');
+
+  /* M / N / O: update semantics. */
+  deep(life.updates, ['v1'], 'M: lifecycle update invoked exactly once per update'); assert.equal(hL.snapshot().revision, 1, 'N: revision advanced'); assert.equal(lc.get('decoration:o:ok').revision, 1);
+  const s2 = hL.update({ any: 'value' }); assert.equal(s2.revision, 2, 'N: update returns the advanced snapshot'); assert.equal(life.updates.length, 2);
+  let updateFails = true; const hO = lc.register({ owner: 'o', id: 'fragile', targetKey: keysA.conversation, apply: () => ({ update() { if (updateFails) throw new Error('update rejected'); }, dispose() {} }) });
+  assert.throws(() => hO.update('x'), /update rejected/, 'O: the lifecycle error propagates');
+  assert.equal(hO.snapshot().revision, 0, 'O: revision not advanced'); assert.equal(hO.snapshot().active, true, 'O: still registered'); assert.equal(lc.get(hO.contributionKey).active, true); deep(lc.list().map((s) => s.contributionKey), ['decoration:o:ok', 'decoration:o:fragile'], 'O: registry structurally consistent');
+  updateFails = false; assert.equal(hO.update('y').revision, 1, 'O: a later successful update advances normally');
+  for (const key of ['owner', 'id', 'targetKey', 'contributionKey']) assert.throws(() => { hO[key] = 'retarget'; }, { name: 'TypeError' }, `update cannot retarget ${key} (frozen handle)`);
+  assert.equal(hO.targetKey, keysA.conversation);
+
+  /* P / Q / R / S: dispose semantics. */
+  assert.equal(hL.dispose(), true, 'Q: first dispose true'); assert.equal(life.disposes, 1, 'P: cleanup invoked once');
+  assert.equal(hL.dispose(), false, 'Q: later dispose false'); assert.equal(life.disposes, 1, 'P: cleanup not repeated');
+  assert.equal(lc.get('decoration:o:ok'), null, 'R: gone from get()'); deep(lc.list().map((s) => s.contributionKey), ['decoration:o:fragile'], 'R: gone from list()');
+  assert.equal(hL.snapshot().active, false, 'R: the handle reports active:false'); assert.equal(hL.snapshot().revision, 2, 'the last revision is still reported');
+  assert.throws(() => hL.update('late'), /is disposed; update refused/, 'update after disposal is refused, not swallowed'); assert.equal(life.updates.length, 2);
+  let cleanupCalls = 0; const hS = lc.register({ owner: 'o', id: 'bad-cleanup', targetKey: keysA.block, apply: () => ({ update() {}, dispose() { cleanupCalls += 1; throw new Error('cleanup exploded'); } }) });
+  assert.throws(() => hS.dispose(), /cleanup exploded/, 'S: the cleanup error propagates');
+  assert.equal(lc.get(hS.contributionKey), null, 'S: registry entry removed despite the failure'); assert.equal(hS.snapshot().active, false); assert.equal(hS.dispose(), false, 'S: already disposed afterwards'); assert.equal(cleanupCalls, 1, 'S: cleanup ran once');
+  hO.dispose(); deep(lc.list(), []);
+  /* A registration after disposal of the same owner+id is a NEW contribution (revision 0, fresh apply). */
+  const hAgain = lc.register({ owner: 'o', id: 'ok', targetKey: keysA.turn, value: 'v9', apply: (ctx, value) => { applyCalls += 1; return noop(); } });
+  assert.equal(applyCalls, 2, 'dispose + register re-applies'); assert.equal(hAgain.snapshot().revision, 0); assert.equal(hAgain.snapshot().targetKey, keysA.turn, 'retargeting = dispose + register'); assert.notEqual(hAgain, hL); hAgain.dispose();
+
+  /* T / U / V: disposeAll - reverse registration order, every cleanup attempted, aggregated failure, empty registry. */
+  const order = []; const mkLife = (tag, fail) => () => ({ update() {}, dispose() { order.push(tag); if (fail) throw new Error(`cleanup ${tag} failed`); } });
+  const hT1 = lc.register({ owner: 'o', id: 'first', targetKey: keysA.conversation, apply: mkLife('first', false) });
+  const hT2 = lc.register({ owner: 'o', id: 'second', targetKey: keysA.message, apply: mkLife('second', true) });
+  const hT3 = lc.register({ owner: 'o', id: 'third', targetKey: keysA.text, apply: mkLife('third', false) });
+  const hT4 = lc.register({ owner: 'p', id: 'fourth', targetKey: keysA.block, apply: mkLife('fourth', true) });
+  hT3.dispose(); order.length = 0;
+  const hT5 = lc.register({ owner: 'o', id: 'third', targetKey: keysA.turn, apply: mkLife('third-again', false) });
+  let aggregated = null; try { lc.disposeAll(); } catch (error) { aggregated = error; }
+  assert.ok(aggregated, 'U: failures are reported'); assert.equal(aggregated.name, 'AggregateError', 'U: AggregateError'); assert.equal(Array.isArray(aggregated.errors), true, 'U: causes carried');
+  assert.equal(aggregated.errors.length, 2, 'U: both failing cleanups reported'); deep(aggregated.errors.map((e) => e.message), ['cleanup fourth failed', 'cleanup second failed'], 'U: causes in sweep order'); assert.match(aggregated.message, /2 of 4 cleanup callbacks failed \(decoration:p:fourth, decoration:o:second\)/);
+  deep(order, ['third-again', 'fourth', 'second', 'first'], 'T / U: reverse registration order, every cleanup attempted despite failures');
+  deep(lc.list(), [], 'V: registry empty after disposeAll'); for (const h of [hT1, hT2, hT4, hT5]) { assert.equal(h.snapshot().active, false); assert.equal(h.dispose(), false, 'V: handles already disposed, cleanup never repeated'); }
+  assert.equal(order.length, 4, 'V: no second cleanup');
+  const clean = []; const lcClean = api.createLifecycle({ semanticIndex: ixA }); lcClean.register({ owner: 'o', id: 'a', targetKey: keysA.turn, apply: mkLife('a', false) }); lcClean.register({ owner: 'o', id: 'b', targetKey: keysA.turn, apply: mkLife('b', false) });
+  order.length = 0; deep(lcClean.disposeAll(), ['decoration:o:b', 'decoration:o:a'], 'T: disposeAll returns the disposed keys in sweep order'); deep(order, ['b', 'a']); deep(lcClean.disposeAll(), [], 'disposeAll is idempotent');
+  /* Registration during a sweep is refused so the registry cannot be repopulated behind disposeAll. */
+  let refused = null; const lcRe = api.createLifecycle({ semanticIndex: ixA });
+  lcRe.register({ owner: 'o', id: 'reentrant', targetKey: keysA.turn, apply: () => ({ update() {}, dispose() { try { lcRe.register({ owner: 'o', id: 'late', targetKey: keysA.turn, apply: noop }); } catch (error) { refused = error; } } }) });
+  lcRe.disposeAll(); assert.match(String(refused && refused.message), /refused while disposeAll\(\) runs/, 'V: no registration survives a sweep'); deep(lcRe.list(), []);
+
+  /* D / B (Renderer integration, static): one lifecycle per render bound to that render's index, returned additively; the Renderer registers nothing. */
+  const renderFn = extractFunction(rendererSource, 'render') + '\n' + extractFunction(rendererSource, 'renderWithCollector');
+  assert.match(renderFn, /const decorationContributions = activeDecorationContributionModule\(\)\.createLifecycle\(\{ semanticIndex \}\);/, 'B / C: the lifecycle is created through the installed module and bound to this render\'s index');
+  assert.match(renderFn, /semanticIndex,\s*decorationContributions,\s*\};/, 'B: returned additively as decorationContributions');
+  assert.equal((rendererSource.match(/\.createLifecycle\(/g) || []).length, 1, 'B: exactly one lifecycle creation site per render'); assert.equal((rendererSource.match(/\.register\(/g) || []).length, 0, 'D: the Renderer registers no Product contribution');
+  assert.match(extractFunction(rendererSource, 'activeDecorationContributionModule'), /no embedded decoration fallback exists/, 'missing module fails clearly');
+  assert.doesNotMatch(rendererSource, /currentDecorations|globalRegistry|singletonController|DECORATION_REGISTRY|ACTIVE_DECORATION/, 'AA: no global current lifecycle in the Renderer');
+  assert.doesNotMatch(studioSource, /decorationContribution|decorationContributions/, 'studio.js is untouched: no Reader lifecycle integration in S4B');
+  /* The decision harness (stubbed modules) proves the binding flows through render(). */
+  const harness = createRendererBuildHarness({ mountedTurnCount: 0, assistantTurnEls: [], fallbackRequired: true });
+  const decided = harness.fn({ snapshotId: 's', messages: [{ role: 'user' }, { role: 'assistant' }] }, {});
+  assert.equal(decided.decorationContributions.__stubLifecycle, true, 'B: render() returns the lifecycle'); assert.equal(decided.decorationContributions.semanticIndex, decided.semanticIndex, 'C: bound to the same index instance the result carries');
+  /* Admission: studio.html + both pack lists + publisher / activator required order carry the module once, after the index and before the profile / renderers. */
+  const refs = [...studioHtmlSource.matchAll(/<script src="\.\/([^"?]+)(?:\?[^"]*)?"><\/script>/g)].map((m) => m[1]);
+  const MODULE = 'renderer/decoration/decoration-contribution.v1.js';
+  assert.equal(refs.filter((r) => r === MODULE).length, 1, 'studio.html admits the decoration module exactly once');
+  assert.equal(refs.indexOf(MODULE), refs.indexOf('renderer/semantic/semantic-index.v1.js') + 1, 'loads directly after the Semantic Index'); assert.equal(refs.indexOf('renderer/presentation/presentation-profile.v1.js'), refs.indexOf(MODULE) + 1, 'and directly before the presentation profile'); assert.ok(refs.indexOf(MODULE) < refs.indexOf('renderer/chat-renderer.studio.js'));
+  assert.equal((packSource.match(/"renderer\/decoration\/decoration-contribution\.v1\.js",/g) || []).length, 2, 'pack-studio carries the module in both source and output lists');
+  for (const [label, source] of [['publisher', publisherSource], ['activator', activatorSource]]) {
+    const at = source.indexOf('const STUDIO_REQUIRED_ORDER = Object.freeze(['); const order = [...source.slice(at, source.indexOf(']);', at)).matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    assert.equal(order.filter((r) => r === MODULE).length, 1, `${label}: exactly one required-order entry`); assert.equal(order.indexOf(MODULE), order.indexOf('renderer/semantic/semantic-index.v1.js') + 1, `${label}: index -> decoration`); assert.equal(order.indexOf('renderer/presentation/presentation-profile.v1.js'), order.indexOf(MODULE) + 1, `${label}: decoration -> presentation profile`);
+  }
+}
+
 function validateExtractedRendererBoundary() {
   const sanitizerTag = '<script src="./platform/html-sanitizer.js"></script>';
   const rendererTag = '<script src="./renderer/chat-renderer.studio.js"></script>';
@@ -2070,6 +2288,7 @@ validateAttachmentPresentationOwnership();
 validateFinalRendererCssBoundary();
 validateSemanticIndexFoundation();
 validateSemanticIndexContentProjections();
+validateDecorationContributionLifecycle();
 validateExtractedRendererBoundary();
 
 console.log('Studio renderer contract repair validation passed');

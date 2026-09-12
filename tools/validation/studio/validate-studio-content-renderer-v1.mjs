@@ -782,6 +782,10 @@ if (!chromium) {
          * index module and fails clearly without it, so the Tier-2 chain admits
          * it in its production position. */
         'renderer/semantic/semantic-index.v1.js',
+        /* S4B/T8: the Renderer binds one DecorationContribution lifecycle to
+         * each render's index through the decoration module and fails clearly
+         * without it, so the Tier-2 chain admits it in its production position. */
+        'renderer/decoration/decoration-contribution.v1.js',
         /* S3B/T6: the Renderer resolves its presentation hooks from the profile
          * module and fails clearly without it, so the Tier-2 chain admits it in
          * its production position. */
@@ -1274,7 +1278,7 @@ if (!chromium) {
   });
 
   check('Semantic Index: one frozen read-only index per render, source/path keys, targets are the H2O shells (S4A slice A)', () => {
-    assert.deepEqual(s4a.canonical.resultKeys, ['root', 'turnsEl', 'scrollEl', 'assistantTurnEls', 'mountedTurnCount', 'renderMode', 'semanticSource', 'semanticIndex'], 'render result gains semanticIndex additively');
+    assert.deepEqual(s4a.canonical.resultKeys, ['root', 'turnsEl', 'scrollEl', 'assistantTurnEls', 'mountedTurnCount', 'renderMode', 'semanticSource', 'semanticIndex', 'decorationContributions'], 'render result gains semanticIndex additively (S4B appends decorationContributions)');
     assert.deepEqual(s4a.api, ['schema', 'schemaVersion', 'version', 'renderMode', 'basis', 'semanticCorrespondenceLost', 'getConversation', 'getTurn', 'getMessage', 'getBlock', 'getText', 'turns', 'messages', 'blocks', 'texts', 'getGeometry'], 'N: read-only API only (S4A slices A + B)');
     assert.deepEqual(s4a.frozen, [true, true, true, true], 'C: frozen index, arrays and records');
     assert.equal(s4a.canonical.basis, 'source'); assert.equal(s4a.canonical.conversation, 'conversation:source:snap-1');
@@ -1404,6 +1408,71 @@ if (!chromium) {
     assert.equal(s4a.geometry.frozen, true); assert.equal(s4a.geometry.plain, true, 'L: plain frozen object, not a DOMRect'); assert.equal(s4a.geometry.matchesLiveRect, true); assert.equal(s4a.geometry.fresh, true, 'no cached geometry');
     assert.ok(s4a.geometry.message && s4a.geometry.message.height > 0); assert.ok(s4a.geometry.conversation && s4a.geometry.conversation.height > 0);
     assert.equal(s4a.geometry.unknown, null); assert.equal(s4a.geometry.detached, null, 'M: detached -> null');
+  });
+
+  /* M03 P4 S4B T8 slice A: the DecorationContribution lifecycle over a real
+   * render in a real document - one lifecycle per render bound to its index,
+   * zero Product contributions, all five kinds targetable (Text target = the
+   * live Text node, geometry through the bound lookup), and the zero-delta
+   * contract: a test-only application adds a marker and disposal returns the
+   * DOM to the exact pre-registration outerHTML. */
+  const s4bDeco = await page.evaluate(() => {
+    const cr = globalThis.H2O.Studio.chatRenderer; const host = document.getElementById('host'); const out = {};
+    const input = { chatId: 'chat-d', snapshotId: 'snap-d', messages: [ { role: 'user', text: 'hello **there**', messageId: 'm-u1', turnId: 't-1' }, { role: 'assistant', text: '# Title\n\nreply with `code` and a [link](https://example.test/x)', messageId: 'm-a1', turnId: 't-2' } ] };
+    const r1 = cr.render(input, { getEditOverride: () => null }); const r2 = cr.render(input, { getEditOverride: () => null });
+    const lc = r1.decorationContributions; const ix = r1.semanticIndex;
+    out.resultKeys = Object.keys(r1);
+    out.module = { installed: globalThis.H2O.Studio.Renderer.decorationContribution.__installed, version: globalThis.H2O.Studio.Renderer.decorationContribution.__version, frozen: Object.isFrozen(globalThis.H2O.Studio.Renderer.decorationContribution), rendererKeys: Object.keys(globalThis.H2O.Studio.Renderer) };
+    out.perRender = { distinct: lc !== r2.decorationContributions, boundToOwnIndex: lc.semanticIndex === ix && r2.decorationContributions.semanticIndex === r2.semanticIndex && r2.semanticIndex !== ix, zero: [lc.list().length, r2.decorationContributions.list().length], frozen: Object.isFrozen(lc), api: Object.keys(lc), schema: lc.schema, version: lc.version };
+    host.replaceChildren(r1.root);
+    const before = r1.root.outerHTML; const textBefore = r1.root.textContent;
+    const keys = { conversation: ix.getConversation().projectionKey, turn: ix.turns()[1].projectionKey, message: ix.messages()[1].projectionKey, block: ix.blocks().find((b) => b.irKind === 'heading').projectionKey, text: ix.texts().find((t) => t.target.data === 'there').projectionKey };
+    const applied = {}; const marker = (ctx) => { const m = document.createElement('i'); m.className = 'h2oS4bSmokeMarker'; m.textContent = '*'; return m; };
+    const testApply = (kind) => (ctx, value) => {
+      applied[kind] = { target: ctx.target, projection: ctx.projection, contextKeys: Object.keys(ctx), frozen: Object.isFrozen(ctx), geometry: ctx.getGeometry(), value, updates: [], disposed: 0 };
+      /* test-only effect: an inert marker beside the target (after a Text node, inside its parent) */
+      const m = marker(ctx); if (ctx.target.nodeType === 3) ctx.target.parentNode.insertBefore(m, ctx.target.nextSibling); else ctx.target.appendChild(m);
+      return { update(next) { applied[kind].updates.push(next); m.textContent = String(next); }, dispose() { applied[kind].disposed += 1; m.remove(); } };
+    };
+    const handles = Object.fromEntries(Object.entries(keys).map(([kind, key]) => [kind, lc.register({ owner: 'smoke', id: kind, targetKey: key, value: kind + '-v0', apply: testApply(kind) })]));
+    out.registered = { count: lc.list().length, kinds: lc.list().map((s) => s.targetKind), order: lc.list().map((s) => s.contributionKey), markers: r1.root.querySelectorAll('.h2oS4bSmokeMarker').length };
+    out.targets = { conversation: applied.conversation.target === r1.root, turn: applied.turn.target === r1.turnsEl.children[1], message: applied.message.target === r1.turnsEl.children[1].querySelector(':scope > .cgMsg'), block: applied.block.target === r1.root.querySelector('h1'), text: applied.text.target.nodeType === 3 && applied.text.target.data === 'there' && applied.text.target.parentNode.tagName === 'STRONG' && applied.text.target === ix.getText(keys.text).target, projectionIsRecord: Object.entries(keys).every(([kind, key]) => applied[kind].projection === (kind === 'conversation' ? ix.getConversation() : ix['get' + kind[0].toUpperCase() + kind.slice(1)](key))) };
+    out.context = { keys: applied.text.contextKeys, frozen: Object.values(applied).every((a) => a.frozen), textGeometry: applied.text.geometry, blockGeometry: applied.block.geometry, geometryMatchesIndex: JSON.stringify(applied.block.geometry) === JSON.stringify(ix.getGeometry(keys.block)), noNavigation: Object.values(applied).every((a) => !a.contextKeys.some((k) => /scroll|navigate|focus|reader|router|select/i.test(k))) };
+    /* update / dispose on the text contribution */
+    const snapU = handles.text.update('text-v1'); out.update = { revision: snapU.revision, updates: applied.text.updates, viaGet: lc.get(handles.text.contributionKey).revision };
+    out.duplicate = (() => { try { lc.register({ owner: 'smoke', id: 'text', targetKey: keys.turn, apply: testApply('dup') }); return 'accepted'; } catch (e) { return String(e.message); } })();
+    out.unknown = (() => { try { lc.register({ owner: 'smoke', id: 'nope', targetKey: 'turn:source:nope', apply: testApply('nope') }); return 'accepted'; } catch (e) { return String(e.message); } })();
+    out.applyFailure = (() => { try { lc.register({ owner: 'smoke', id: 'boom', targetKey: keys.turn, apply: () => { throw new Error('apply boom'); } }); return 'accepted'; } catch (e) { return { message: e.message, registered: lc.get('decoration:smoke:boom'), count: lc.list().length }; } })();
+    out.disposeOne = { first: handles.text.dispose(), second: handles.text.dispose(), disposedCalls: applied.text.disposed, gone: lc.get(handles.text.contributionKey), count: lc.list().length, handleSnapshot: handles.text.snapshot(), markers: r1.root.querySelectorAll('.h2oS4bSmokeMarker').length };
+    /* disposeAll in reverse order (conversation, turn, message, block remain) */
+    const swept = lc.disposeAll();
+    out.disposeAll = { swept: [...swept], remaining: lc.list().length, disposedCalls: ['conversation', 'turn', 'message', 'block'].map((k) => applied[k].disposed), markers: r1.root.querySelectorAll('.h2oS4bSmokeMarker').length };
+    out.parity = { outerHTMLRestored: r1.root.outerHTML === before, textRestored: r1.root.textContent === textBefore, noDecorationMarkup: !/decoration|h2oS4b/i.test(before), attrs: Array.from(r1.root.querySelectorAll('*')).concat([r1.root]).flatMap((el) => Array.from(el.attributes).map((a) => a.name)).filter((n) => /^data-h2o-/.test(n) && !['data-h2o-turn-no', 'data-h2o-create-time', 'data-h2o-presentation-profile'].includes(n)) };
+    r1.root.remove();
+    return out;
+  });
+
+  check('DecorationContribution: one lifecycle per render bound to its Semantic Index, zero Product contributions, frozen module (S4B slice A)', () => {
+    assert.deepEqual(s4bDeco.resultKeys, ['root', 'turnsEl', 'scrollEl', 'assistantTurnEls', 'mountedTurnCount', 'renderMode', 'semanticSource', 'semanticIndex', 'decorationContributions'], 'render result gains decorationContributions additively');
+    assert.deepEqual(s4bDeco.module, { installed: true, version: '0.1.0-m03-s4b', frozen: true, rendererKeys: s4bDeco.module.rendererKeys }, 'A: frozen installed module');
+    assert.deepEqual(s4bDeco.module.rendererKeys.filter((k) => /current|registry|singleton|decorations$/i.test(k)), [], 'AA: no global decoration registry on the Renderer namespace');
+    assert.deepEqual(s4bDeco.perRender, { distinct: true, boundToOwnIndex: true, zero: [0, 0], frozen: true, api: ['schema', 'schemaVersion', 'version', 'semanticIndex', 'register', 'get', 'list', 'disposeAll'], schema: 'h2o.renderer.decoration-contribution', version: '0.1.0-m03-s4b' }, 'B / C / D: distinct per render, bound to that index, zero contributions');
+  });
+
+  check('DecorationContribution: all five kinds resolve through the index to the live shells / Text node; bounded context with geometry, no navigation (S4B slice A)', () => {
+    assert.deepEqual(s4bDeco.registered, { count: 5, kinds: ['conversation', 'turn', 'message', 'block', 'text'], order: ['decoration:smoke:conversation', 'decoration:smoke:turn', 'decoration:smoke:message', 'decoration:smoke:block', 'decoration:smoke:text'], markers: 5 }, 'E / F / I: five kinds, registration order, deterministic keys');
+    assert.deepEqual(s4bDeco.targets, { conversation: true, turn: true, message: true, block: true, text: true, projectionIsRecord: true }, 'W: text target is the live Text node beneath its mark; every other target is the indexed element');
+    assert.deepEqual(s4bDeco.context.keys, ['contributionKey', 'owner', 'id', 'targetKey', 'projection', 'target', 'getGeometry'], 'Y: bounded application context'); assert.equal(s4bDeco.context.frozen, true); assert.equal(s4bDeco.context.noNavigation, true, 'Y: no navigation API');
+    assert.ok(s4bDeco.context.textGeometry && s4bDeco.context.textGeometry.width > 0 && s4bDeco.context.textGeometry.coordinateSpace === 'viewport', 'Y: Text-range geometry through the bound lookup'); assert.ok(s4bDeco.context.blockGeometry && s4bDeco.context.blockGeometry.height > 0); assert.equal(s4bDeco.context.geometryMatchesIndex, true, 'Y: delegates to the Semantic Index geometry lookup');
+  });
+
+  check('DecorationContribution: update / duplicate / unknown / apply-failure / dispose / disposeAll semantics on a real render; DOM restored byte-identically (S4B slice A)', () => {
+    assert.deepEqual(s4bDeco.update, { revision: 1, updates: ['text-v1'], viaGet: 1 }, 'M / N: one lifecycle update, revision advanced');
+    assert.match(s4bDeco.duplicate, /already registered/, 'H: duplicate owner+id rejected'); assert.match(s4bDeco.unknown, /not a projection of this render's Semantic Index/, 'G: unknown target rejected');
+    assert.deepEqual(s4bDeco.applyFailure, { message: 'apply boom', registered: null, count: 5 }, 'J: apply failure leaves no registration');
+    assert.deepEqual(s4bDeco.disposeOne, { first: true, second: false, disposedCalls: 1, gone: null, count: 4, handleSnapshot: { contributionKey: 'decoration:smoke:text', owner: 'smoke', id: 'text', targetKey: s4bDeco.disposeOne.handleSnapshot.targetKey, targetKind: 'text', revision: 1, active: false }, markers: 4 }, 'P / Q / R: idempotent dispose, cleanup once, gone from the registry');
+    assert.deepEqual(s4bDeco.disposeAll, { swept: ['decoration:smoke:block', 'decoration:smoke:message', 'decoration:smoke:turn', 'decoration:smoke:conversation'], remaining: 0, disposedCalls: [1, 1, 1, 1], markers: 0 }, 'T / U / V: reverse registration order, every cleanup once, registry empty');
+    assert.deepEqual(s4bDeco.parity, { outerHTMLRestored: true, textRestored: true, noDecorationMarkup: true, attrs: [] }, 'X / AB: the render carries no decoration markup and the fixture DOM returns to its pre-registration state');
   });
 
   await browser.close();

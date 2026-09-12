@@ -708,6 +708,11 @@
        Renderer dependency; one index per render result, no global state.
        Must load before the Renderer that consumes it. -->
   <script src="./renderer/semantic/semantic-index.v1.js"></script>
+  <!-- S4B/T8: DecorationContribution lifecycle (per-render registration /
+       update / disposal of consumer decorations over Semantic Index targets).
+       Passive Renderer dependency; one lifecycle per render result, no global
+       registry. Loads after the Semantic Index, before the Renderer. -->
+  <script src="./renderer/decoration/decoration-contribution.v1.js"></script>
   <!-- S3B/T6: PresentationProfile contract + ChatGPT reference profile. No
        semantic dependency; loads before the renderers that consume its
        presentation class hooks. -->

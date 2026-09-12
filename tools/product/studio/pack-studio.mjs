@@ -1335,6 +1335,9 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   // S4A/T8: read-only Semantic Index over the H2O shells — LIVE. Passive
   // Renderer dependency; loads after semantic ingress, before the renderers.
   "renderer/semantic/semantic-index.v1.js",
+  // S4B/T8: DecorationContribution lifecycle over Semantic Index targets — LIVE.
+  // Passive Renderer dependency; loads after the Semantic Index, before the renderers.
+  "renderer/decoration/decoration-contribution.v1.js",
   // S3B/T6: PresentationProfile contract + ChatGPT reference profile — LIVE.
   // Presentation class hooks only; loads before the renderers that consume it.
   "renderer/presentation/presentation-profile.v1.js",
@@ -1735,6 +1738,7 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   "renderer/semantic/render-ir.v1.js",
   "renderer/semantic/semantic-ingress.v1.js",
   "renderer/semantic/semantic-index.v1.js",
+  "renderer/decoration/decoration-contribution.v1.js",
   "renderer/presentation/presentation-profile.v1.js",
   "renderer/presentation/chatgpt-reference.v1.css",
   "renderer/content/content-renderer.v1.js",
