@@ -147,6 +147,44 @@
     return testDependencies && testDependencies.importBundle || H2O.Studio && H2O.Studio.ingestion && H2O.Studio.ingestion.importBundle;
   }
 
+  /*
+   * ALREADY-APPLIED METADATA SELF-HEAL.
+   *
+   * An already-applied P02 revision is proven converged from canonical content
+   * alone (chat pointer, snapshot, turns) and never reaches the importer again:
+   * that is the idempotency invariant and it stays. Importer-derived chat
+   * metadata (answer/turn counts, the imported createdAt) is not part of that
+   * proof, so a row materialized by an older importer keeps its stale values
+   * forever unless something re-derives them. This hands the exact, already
+   * verified canonical payload to the ingestion module's bounded metadata
+   * reconciliation, which owns those fields; it imports nothing, touches no
+   * repository, and never moves an anchor. Its failure is reported, never
+   * raised: the canonical Apply already succeeded before it runs.
+   */
+  function metadataReconciler() {
+    return testDependencies && testDependencies.reconcileImportedChatMetadata ||
+      H2O.Studio && H2O.Studio.ingestion && H2O.Studio.ingestion.reconcileImportedChatMetadata;
+  }
+
+  async function reconcileAlreadyAppliedMetadata(objectId, payload) {
+    var reconcile = metadataReconciler();
+    if (typeof reconcile !== 'function') {
+      return { ok: false, reconciled: false, code: 'metadata-reconciler-unavailable', chats: [] };
+    }
+    try {
+      var outcome = await reconcile(payload, { chatId: objectId, source: 'p02-already-applied' });
+      if (!isObject(outcome)) return { ok: false, reconciled: false, code: 'metadata-reconciliation-invalid', chats: [] };
+      return {
+        ok: outcome.ok === true,
+        reconciled: outcome.reconciled === true,
+        code: clean(outcome.code),
+        chats: Array.isArray(outcome.chats) ? outcome.chats : []
+      };
+    } catch (error) {
+      return { ok: false, reconciled: false, code: clean(error && (error.code || error.message)) || 'metadata-reconciliation-failed', chats: [] };
+    }
+  }
+
   async function stateRow(syncPeerId, objectId) {
     var rows = await sqlSelect('SELECT * FROM sync_object_state WHERE sync_peer_id = ? AND object_id = ?', [syncPeerId, objectId]);
     return Array.isArray(rows) && rows[0] || null;
@@ -1042,7 +1080,17 @@
           return { ok: false, verdict: 'blocked', conflictClass: 'local-unexported-change', errorCode: 'local-unexported-change' };
         }
         await commitApplied(acquisition, syncPeerId, objectId, pulled, adoptedProof);
-        return Object.assign({}, pulled, { unchangedNoOp: true, convergenceVerified: true, adoptedExisting: !priorApplied, convergence: adoptedProof, importerInvoked: false });
+        /* Only the exact already-applied revision (id, blob and payload all
+         * recorded as applied, source the admitted P02 local source, and the
+         * convergence proof above passed) qualifies for the bounded metadata
+         * self-heal. Adoption of an existing local revision does not. */
+        var metadataReconciliation = p02AlreadyApplied
+          ? await reconcileAlreadyAppliedMetadata(objectId, envelope.payload) : null;
+        return Object.assign({}, pulled, {
+          unchangedNoOp: true, convergenceVerified: true, adoptedExisting: !priorApplied, convergence: adoptedProof, importerInvoked: false,
+          metadataReconciled: !!(metadataReconciliation && metadataReconciliation.reconciled === true),
+          metadataReconciliation: metadataReconciliation
+        });
       }
       var intended = intendedAssignments(acquisition);
       var applyAssignments = intended + ', remote_head_strong_etag = ?, remote_head_revision_blob_sha256 = ?';

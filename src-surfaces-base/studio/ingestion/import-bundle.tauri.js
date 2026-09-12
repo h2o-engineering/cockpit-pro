@@ -3324,6 +3324,138 @@
   }
 
   /* ── Register ────────────────────────────────────────────────────── */
+  /* ── Bounded imported-chat metadata reconciliation ─────────────────────
+   * A chat this importer materialized before the transcript-derived count /
+   * createdAt rules existed carries zero counts and an import-moment
+   * createdAt. Canonical Apply proves such a chat already converged and, by
+   * design, never invokes the importer again for an already-applied revision,
+   * so the row can never reach the repaired derivation by replaying Apply.
+   *
+   * This entry point re-derives ONLY importer-owned metadata from an already
+   * verified canonical payload, with the exact rules deriveChatPatchFromBundle
+   * and prepareExistingChatEvidencePatch apply on an ordinary replay (explicit
+   * index counts win, zeros are repaired from the transcript, counts never
+   * shrink, createdAt is only ever lowered on an importer-created row and never
+   * past an index-sourced value), and writes through the same identity-gated
+   * existing-evidence writer. It never inserts rows, never touches snapshots,
+   * turns, folders, categories, links, saved/linked flags or the canonical
+   * pointer, and fails closed whenever the local chat, its canonical snapshot,
+   * the authorized writer or importer provenance is missing. */
+  var METADATA_RECONCILIATION_SCHEMA = 'h2o.studio.importedChatMetadataReconciliation.v1';
+  var METADATA_RECONCILIATION_FIELDS = ['messageCount', 'turnCount', 'userTurnCount', 'assistantTurnCount', 'answerCount', 'createdAt'];
+  var METADATA_RECONCILIATION_COUNT_FIELDS = ['messageCount', 'turnCount', 'userTurnCount', 'assistantTurnCount', 'answerCount'];
+
+  function metadataReconciliationEntry(chatId, status, extra) {
+    return Object.assign({ chatId: cleanString(chatId), status: status, code: '', fields: [] }, extra || {});
+  }
+
+  async function reconcileImportedChatMetadata(bundleInput, options) {
+    var opts = options && typeof options === 'object' ? options : {};
+    var startedAtMs = Date.now();
+    var entries = [];
+    function finish(ok, code) {
+      return {
+        schema: METADATA_RECONCILIATION_SCHEMA,
+        ok: ok,
+        code: code || '',
+        reconciled: entries.some(function (entry) { return entry.status === 'reconciled'; }),
+        chats: entries,
+        durationMs: Date.now() - startedAtMs
+      };
+    }
+    var parsed = parseBundle(bundleInput);
+    if (!parsed.bundle) return finish(false, 'bundle-invalid');
+    var stores = (H2O.Studio && H2O.Studio.store) || {};
+    var chatStore = stores.chats;
+    var snapshotStore = stores.snapshots;
+    if (!chatStore || typeof chatStore.get !== 'function') return finish(false, 'chat-store-unavailable');
+    if (!snapshotStore || typeof snapshotStore.get !== 'function') return finish(false, 'snapshot-store-unavailable');
+    /* The only writer this reconciliation may use is the identity-gated one;
+     * without it nothing is attempted (no store-upsert fallback). */
+    var sync = H2O.Desktop && H2O.Desktop.Sync;
+    if (!sync || typeof sync.executeAuthorizedSqlite !== 'function') return finish(false, 'authorized-writer-unavailable');
+    var chats = getBundleChats(parsed.bundle);
+    if (!chats.length) return finish(false, 'no-chats');
+    var expectedChatId = cleanString(opts.chatId);
+    var failed = false;
+    for (var i = 0; i < chats.length; i += 1) {
+      var chat = chats[i];
+      var identity = deriveChatIdentity(chat);
+      var chatId = identity.chatId;
+      if (!chatId) { entries.push(metadataReconciliationEntry('', 'refused', { code: 'missing-chat-id' })); failed = true; continue; }
+      if (expectedChatId && chatId !== expectedChatId) { entries.push(metadataReconciliationEntry(chatId, 'refused', { code: 'chat-id-mismatch' })); failed = true; continue; }
+      if (chat && !cleanString(chat.chatId)) chat = Object.assign({}, chat, { chatId: chatId });
+      if (isF19MinimalLibraryIndexChat(chat)) { entries.push(metadataReconciliationEntry(chatId, 'refused', { code: 'minimal-row-not-eligible' })); failed = true; continue; }
+      try {
+        var snapshots = Array.isArray(chat.snapshots) ? chat.snapshots.slice() : [];
+        snapshots.sort(function (a, b) { return isoToEpochMs(b && b.createdAt) - isoToEpochMs(a && a.createdAt); });
+        if (!snapshots.some(snapshotHasPayloadContent)) { entries.push(metadataReconciliationEntry(chatId, 'refused', { code: 'transcript-payload-missing' })); failed = true; continue; }
+        var patch = deriveChatPatchFromBundle(chat, snapshots);
+        var existing = await chatStore.get(chatId);
+        if (!existing) { entries.push(metadataReconciliationEntry(chatId, 'refused', { code: 'chat-missing' })); failed = true; continue; }
+        var snapshotId = cleanString(patch.lastSnapshotId);
+        var localSnapshot = snapshotId ? await snapshotStore.get(snapshotId) : null;
+        if (!localSnapshot) { entries.push(metadataReconciliationEntry(chatId, 'refused', { code: 'snapshot-missing' })); failed = true; continue; }
+        var existingMeta = safeMeta(existing.meta);
+        if (!cleanString(existingMeta.importedFrom)) { entries.push(metadataReconciliationEntry(chatId, 'untouched', { code: 'not-importer-created' })); continue; }
+        var evidence = prepareExistingChatEvidencePatch(existing, patch);
+        var fields = [];
+        var bounded = { chatId: chatId };
+        if (evidence) {
+          for (var f = 0; f < METADATA_RECONCILIATION_FIELDS.length; f += 1) {
+            var field = METADATA_RECONCILIATION_FIELDS[f];
+            if (Object.prototype.hasOwnProperty.call(evidence, field)) {
+              bounded[field] = evidence[field];
+              fields.push(field);
+            }
+          }
+        }
+        if (!fields.length) { entries.push(metadataReconciliationEntry(chatId, 'noop')); continue; }
+        /* Meta carries only the metadata this reconciliation owns: the final
+         * count mirrors, their provenance, the evidence-merge markers the
+         * writer path always sets, and the reconciliation stamp. Every other
+         * meta key of the existing row is preserved by the writer's merge. */
+        var evidenceMeta = safeMeta(evidence.meta);
+        var boundedMeta = {
+          f19ChromeDesktopEvidenceMerged: true,
+          f19ChromeDesktopEvidenceMergedAt: numericCount(evidenceMeta.f19ChromeDesktopEvidenceMergedAt) || Date.now(),
+          metadataReconciledAt: Date.now(),
+          metadataReconciledFrom: cleanString(opts.source) || 'imported-chat-metadata-reconciliation'
+        };
+        if (fields.some(function (name) { return name !== 'createdAt'; })) {
+          for (var c = 0; c < METADATA_RECONCILIATION_COUNT_FIELDS.length; c += 1) {
+            var countField = METADATA_RECONCILIATION_COUNT_FIELDS[c];
+            boundedMeta[countField] = bounded[countField] !== undefined
+              ? numericCount(bounded[countField]) : existingCount(existing, countField);
+          }
+          boundedMeta.countsDerivedFromTranscript = evidenceMeta.countsDerivedFromTranscript === true;
+        }
+        if (fields.indexOf('createdAt') !== -1) {
+          boundedMeta.createdAtSource = cleanString(evidenceMeta.createdAtSource) || 'canonical-snapshot';
+        }
+        bounded.meta = boundedMeta;
+        var previousCreatedAt = numericCount(existing.createdAt);
+        var diagnostics = { warnings: [], errors: [], sample: emptySample() };
+        await applyExistingChatEvidencePatch(chatStore, existing, bounded, { result: diagnostics, chat: chat, identity: identity });
+        entries.push(metadataReconciliationEntry(chatId, 'reconciled', {
+          fields: fields,
+          counts: {
+            messageCount: boundedMeta.messageCount, turnCount: boundedMeta.turnCount,
+            userTurnCount: boundedMeta.userTurnCount, assistantTurnCount: boundedMeta.assistantTurnCount,
+            answerCount: boundedMeta.answerCount
+          },
+          createdAt: fields.indexOf('createdAt') !== -1
+            ? { previous: previousCreatedAt, next: numericCount(bounded.createdAt), source: boundedMeta.createdAtSource }
+            : null
+        }));
+      } catch (error) {
+        entries.push(metadataReconciliationEntry(chatId, 'failed', { code: classifyImportError(error), error: String(error && error.message || error) }));
+        failed = true;
+      }
+    }
+    return finish(!failed, failed ? 'reconciliation-refused' : '');
+  }
+
   H2O.Studio.ingestion = {
     __installed: true,
     __version: '0.1.0',
@@ -3331,5 +3463,6 @@
     importBundle: importBundle,
     importFolderStateOnly: importFolderStateOnly,
     diagnose: diagnose,
+    reconcileImportedChatMetadata: reconcileImportedChatMetadata,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

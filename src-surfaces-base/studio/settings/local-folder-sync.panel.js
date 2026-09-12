@@ -378,11 +378,27 @@
     ]);
   }
 
+  /* Outcome of the bounded already-applied metadata self-heal, carried inside
+   * the runtime result: never a canonical import, never a repository write. */
+  function metadataReconciledText(result) {
+    const detail = result?.result?.metadataReconciliation;
+    if (!detail || typeof detail !== "object") return "n/a";
+    const chats = Array.isArray(detail.chats) ? detail.chats : [];
+    if (detail.reconciled === true) {
+      const fields = chats.flatMap((chat) => Array.isArray(chat?.fields) ? chat.fields : []);
+      return fields.length ? `Yes (${fields.join(", ")})` : "Yes";
+    }
+    if (chats.length && chats.every((chat) => chat?.status === "noop")) return "Not needed";
+    const code = V.clean(detail.code || chats[0]?.code);
+    return code ? `No (${code})` : "No";
+  }
+
   function desktopP02ApplyRows(result) {
     return Object.freeze([
       ["Result", result?.ok === true ? "Completed" : "Blocked"],
       ["Outcome", V.valueText(result?.outcome, "unavailable")],
       ["Canonical import attempts", String(Number(result?.canonicalImportAttempts) || 0)],
+      ["Metadata reconciled", metadataReconciledText(result)],
       ["Direction", V.valueText(result?.convergedDirection, "unchanged")],
       ["Publication", result?.publicationReachable === false ? "Unreachable" : "Blocked"],
       ["Repository writes", String(Number(result?.repositoryWrites) || 0)],
