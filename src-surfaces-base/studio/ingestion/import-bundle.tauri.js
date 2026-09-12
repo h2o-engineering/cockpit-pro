@@ -682,6 +682,33 @@
     return Array.isArray(meta.richTurns) && meta.richTurns.length > 0;
   }
 
+  /* Transcript-derived counts for a payload snapshot. The canonical P02
+   * content-only projection emits chatIndex.messageCount and the messages but
+   * no answer/turn counts, so an import that reads only the index writes
+   * zeros for a transcript that carries the evidence. This mirrors the
+   * capture-side rule (Transcript Archive Engine buildCaptureEvidence): an
+   * explicit positive index count is authoritative; otherwise count roles on
+   * the same normalized turn rows this importer persists; turnCount is the
+   * max of messageCount, assistant+user, assistant and user; answerCount is
+   * the assistant-turn count. No new counting semantics. */
+  function deriveTranscriptCounts(snapshot) {
+    var turns = buildTurnsFromSnapshot(snapshot);
+    var userTurns = 0;
+    var assistantTurns = 0;
+    for (var i = 0; i < turns.length; i += 1) {
+      var role = cleanString(turns[i] && turns[i].role).toLowerCase();
+      if (role === 'user') userTurns += 1;
+      else if (role === 'assistant') assistantTurns += 1;
+    }
+    return {
+      messageCount: turns.length,
+      userTurnCount: userTurns,
+      assistantTurnCount: assistantTurns,
+      answerCount: assistantTurns,
+      turnCount: Math.max(turns.length, assistantTurns + userTurns, assistantTurns, userTurns)
+    };
+  }
+
   function snapshotCombinedPayloadTurnCount(existing) {
     var turns = Array.isArray(existing && existing.turns) ? existing.turns : [];
     var count = 0;
@@ -763,11 +790,38 @@
       : (indexHasTranscriptEvidence ? numericCount(chatIndex.snapshotCount || chat && chat.snapshotCount) : 0);
     var effectiveSnapshotId = missingSnapshotPayload ? '' : indexSnapshotId;
     var effectiveSnapshotCount = missingSnapshotPayload ? 0 : indexSnapshotCount;
+    /* Explicit index counts win; a real transcript payload supplies whatever
+     * the index omits (the P02 content-only case), exactly as capture does. */
+    var transcriptCounts = latest ? deriveTranscriptCounts(latest) : null;
+    var countsDerivedFromTranscript = false;
     var effectiveMessageCount = missingSnapshotPayload ? 0 : indexMessageCount;
-    var effectiveTurnCount = missingSnapshotPayload ? 0 : indexTurnCount;
+    var effectiveAssistantTurnCount = missingSnapshotPayload ? 0 : (indexAssistantTurnCount || indexAnswerCount);
     var effectiveUserTurnCount = missingSnapshotPayload ? 0 : indexUserTurnCount;
-    var effectiveAssistantTurnCount = missingSnapshotPayload ? 0 : indexAssistantTurnCount;
+    var effectiveTurnCount = missingSnapshotPayload ? 0 : indexTurnCount;
     var effectiveAnswerCount = missingSnapshotPayload ? 0 : indexAnswerCount;
+    if (transcriptCounts && !missingSnapshotPayload) {
+      if (!effectiveMessageCount) { effectiveMessageCount = transcriptCounts.messageCount; countsDerivedFromTranscript = true; }
+      if (!effectiveAssistantTurnCount) { effectiveAssistantTurnCount = transcriptCounts.assistantTurnCount; countsDerivedFromTranscript = true; }
+      if (!effectiveUserTurnCount) { effectiveUserTurnCount = transcriptCounts.userTurnCount; countsDerivedFromTranscript = true; }
+      if (!effectiveTurnCount) {
+        effectiveTurnCount = Math.max(effectiveMessageCount,
+          effectiveAssistantTurnCount + effectiveUserTurnCount,
+          effectiveAssistantTurnCount, effectiveUserTurnCount);
+        countsDerivedFromTranscript = true;
+      }
+      if (!effectiveAnswerCount) { effectiveAnswerCount = effectiveAssistantTurnCount; countsDerivedFromTranscript = true; }
+    }
+    /* Chat createdAt: an authoritative incoming chat timestamp wins; otherwise
+     * the earliest canonical payload snapshot's createdAt initializes it (the
+     * chats store would otherwise stamp the import moment). Existing rows are
+     * never moved to a later time - see prepareExistingChatEvidencePatch. */
+    var indexCreatedAt = isoToEpochMs(chatIndex.createdAt || chatIndex.created_at
+      || chat && (chat.createdAt || chat.created_at)
+      || chatMeta.createdAt || chatMeta.created_at);
+    var earliestPayloadSnapshot = hasSnapshots ? payloadSnapshots[payloadSnapshots.length - 1] : null;
+    var canonicalCreatedAt = earliestPayloadSnapshot ? isoToEpochMs(earliestPayloadSnapshot.createdAt) : 0;
+    var effectiveCreatedAt = indexCreatedAt || (missingSnapshotPayload ? 0 : canonicalCreatedAt);
+    var createdAtSource = indexCreatedAt ? 'chat-index' : (effectiveCreatedAt ? 'canonical-snapshot' : '');
 
     var title = friendlyShellTitle([
       latestMeta.title,
@@ -845,6 +899,7 @@
       assistantTurnCount: effectiveAssistantTurnCount,
       answerCount: effectiveAnswerCount,
       lastCapturedAt: latest ? isoToEpochMs(latest.createdAt) : 0,
+      createdAt: effectiveCreatedAt || undefined,
       folderId: indexFolderId,
       categoryId: indexOrg.categoryId || '',
       linkSourceHref: chatIndex.linkSourceHref || '',
@@ -874,6 +929,8 @@
         sourceUserTurnCount: indexUserTurnCount,
         sourceAssistantTurnCount: indexAssistantTurnCount,
         sourceAnswerCount: indexAnswerCount,
+        countsDerivedFromTranscript: countsDerivedFromTranscript,
+        createdAtSource: createdAtSource,
         sourceIsSaved: !!indexState.isSaved,
         f19SnapshotPayloadMissing: missingSnapshotPayload,
         f19ChromeDesktopMinimalRow: isMinimalLibraryIndexRow,
@@ -937,6 +994,21 @@
     maybeSetMax('userTurnCount');
     maybeSetMax('assistantTurnCount');
     maybeSetMax('answerCount');
+    /* A row this importer created carries the import moment as createdAt
+     * (the store's insert default). When the canonical payload now supplies
+     * an earlier timestamp, take it; an established earlier or authoritative
+     * createdAt (any captured row, any earlier value, any createdAt that came
+     * from an authoritative chat index) is never overwritten. */
+    var existingMeta = safeMeta(existing.meta);
+    var incomingCreatedAt = numericCount(patch.createdAt);
+    var existingCreatedAt = numericCount(existing.createdAt);
+    var existingCreatedAtSource = cleanString(existingMeta.createdAtSource);
+    if (incomingCreatedAt && cleanString(existingMeta.importedFrom)
+        && existingCreatedAtSource !== 'chat-index'
+        && (!existingCreatedAt || existingCreatedAt > incomingCreatedAt)) {
+      next.createdAt = incomingCreatedAt;
+      changed = true;
+    }
     if (patch.isSaved === true && existing.isSaved !== true) {
       next.isSaved = true;
       changed = true;
@@ -950,6 +1022,9 @@
       f19ChromeDesktopEvidenceMerged: true,
       f19ChromeDesktopEvidenceMergedAt: Date.now()
     });
+    /* createdAt provenance describes the row's createdAt, not the payload's
+     * derivation: keep the established source when createdAt is untouched. */
+    if (next.createdAt === undefined && existingCreatedAtSource) next.meta.createdAtSource = existingCreatedAtSource;
     return next;
   }
 
@@ -1066,6 +1141,7 @@
     if (hasPatchField('messageCount')) setColumn('message_count', numericCount(patch && patch.messageCount));
     if (hasPatchField('userTurnCount')) setColumn('user_turn_count', numericCount(patch && patch.userTurnCount));
     if (hasPatchField('assistantTurnCount')) setColumn('assistant_turn_count', numericCount(patch && patch.assistantTurnCount));
+    if (hasPatchField('createdAt') && numericCount(patch && patch.createdAt)) setColumn('created_at', numericCount(patch && patch.createdAt));
     if (hasPatchField('isSaved')) setColumn('is_saved', patch.isSaved ? 1 : 0);
     if (hasPatchField('isLinked')) setColumn('is_linked', patch.isLinked ? 1 : 0);
     assignments.push('updated_at = ?');
