@@ -1275,7 +1275,7 @@ if (!chromium) {
 
   check('Semantic Index: one frozen read-only index per render, source/path keys, targets are the H2O shells (S4A slice A)', () => {
     assert.deepEqual(s4a.canonical.resultKeys, ['root', 'turnsEl', 'scrollEl', 'assistantTurnEls', 'mountedTurnCount', 'renderMode', 'semanticSource', 'semanticIndex'], 'render result gains semanticIndex additively');
-    assert.deepEqual(s4a.api, ['schema', 'schemaVersion', 'version', 'renderMode', 'basis', 'semanticCorrespondenceLost', 'getConversation', 'getTurn', 'getMessage', 'turns', 'messages', 'getGeometry'], 'N: read-only API only');
+    assert.deepEqual(s4a.api, ['schema', 'schemaVersion', 'version', 'renderMode', 'basis', 'semanticCorrespondenceLost', 'getConversation', 'getTurn', 'getMessage', 'getBlock', 'getText', 'turns', 'messages', 'blocks', 'texts', 'getGeometry'], 'N: read-only API only (S4A slices A + B)');
     assert.deepEqual(s4a.frozen, [true, true, true, true], 'C: frozen index, arrays and records');
     assert.equal(s4a.canonical.basis, 'source'); assert.equal(s4a.canonical.conversation, 'conversation:source:snap-1');
     assert.deepEqual(s4a.canonical.turns, ['turn:source:t-1', 'turn:source:t-2', 'turn:source-message:m-s1', 'turn:source-message:m-t1']);
@@ -1310,6 +1310,91 @@ if (!chromium) {
     assert.deepEqual(s4a.semantic.sourceRefs, [{ messageId: 'v3-u1' }, { messageId: 'v3-a1' }], 'G: v3 ids stay sourceRef metadata');
     assert.equal(s4a.rich.mode, 'rich'); assert.deepEqual(s4a.rich.turns, ['turn:source:rich-t1', 'turn:source:rich-t2']); assert.deepEqual(s4a.rich.messages, ['message:source:rich-u1', 'message:source:rich-a1']);
     assert.equal(s4a.rich.providerDescendantsNotIndexed, true, 'provider descendants (.grid, provider ids) are not shell authority'); assert.equal(s4a.rich.targetInsideTurn, true); assert.deepEqual(s4a.rich.hostTargets, ['cgMsg', 'cgMsg']);
+  });
+
+  /* M03 P4 S4A T8 slice B: block / text projections over the real ContentRenderer
+   * output in a real document - targets, keys, coverage, marks, nesting,
+   * opaque blocks, rich replay, the initial edit override, and Text-range
+   * geometry. */
+  const s4b = await page.evaluate(() => {
+    const cr = globalThis.H2O.Studio.chatRenderer; const host = document.getElementById('host');
+    const PX = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const richTurn = (role, idx, inner, ids = {}) => ({ role, turnIdx: idx, messageId: ids.messageId ?? ('rm-' + idx), turnId: ids.turnId ?? ('rt-' + idx), outerHTML: '<article data-testid="conversation-turn-' + idx + '"><div data-message-author-role="' + role + '" data-message-id="prov-' + idx + '">' + inner + '</div></article>' });
+    const walkIr = (blocks) => { const out = []; const walk = (n) => { out.push(n); for (const k of ['children', 'blocks', 'items', 'rows', 'cells']) if (Array.isArray(n[k])) n[k].forEach(walk); }; blocks.forEach(walk); return out; };
+    const summary = (r) => { const ix = r.semanticIndex; return { mode: r.renderMode, blocks: ix.blocks().map((b) => ({ key: b.projectionKey, irKind: b.irKind, ordinal: b.ordinal, messageOrdinal: b.messageOrdinal, messageKey: b.messageKey, renderKey: b.renderKey, ownerRef: b.ownerRef, basis: b.basis, tag: b.target.nodeType === 1 ? b.target.tagName.toLowerCase() : null, inHost: b.target.closest('.cgMsg') === ix.messages()[b.messageOrdinal].target })), texts: ix.texts().map((t) => ({ key: t.projectionKey, ordinal: t.ordinal, messageOrdinal: t.messageOrdinal, messageKey: t.messageKey, renderKey: t.renderKey, ownerRef: t.ownerRef, basis: t.basis, nodeType: t.target.nodeType, data: t.target.data, parentTag: t.target.parentNode.tagName.toLowerCase(), inHost: t.target.parentNode.closest('.cgMsg') === ix.messages()[t.messageOrdinal].target })), messages: ix.messages().map((m) => ({ key: m.projectionKey, blockKeys: m.blockKeys, textKeys: m.textKeys, contentIndexed: m.contentIndexed, frozen: Object.isFrozen(m.blockKeys) && Object.isFrozen(m.textKeys) })), conv: { blocks: ix.getConversation().blockKeys.length, texts: ix.getConversation().textKeys.length }, frozen: [Object.isFrozen(ix.blocks()), Object.isFrozen(ix.texts()), ix.blocks().every((b) => Object.isFrozen(b)), ix.texts().every((t) => Object.isFrozen(t))] }; };
+    const out = {};
+    const MD = '# Head\n\nPlain **strong** and *em* with [link](https://example.test/x) and `code`.\n\n- outer\n  - inner\n\n| A | B |\n| - | - |\n| c | d |\n\n```js\nconst x = 1;\n```\n\n![pic](' + PX + ')\n\nline one  \nline two\n\n---\n\n[bad](javascript:alert(1)) tail';
+    const r1 = cr.render({ chatId: 'c1', snapshotId: 's1', messages: [ { role: 'user', text: 'hello **there**', messageId: 'u1' }, { role: 'assistant', text: MD, messageId: 'a1' }, { role: 'system', text: 'sys', messageId: 's1' }, { role: 'tool', text: 'tool', messageId: 't1' } ] }, { getEditOverride: () => null });
+    host.replaceChildren(r1.root); out.canonical = summary(r1);
+    /* H: the IR that the ContentRenderer received is what the index carries - rebuild it independently and compare renderKeys. */
+    const R = globalThis.H2O.Studio.Renderer; const md = R.markdownEngine.formalBaseEngine(); const parsed = R.markdownIrAdapter.markdownToBlocks(md, MD); const doc = R.renderIR.createConversation({ id: 'h2o.render', messages: [{ id: 'h2o.message', role: 'assistant', blocks: parsed.blocks }] });
+    out.canonical.irWalk = walkIr(doc.messages[0].blocks).map((n) => n.renderKey);
+    out.canonical.assistantRenderKeys = [...out.canonical.blocks, ...out.canonical.texts].filter((x) => x.messageOrdinal === 1).sort((a, b) => a.ordinal - b.ordinal).map((x) => x.renderKey);
+    out.canonical.parity = { html: r1.root.outerHTML };
+    /* geometry: mounted element + text (Range), then detached. */
+    const ix = r1.semanticIndex; const txt = ix.texts().find((t) => t.target.data === 'strong') || null; const blk = ix.blocks().find((b) => b.irKind === 'table') || null;
+    if (txt && blk) {
+      const g = ix.getGeometry(txt.projectionKey); const range = document.createRange(); range.selectNodeContents(txt.target); const rr = range.getBoundingClientRect();
+      out.geometry = { text: g, textFrozen: Object.isFrozen(g), textPlain: !(g instanceof DOMRect), textMatchesRange: !!g && g.x === rr.x && g.y === rr.y && g.width === rr.width && g.height === rr.height, textFresh: ix.getGeometry(txt.projectionKey) !== g, block: ix.getGeometry(blk.projectionKey), blockMatches: (() => { const b = blk.target.getBoundingClientRect(); const gb = ix.getGeometry(blk.projectionKey); return !!gb && gb.x === b.x && gb.width === b.width && gb.height === b.height; })(), unknown: ix.getGeometry('nope'), crossKind: [ix.getBlock(txt.projectionKey), ix.getText(blk.projectionKey), ix.getBlock('nope'), ix.getText('')] };
+      r1.root.remove(); out.geometry.detachedText = ix.getGeometry(txt.projectionKey); out.geometry.detachedBlock = ix.getGeometry(blk.projectionKey);
+    } else {
+      out.geometry = { missing: { text: !txt, block: !blk } }; r1.root.remove();
+    }
+    const r2 = cr.render({ chatId: 'c2', snapshotId: 's2', messages: [ { role: 'assistant', text: 'Same **content**', messageId: 'a1' }, { role: 'assistant', text: 'Same **content**', messageId: 'a2' } ] }, { getEditOverride: () => null }); out.twins = summary(r2);
+    const v3 = { schema: 'h2o.savedChatSnapshot', schemaVersion: 3, chatId: 'chat-v3', snapshotId: 'snap-v3', messages: [ { id: 'v3-u1', role: 'user', content: [{ type: 'text', text: 'question' }] }, { id: 'v3-a1', parentId: 'v3-u1', role: 'assistant', content: [{ type: 'text', text: 'answer' }, { type: 'html', sanitized: true, html: '<p>owner <em>html</em> <span>spans</span></p>' }, { type: 'gizmo', name: 'Thing' }] } ] };
+    const r3 = cr.render(v3, { getEditOverride: () => null }); out.semantic = summary(r3); out.semantic.source = r3.semanticSource; const irV3 = R.semanticIngress.fromSavedChatV3Snapshot(v3); out.semantic.irBlockKeys = irV3.messages.flatMap((m) => walkIr(m.blocks).map((n) => n.renderKey)); out.semantic.opaqueDescendants = r3.root.querySelectorAll('[data-h2o-content-kind="opaqueProviderBlock"] *').length;
+    const PROSE = '<div class="markdown prose w-full"><h2>Answer</h2><p>Rich <strong>bold</strong> text.</p><ul><li>a</li><li>b</li></ul></div>';
+    const r4 = cr.render({ chatId: 'c', snapshotId: 's', messages: [ { role: 'user', text: 'q', messageId: 'u1' }, { role: 'assistant', text: 'a', messageId: 'a1' } ], richTurns: [ richTurn('user', 1, '<div class="user-message-bubble-color"><div class="whitespace-pre-wrap">rich q</div></div>'), richTurn('assistant', 2, PROSE) ] }, { getEditOverride: () => null }); out.rich = summary(r4); out.rich.providerTextNodes = (() => { let n = 0; const w = document.createTreeWalker(r4.turnsEl, NodeFilter.SHOW_TEXT); while (w.nextNode()) n += 1; return n; })();
+    const r5 = cr.render({ chatId: 'c', snapshotId: 's', messages: [ { role: 'user', text: 'q', messageId: 'u1' }, { role: 'assistant', text: 'a', messageId: 'a1' }, { role: 'user', text: 'q2', messageId: 'u2' }, { role: 'assistant', text: 'b', messageId: 'a2' } ], richTurns: [ richTurn('user', 1, '<div class="user-message-bubble-color"><div class="whitespace-pre-wrap">rich q</div></div>'), richTurn('assistant', 2, PROSE), richTurn('user', 3, '<div class="user-message-bubble-color"><div class="whitespace-pre-wrap">rich q2</div></div>'), richTurn('assistant', 4, PROSE) ] }, { getEditOverride: (sid, idx) => (idx === 4 ? 'Edited **override** with [link](https://example.test/o)' : null) }); out.override = summary(r5);
+    /* A later Studio-side edit does not mutate the snapshot index. */
+    cr.applyEditedMessageBody(r5.turnsEl.children[1].querySelector('.cgMsg'), 'assistant', 'late edit'); out.override.afterLateEdit = { blocks: r5.semanticIndex.blocks().length, texts: r5.semanticIndex.texts().length, messages: r5.semanticIndex.messages().map((m) => m.contentIndexed) };
+    const r6 = cr.render({ chatId: 'c3', snapshotId: 's3', messages: [ { role: 'assistant', text: '', messageId: 'e1' } ] }, { getEditOverride: () => null }); out.empty = summary(r6);
+    out.attrs = Array.from(r1.root.querySelectorAll('*')).concat([r1.root]).flatMap((el) => Array.from(el.attributes).map((a) => a.name)).filter((n) => /^data-h2o-/.test(n) && !['data-h2o-turn-no', 'data-h2o-create-time', 'data-h2o-presentation-profile', 'data-h2o-link-denied', 'data-h2o-image-denied', 'data-h2o-task', 'data-h2o-task-marker', 'data-h2o-content-kind', 'data-h2o-opaque-kind', 'data-h2o-owner-content-type'].includes(n));
+    out.api = Object.keys(r1.semanticIndex); out.wrapperCheck = { strongTextParent: r1.root.querySelector('strong').firstChild.nodeType, spanWrappers: r1.root.querySelectorAll('span:not([data-h2o-link-denied]):not([data-h2o-image-denied]):not([data-h2o-task-marker])').length };
+    return out;
+  });
+
+  check('Semantic Index: block / text projections cover the ContentRenderer output with Render IR identity, no wrappers, truthful message coverage (S4A slice B)', () => {
+    const c = s4b.canonical;
+    assert.deepEqual(s4b.api, ['schema', 'schemaVersion', 'version', 'renderMode', 'basis', 'semanticCorrespondenceLost', 'getConversation', 'getTurn', 'getMessage', 'getBlock', 'getText', 'turns', 'messages', 'blocks', 'texts', 'getGeometry'], 'C/T: read-only API incl. getBlock/getText/blocks/texts');
+    assert.deepEqual(c.frozen, [true, true, true, true]);
+    assert.deepEqual(c.assistantRenderKeys, c.irWalk, 'H/I/M: the assistant message projections are exactly the validated Render IR nodes, pre-order, renderKeys retained');
+    const kinds = c.blocks.filter((b) => b.messageOrdinal === 1).map((b) => `${b.irKind}>${b.tag}`);
+    for (const pair of ['heading>h1', 'paragraph>p', 'list>ul', 'listItem>li', 'table>table', 'tableRow>tr', 'tableCell>th', 'tableCell>td', 'codeBlock>div', 'image>img', 'hardBreak>br', 'thematicBreak>hr']) assert.ok(kinds.includes(pair), `D: block target is the existing ContentRenderer node: ${pair}`);
+    assert.ok(c.blocks.every((b) => b.basis === 'render-ir' && b.inHost) && c.texts.every((t) => t.basis === 'render-ir' && t.nodeType === 3 && t.inHost), 'E/F: text targets are Text nodes inside their message host');
+    assert.deepEqual(c.texts.filter((t) => t.messageOrdinal === 1 && ['strong', 'em', 'a', 'code'].includes(t.parentTag)).map((t) => [t.data, t.parentTag]), [['strong', 'strong'], ['em', 'em'], ['link', 'a'], ['code', 'code']], 'F: marked text keeps the Text node as target beneath the mark wrapper');
+    assert.deepEqual(c.texts.filter((t) => t.data === 'bad').map((t) => t.parentTag), ['span'], 'denied link keeps the Text node under the inert span');
+    assert.equal(s4b.wrapperCheck.strongTextParent, 3, 'G: the strong mark wraps the Text node directly'); assert.equal(s4b.wrapperCheck.spanWrappers, 0, 'G: no extra span wrapper introduced');
+    assert.ok(c.blocks.every((b) => b.ownerRef === null) && c.texts.every((t) => t.ownerRef === null), 'L: Markdown-shaped blocks carry no ownerRef');
+    for (const rec of [...c.blocks, ...c.texts]) assert.equal(rec.key, `${rec.key.split(':')[0]}:render:${encodeURIComponent(rec.messageKey)}:${encodeURIComponent(rec.renderKey)}`, 'I: key = kind : parent message key : renderKey');
+    const all = [...c.blocks, ...c.texts].map((x) => x.key); assert.equal(new Set(all).size, all.length, 'unique content keys');
+    assert.deepEqual(c.messages.map((m) => [m.contentIndexed, m.blockKeys.length > 0, m.frozen]), [[true, true, true], [true, true, true], [true, true, true], [true, true, true]], 'four canonical roles all content-indexed');
+    assert.equal(c.conv.blocks, c.blocks.length); assert.equal(c.conv.texts, c.texts.length);
+    assert.deepEqual(s4b.attrs, [], 'U: no projection attributes');
+    /* J: identical Markdown in two messages -> distinct keys, same renderKeys. */
+    const tw = s4b.twins; assert.equal(tw.blocks.length, 2); assert.notEqual(tw.blocks[0].key, tw.blocks[1].key); assert.equal(tw.blocks[0].renderKey, tw.blocks[1].renderKey, 'J: same Render IR path, unique projection keys via the parent message key');
+    assert.deepEqual(s4b.empty.messages.map((m) => [m.contentIndexed, m.blockKeys.length]), [[true, 0]], 'an empty ContentRenderer body is indexed with no blocks (not "unindexed")');
+  });
+
+  check('Semantic Index: semantic-v3 keeps block renderKeys / ownerRefs, opaque blocks are single records, raw rich replay is unindexed, the initial edit override is indexed (S4A slice B)', () => {
+    const sv = s4b.semantic; assert.equal(sv.source, 'savedChatSnapshotV3');
+    assert.deepEqual([...sv.blocks, ...sv.texts].sort((a, b) => a.messageOrdinal - b.messageOrdinal || a.ordinal - b.ordinal).map((x) => x.renderKey), sv.irBlockKeys, 'K: semantic-v3 block/text renderKeys preserved in order');
+    assert.deepEqual(sv.blocks.map((b) => b.irKind), ['paragraph', 'paragraph', 'opaqueProviderBlock', 'opaqueProviderBlock']); assert.ok(sv.opaqueDescendants >= 3, 'the opaque hosts do contain sanitized descendants'); assert.equal(sv.blocks.filter((b) => b.irKind === 'opaqueProviderBlock').length, 2, 'N: one block record per opaque block, no records for its sanitized descendants');
+    assert.deepEqual(sv.texts.map((t) => t.data), ['question', 'answer']); assert.ok(sv.blocks.every((b) => b.ownerRef === null), 'K/L: v3 content parts carry no block-level ownerRef (message ownerRef is on the message record)');
+    assert.deepEqual(sv.messages.map((m) => m.contentIndexed), [true, true]);
+    const rich = s4b.rich; assert.equal(rich.mode, 'rich'); assert.equal(rich.blocks.length, 0); assert.equal(rich.texts.length, 0); assert.deepEqual(rich.messages.map((m) => m.contentIndexed), [false, false], 'O: raw rich provider replay yields no block/text records and contentIndexed false');
+    assert.ok(rich.providerTextNodes > 0, 'provider DOM does contain text nodes that were NOT scraped');
+    const ov = s4b.override; assert.equal(ov.mode, 'rich'); assert.deepEqual(ov.messages.map((m) => m.contentIndexed), [false, false, false, true], 'P: only the ContentRenderer-backed override body is content-indexed');
+    assert.deepEqual(ov.blocks.map((b) => [b.messageOrdinal, b.irKind]), [[3, 'paragraph']]); assert.deepEqual(ov.texts.map((t) => [t.messageOrdinal, t.data, t.parentTag]), [[3, 'Edited ', 'p'], [3, 'override', 'strong'], [3, ' with ', 'p'], [3, 'link', 'a']]);
+    assert.deepEqual(ov.afterLateEdit, { blocks: 1, texts: 4, messages: [false, false, false, true] }, 'a later Studio-side edit does not mutate the completion snapshot');
+  });
+
+  check('Semantic Index: Text-range and Element geometry are fresh immutable viewport snapshots; detached targets are null (S4A slice B)', () => {
+    const g = s4b.geometry; assert.equal(g.missing, undefined, 'the marked text and the table block must be indexed for the geometry probe'); assert.ok(g.text && g.text.width > 0 && g.text.height > 0, 'R: connected Text node measures through a Range'); assert.equal(g.textMatchesRange, true); assert.equal(g.textFrozen, true); assert.equal(g.textPlain, true); assert.equal(g.textFresh, true, 'no cached geometry');
+    assert.deepEqual(Object.keys(g.text), ['x', 'y', 'width', 'height', 'top', 'right', 'bottom', 'left', 'coordinateSpace']); assert.equal(g.text.coordinateSpace, 'viewport');
+    assert.ok(g.block && g.block.width > 0, 'Q: block element geometry'); assert.equal(g.blockMatches, true);
+    assert.equal(g.unknown, null); assert.deepEqual(g.crossKind, [null, null, null, null], 'K: cross-kind and unknown lookups are null');
+    assert.equal(g.detachedText, null, 'S: detached text geometry is null'); assert.equal(g.detachedBlock, null);
   });
 
   check('Semantic Index: geometry is a fresh immutable viewport snapshot after mount and null before mount / after detach (S4A slice A)', () => {

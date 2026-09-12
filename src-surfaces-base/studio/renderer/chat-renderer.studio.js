@@ -579,10 +579,14 @@ function renderSemanticBody(bodyEl, source){
     if (!verdict || verdict.ok !== true) throw new Error("render ir rejected the produced blocks");
 
     // Built detached first, so a throw mid-render cannot leave a partial tree
-    // in the message body.
-    const fragment = content.renderBlocks(parsed.blocks, { document });
+    // in the message body. S4A: the accepted Render IR nodes (the validated
+    // normalization of the adapter blocks, carrying their deterministic
+    // renderKeys) are what the ContentRenderer receives, so content
+    // projections keep Render IR identity; the payload is the same.
+    const fragment = content.renderBlocks(doc.messages[0].blocks, contentRenderContext(bodyEl));
     while (bodyEl.firstChild) bodyEl.removeChild(bodyEl.firstChild);
     bodyEl.appendChild(fragment);
+    markContentBody(bodyEl);
     return true;
   } catch {
     return appendVerbatimBody(bodyEl, text);
@@ -619,9 +623,10 @@ function renderSemanticBlocks(bodyEl, blocks){
   try {
     const content = R.contentRenderer;
     if (!content || !Array.isArray(blocks)) throw new Error("content renderer unavailable");
-    const fragment = content.renderBlocks(blocks, { document });
+    const fragment = content.renderBlocks(blocks, contentRenderContext(bodyEl));
     while (bodyEl.firstChild) bodyEl.removeChild(bodyEl.firstChild);
     bodyEl.appendChild(fragment);
+    markContentBody(bodyEl);
     return true;
   } catch {
     return appendVerbatimBody(bodyEl, safeTextFromBlocks(blocks) || "Content unavailable");
@@ -808,6 +813,40 @@ function activeSemanticIndexModule(){
  * element, never on it: no DOM attribute is emitted for it, and the entries die
  * with their shells. The Semantic Index reads it as source metadata only. */
 const TURN_PROJECTION_META = new WeakMap();
+
+/* S4A slice B: the content-projection collection for ONE render invocation.
+ * render() opens it before building and closes it in `finally`; while it is
+ * open, every ContentRenderer body render reports its block / text projections
+ * into it through the ContentRenderer's optional projection sink. It is never
+ * exposed, and outside a render it is null, so a later applyEditedMessageBody
+ * call from the Studio changes no index (an index is a completion snapshot). */
+let ACTIVE_CONTENT_COLLECTOR = null;
+
+function openContentCollector(){
+  const previous = ACTIVE_CONTENT_COLLECTOR;
+  const collector = { projections: [], bodies: new Set() };
+  ACTIVE_CONTENT_COLLECTOR = collector;
+  return { collector, restore(){ ACTIVE_CONTENT_COLLECTOR = previous; } };
+}
+
+/* ContentRenderer render context for one message body: the sink tags every
+ * report with the H2O body element it belongs to, so the index can attach the
+ * projection to its message host by structure (never by provider DOM). */
+function contentRenderContext(bodyEl){
+  const collector = ACTIVE_CONTENT_COLLECTOR;
+  if (!collector) return { document };
+  return {
+    document,
+    projectionSink(report){
+      if (!report || typeof report !== "object") return;
+      collector.projections.push({ report, bodyEl });
+    },
+  };
+}
+
+function markContentBody(bodyEl){
+  if (ACTIVE_CONTENT_COLLECTOR) ACTIVE_CONTENT_COLLECTOR.bodies.add(bodyEl);
+}
 
 function activePresentationProfile(){
   const api = Studio.Renderer && Studio.Renderer.presentationProfile;
@@ -1327,6 +1366,17 @@ function hasCompleteRichCoverage(input){
 
 function render(inputRaw, options){
   options = options && typeof options === "object" ? options : {};
+  /* S4A: content projections reported by the ContentRenderer while THIS render
+   * builds its bodies are collected privately and folded into the index. */
+  const collection = openContentCollector();
+  try {
+    return renderWithCollector(inputRaw, options, collection.collector);
+  } finally {
+    collection.restore();
+  }
+}
+
+function renderWithCollector(inputRaw, options, contentCollector){
   /* Resolved before normalizeInput so typed v3 content[] is never flattened. */
   const semanticConversation = semanticV3Conversation(inputRaw);
   const input = normalizeInput(inputRaw);
@@ -1383,6 +1433,12 @@ function render(inputRaw, options){
     source: { chatId: input.chatId, snapshotId: input.snapshotId },
     semanticConversation: renderMode === "canonical" ? semanticConversation : null,
     describeTurn: (turnEl) => TURN_PROJECTION_META.get(turnEl) || null,
+    /* S4A slice B: block / text projections reported through the ContentRenderer
+     * seam for the bodies THIS render built (canonical Markdown, semantic-v3
+     * blocks and any initial edit override); raw rich provider content reports
+     * nothing and stays unindexed at content level. */
+    contentProjections: contentCollector.projections,
+    contentBodies: contentCollector.bodies,
   });
 
   return {

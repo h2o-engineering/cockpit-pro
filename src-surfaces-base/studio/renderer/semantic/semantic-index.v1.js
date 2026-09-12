@@ -1,18 +1,25 @@
-// @version 0.1.0-m03-s4a
+// @version 0.2.0-m03-s4a
 "use strict";
 
 /*
- * H2O Studio Renderer — Semantic Index v1 (S4A slice A: shell projection index).
+ * H2O Studio Renderer — Semantic Index v1 (S4A: shell + content projection index).
  *
  * Authority boundary:
  *   owner semantic input / source snapshot -> Renderer H2O shells -> read-only projection index
+ *   Render IR node -> ContentRenderer-created DOM target -> content projection record
  *
  * One index describes exactly ONE render result: the H2O-owned conversation
- * root (cgFrame), its turn shells (cgTurn) and message hosts (cgMsg). The
- * Renderer builds it after the final structure of a render is known and hands
- * it back with the render result; the result owns the index lifetime, a
- * rerender yields a different instance, and nothing here is a singleton,
- * registry, observer or daemon.
+ * root (cgFrame), its turn shells (cgTurn), message hosts (cgMsg), and - for
+ * bodies the ContentRenderer built from accepted Render IR - the block and
+ * text projections of that content. The Renderer builds it after the final
+ * structure of a render is known and hands it back with the render result;
+ * the result owns the index lifetime, a rerender yields a different instance,
+ * and nothing here is a singleton, registry, observer or daemon.
+ *
+ * Content coverage is truthful: raw rich provider replay content never passes
+ * through the ContentRenderer, so it has no block / text projections (its
+ * message shell is still indexed, with contentIndexed:false). Nothing is ever
+ * inferred from provider DOM, selectors or text walks.
  *
  * Identity model (projection-local only):
  *   ownerRef      an already-issued owner/semantic reference projected through
@@ -36,12 +43,19 @@
  *               message:source:<encoded messageId>
  *   path      deterministic projection order:
  *               conversation:path:0   turn:path:<ordinal>   message:path:<ordinal>
- *   A duplicated source id never overwrites an earlier record: later
- *   duplicates receive a deterministic ordinal suffix (<key>:ordinal:<n>).
+ *   render-ir content projections keep the Render IR renderKey as their
+ *             identity basis, scoped by the parent message projection:
+ *               block:render:<encoded messageKey>:<encoded renderKey>
+ *               text:render:<encoded messageKey>:<encoded renderKey>
+ *             (a Render IR `text` node is a text projection; every other
+ *             accepted node kind is a block projection; marks are never
+ *             separate projections).
+ *   A duplicated key never overwrites an earlier record: later duplicates
+ *   receive a deterministic ordinal suffix (<key>:ordinal:<n>).
  *
  * This module does NOT touch the DOM, emit attributes, persist, navigate,
- * scroll, decorate, index blocks or text (S4A slice B), or expose mutation.
- * Geometry is read live from the indexed target at request time.
+ * scroll, decorate, or expose mutation. Geometry is read live from the indexed
+ * target at request time (Element: bounding rect; Text node: a temporary Range).
  */
 (function installRendererSemanticIndex(global) {
   const H2O = global.H2O = global.H2O || {};
@@ -51,11 +65,12 @@
 
   const SCHEMA = "h2o.renderer.semantic-index";
   const SCHEMA_VERSION = 1;
-  const API_VERSION = "0.1.0-m03-s4a";
+  const API_VERSION = "0.2.0-m03-s4a";
 
-  const KINDS = Object.freeze(["conversation", "turn", "message"]);
+  const KINDS = Object.freeze(["conversation", "turn", "message", "block", "text"]);
   const ROLES = Object.freeze(["user", "assistant", "system", "tool"]);
-  const BASES = Object.freeze({ SEMANTIC: "semantic", SOURCE: "source", PATH: "path" });
+  const BASES = Object.freeze({ SEMANTIC: "semantic", SOURCE: "source", PATH: "path", RENDER_IR: "render-ir" });
+  const TEXT_NODE = 3;
   const COORDINATE_SPACE = "viewport";
 
   const TURN_CLASS = "cgTurn";
@@ -69,6 +84,9 @@
   function trimmed(value) { return asString(value).trim(); }
   function isElement(value) {
     return !!value && typeof value === "object" && value.nodeType === 1 && typeof value.getAttribute === "function";
+  }
+  function isTextNode(value) {
+    return !!value && typeof value === "object" && value.nodeType === TEXT_NODE;
   }
   function isPlainObject(value) {
     /* Realm-agnostic: a plain object's prototype is null or an Object.prototype
@@ -113,6 +131,7 @@
   function semanticTurnKey(messageRenderKey) { return `turn:${BASES.SEMANTIC}:${encode(messageRenderKey)}`; }
   function sourceKey(kind, basisLabel, id) { return `${kind}:${basisLabel}:${encode(id)}`; }
   function pathKey(kind, ordinal) { return `${kind}:${BASES.PATH}:${ordinal}`; }
+  function contentKey(kind, messageKey, renderKey) { return `${kind}:render:${encode(messageKey)}:${encode(renderKey)}`; }
 
   /* Collision-safe allocation: the first record keeps the base key, later
    * duplicates get a deterministic ordinal suffix and keep their sourceRef. */
@@ -128,11 +147,26 @@
   /* --------------------------------------------------------- geometry -- */
 
   function readGeometry(target) {
-    if (!isElement(target)) return null;
+    if (!isElement(target) && !isTextNode(target)) return null;
     if (target.isConnected !== true) return null;
     const doc = target.ownerDocument;
-    if (!doc || !doc.defaultView || typeof target.getBoundingClientRect !== "function") return null;
-    const rect = target.getBoundingClientRect();
+    if (!doc || !doc.defaultView) return null;
+    let rect = null;
+    if (isTextNode(target)) {
+      /* A Text node has no box of its own: measure it through a temporary
+       * Range over its contents. The Range is not retained. */
+      if (typeof doc.createRange !== "function") return null;
+      const range = doc.createRange();
+      try {
+        range.selectNodeContents(target);
+        rect = range.getBoundingClientRect();
+      } finally {
+        if (typeof range.detach === "function") range.detach();
+      }
+    } else {
+      if (typeof target.getBoundingClientRect !== "function") return null;
+      rect = target.getBoundingClientRect();
+    }
     if (!rect) return null;
     return Object.freeze({
       x: rect.x,
@@ -301,6 +335,80 @@
       messagesByKey.set(messageKey, message);
     }
 
+    /* ---- content projections (S4A slice B) ----------------------------
+     * Reports come from the ContentRenderer seam: { report: { projection,
+     * block, target }, bodyEl }. Each report is attached to the message whose
+     * H2O host structurally contains its body element; the report order is the
+     * ContentRenderer's deterministic pre-order walk. */
+    const hostToOrdinal = new Map();
+    shells.forEach((shell, ordinal) => { if (shell.hostEl) hostToOrdinal.set(shell.hostEl, ordinal); });
+    const contentBodies = input.contentBodies instanceof Set ? input.contentBodies : new Set();
+    const hostOf = (bodyEl) => {
+      let node = bodyEl;
+      let hops = 0;
+      while (node && hops < 8) {
+        if (hostToOrdinal.has(node)) return node;
+        node = node.parentNode || null;
+        hops += 1;
+      }
+      return null;
+    };
+    const perMessageBlocks = messageRecords.map(() => []);
+    const perMessageTexts = messageRecords.map(() => []);
+    const perMessageIndexed = messageRecords.map(() => false);
+    for (const bodyEl of contentBodies) {
+      const host = hostOf(bodyEl);
+      if (host) perMessageIndexed[hostToOrdinal.get(host)] = true;
+    }
+    const contentByKey = new Map();
+    const blockRecords = [];
+    const textRecords = [];
+    const reports = Array.isArray(input.contentProjections) ? input.contentProjections : [];
+    const perMessageCounter = messageRecords.map(() => 0);
+    for (const entry of reports) {
+      const report = entry && entry.report;
+      if (!report || typeof report !== "object") continue;
+      const block = report.block;
+      const target = report.target;
+      const projection = report.projection === "text" ? "text" : "block";
+      if (!block || typeof block !== "object" || !trimmed(block.renderKey)) continue;
+      if (projection === "text" ? !isTextNode(target) : !isElement(target)) continue;
+      const host = hostOf(entry.bodyEl);
+      if (!host) continue;
+      const messageOrdinal = hostToOrdinal.get(host);
+      const messageKey = messageRecords[messageOrdinal].projectionKey;
+      const renderKey = trimmed(block.renderKey);
+      const projectionKey = allocate(taken, contentKey(projection, messageKey, renderKey), perMessageCounter[messageOrdinal]);
+      const record = Object.freeze({
+        projectionKey,
+        kind: projection,
+        basis: BASES.RENDER_IR,
+        irKind: trimmed(block.kind),
+        ordinal: perMessageCounter[messageOrdinal],
+        messageOrdinal,
+        messageKey,
+        renderKey,
+        ownerRef: cloneOwnerRef(block.ownerRef),
+        target,
+      });
+      perMessageCounter[messageOrdinal] += 1;
+      perMessageIndexed[messageOrdinal] = true;
+      contentByKey.set(projectionKey, record);
+      if (projection === "text") { textRecords.push(record); perMessageTexts[messageOrdinal].push(projectionKey); }
+      else { blockRecords.push(record); perMessageBlocks[messageOrdinal].push(projectionKey); }
+    }
+    /* Message records gain their content linkage additively. */
+    for (let i = 0; i < messageRecords.length; i += 1) {
+      const message = Object.freeze({
+        ...messageRecords[i],
+        blockKeys: Object.freeze(perMessageBlocks[i].slice()),
+        textKeys: Object.freeze(perMessageTexts[i].slice()),
+        contentIndexed: perMessageIndexed[i] === true,
+      });
+      messageRecords[i] = message;
+      messagesByKey.set(message.projectionKey, message);
+    }
+
     const conversation = Object.freeze({
       projectionKey: conversationKey,
       kind: "conversation",
@@ -310,17 +418,21 @@
       sourceRef: freezeRef({ chatId: source.chatId, snapshotId: source.snapshotId }),
       turnKeys: Object.freeze(turnRecords.map((turn) => turn.projectionKey)),
       messageKeys: Object.freeze(messageRecords.map((message) => message.projectionKey)),
+      blockKeys: Object.freeze(blockRecords.map((block) => block.projectionKey)),
+      textKeys: Object.freeze(textRecords.map((text) => text.projectionKey)),
       target: root,
     });
 
     const frozenTurns = Object.freeze(turnRecords.slice());
     const frozenMessages = Object.freeze(messageRecords.slice());
+    const frozenBlocks = Object.freeze(blockRecords.slice());
+    const frozenTexts = Object.freeze(textRecords.slice());
 
     function lookup(key) {
       const text = typeof key === "string" ? key : "";
       if (!text) return null;
       if (text === conversation.projectionKey) return conversation;
-      return turnsByKey.get(text) || messagesByKey.get(text) || null;
+      return turnsByKey.get(text) || messagesByKey.get(text) || contentByKey.get(text) || null;
     }
 
     return Object.freeze({
@@ -336,8 +448,12 @@
       getConversation() { return conversation; },
       getTurn(key) { const rec = typeof key === "string" ? turnsByKey.get(key) : undefined; return rec || null; },
       getMessage(key) { const rec = typeof key === "string" ? messagesByKey.get(key) : undefined; return rec || null; },
+      getBlock(key) { const rec = typeof key === "string" ? contentByKey.get(key) : undefined; return rec && rec.kind === "block" ? rec : null; },
+      getText(key) { const rec = typeof key === "string" ? contentByKey.get(key) : undefined; return rec && rec.kind === "text" ? rec : null; },
       turns() { return frozenTurns; },
       messages() { return frozenMessages; },
+      blocks() { return frozenBlocks; },
+      texts() { return frozenTexts; },
       getGeometry(key) {
         const rec = lookup(key);
         if (!rec) return null;

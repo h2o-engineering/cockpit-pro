@@ -1,4 +1,4 @@
-// @version 1.0.0
+// @version 1.1.0
 "use strict";
 
 /*
@@ -12,9 +12,18 @@
  * boundary becomes active: `sanitizerPolicy.classifyUrl` is the sole admission
  * authority for link and image destinations. There is no second allowlist and
  * no independent URL() parsing, and a missing policy denies rather than admits.
+ *
+ * S4A (Semantic Index slice B): the render context may carry an OPTIONAL
+ * internal `projectionSink(record)` function. When present, the renderer
+ * reports each accepted Render IR node together with the DOM node it already
+ * created for it: one `block` report per non-text node (the returned element,
+ * pre-order) and one `text` report per text node (the Text node holding the
+ * author's characters, BEFORE any mark wrapper is applied). Reporting never
+ * changes the DOM, adds no attribute or wrapper, and is not a public registry;
+ * the caller owns whatever it collects for its own render.
  */
 (function installStudioContentRenderer(W) {
-  const API_VERSION = "1.0.0";
+  const API_VERSION = "1.1.0";
   const H2O = W.H2O = W.H2O || {};
   const Studio = H2O.Studio = H2O.Studio || {};
   const Renderer = Studio.Renderer = Studio.Renderer || {};
@@ -172,11 +181,26 @@
   function has(kind) { return registry.has(kind); }
   function registeredKinds() { return Object.freeze(Array.from(registry.keys()).sort()); }
 
+  /* Optional per-render projection reporting (S4A). The sink is an internal
+   * seam supplied by the Chat Renderer for one render; `null` target means the
+   * node has not been created yet (block reports are issued pre-order and the
+   * record's target is completed once the renderer returns). */
+  function projectionSinkOf(context) {
+    const sink = context && context.projectionSink;
+    return typeof sink === "function" ? sink : null;
+  }
+
   function renderBlock(block, context) {
     if (!block || typeof block !== "object") throw new TypeError("contentRenderer.renderBlock requires a block object");
     const renderer = registry.get(block.kind);
     if (!renderer) throw new TypeError(`contentRenderer: no renderer registered for kind: ${block.kind || "<empty>"}`);
-    return renderer(block, context || {});
+    const ctx = context || {};
+    const sink = block.kind === "text" ? null : projectionSinkOf(ctx);
+    const report = sink ? { projection: "block", block, target: null } : null;
+    if (report) sink(report);
+    const node = renderer(block, ctx);
+    if (report) report.target = node;
+    return node;
   }
 
   function renderBlocks(blocks, context) {
@@ -189,7 +213,14 @@
 
   /* ---------------------------------------------------------- core renderers */
 
-  register("text", (block, context) => applyMarks(textNode(context, block.text), block.marks, context));
+  register("text", (block, context) => {
+    /* The Text node itself is the projection target; marks wrap around it and
+     * never replace it, so no extra element is introduced for indexing. */
+    const node = textNode(context, block.text);
+    const sink = projectionSinkOf(context);
+    if (sink) sink({ projection: "text", block, target: node });
+    return applyMarks(node, block.marks, context);
+  });
 
   register("hardBreak", (block, context) => el(context, "br"));
   register("thematicBreak", (block, context) => el(context, "hr"));

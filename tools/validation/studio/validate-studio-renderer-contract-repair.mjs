@@ -789,9 +789,14 @@ function createRendererBuildHarness(richResult) {
   const context = vm.createContext(sandbox);
   Object.assign(sandbox, presentationProfileGlobals(context));
   vm.runInContext([
+    /* S4A slice B: render() opens the private per-render content collector and
+     * delegates to renderWithCollector; the seam pair is extracted verbatim. */
+    'let ACTIVE_CONTENT_COLLECTOR = null;',
+    extractFunction(rendererSource, 'openContentCollector'),
     extractFunction(rendererSource, 'activePresentationProfile'),
     extractFunction(rendererSource, 'hasCompleteRichCoverage'),
     extractFunction(rendererSource, 'buildConversationShell'),
+    extractFunction(rendererSource, 'renderWithCollector'),
     extractFunction(rendererSource, 'render'),
     'this.result = render;',
   ].join('\n'), context);
@@ -858,7 +863,8 @@ function validateBuildFallbackDecision() {
  * mode is unchanged while structure now has exactly one construction seam.
  */
 function validateStructuralShellAuthority() {
-  const renderFn = extractFunction(rendererSource, 'render');
+  /* S4A slice B: render() opens the per-render content collector and delegates the build to renderWithCollector(); both halves are the render body. */
+  const renderFn = extractFunction(rendererSource, 'render') + '\n' + extractFunction(rendererSource, 'renderWithCollector');
   const canonicalTurnFn = extractFunction(rendererSource, 'buildCanonicalTurn');
   const canonicalMessageFn = extractFunction(rendererSource, 'buildCanonicalMessage');
   const richShellFn = extractFunction(rendererSource, 'buildRichTurnShell');
@@ -1348,14 +1354,15 @@ function validatePresentationProfileContract() {
   }
   assert.doesNotMatch(code, /["'`]wbTurn(--\$\{|["'`])/, 'F: chat-renderer must not hardcode wbTurn / wbTurn--<role>');
   assert.doesNotMatch(code, /cgMsg--\$\{|["'`]cgMsg--(user|assistant|system|tool)["'`]/, 'F: chat-renderer must not hardcode cgMsg--<role>');
-  for (const name of ['buildTurnShell', 'buildMessageHost', 'buildRichUserBubbleShell', 'adoptRichUserBubble', 'buildConversationShell', 'render', 'applyEditedMessageBody', 'cleanReaderUserTextNodeLeaks']) {
+  /* S4A slice B: the render body lives in renderWithCollector (render() only scopes the content collector around it). */
+  for (const name of ['buildTurnShell', 'buildMessageHost', 'buildRichUserBubbleShell', 'adoptRichUserBubble', 'buildConversationShell', 'renderWithCollector', 'applyEditedMessageBody', 'cleanReaderUserTextNodeLeaks']) {
     assert.match(extractFunction(rendererSource, name), /activePresentationProfile\(\)/, `F: ${name} resolves the active profile`);
   }
   assert.match(extractFunction(rendererSource, 'buildTurnShell'), /\.turnClasses\(role, mode\)/);
   assert.match(extractFunction(rendererSource, 'buildMessageHost'), /\.messageClasses\(role, mode\)/);
   assert.match(extractFunction(rendererSource, 'buildRichUserBubbleShell'), /\.userBubbleClasses\(\)/);
-  assert.match(extractFunction(rendererSource, 'render'), /\.transcriptClasses\("rich"\)/);
-  assert.match(extractFunction(rendererSource, 'render'), /\.transcriptClasses\("canonical"\)/);
+  assert.match(extractFunction(rendererSource, 'renderWithCollector'), /\.transcriptClasses\("rich"\)/);
+  assert.match(extractFunction(rendererSource, 'renderWithCollector'), /\.transcriptClasses\("canonical"\)/);
   for (const token of STRUCTURAL) {
     assert.equal(code.includes(`"${token}"`) || code.includes(`\`${token}`) || code.includes(`${token} `), true, `G: chat-renderer still owns structural class ${token}`);
   }
@@ -1811,14 +1818,14 @@ function validateSemanticIndexFoundation() {
   const irSource = readRepo(RENDER_IR_REL);
   const packSource = readRepo(PACK_STUDIO_REL);
   /* A. Module contract: frozen, versioned, factory-only, no global current index, no DOM/persistence/navigation authority. */
-  assert.match(indexSource, /^\/\/ @version 0\.1\.0-m03-s4a\n"use strict";/, 'A: module version comment convention');
+  assert.match(indexSource, /^\/\/ @version 0\.2\.0-m03-s4a\n"use strict";/, 'A: module version comment convention');
   const context = vm.createContext({});
   vm.runInContext(`${irSource}\n${indexSource}\nthis.__ir = this.H2O.Studio.Renderer.renderIR; this.__ix = this.H2O.Studio.Renderer.semanticIndex;`, context);
   const api = context.__ix; const ir = context.__ir;
-  assert.equal(api.__installed, true); assert.equal(api.__version, '0.1.0-m03-s4a'); assert.equal(api.schema, 'h2o.renderer.semantic-index'); assert.equal(api.schemaVersion, 1);
+  assert.equal(api.__installed, true); assert.equal(api.__version, '0.2.0-m03-s4a'); assert.equal(api.schema, 'h2o.renderer.semantic-index'); assert.equal(api.schemaVersion, 1);
   assert.equal(Object.isFrozen(api), true, 'A: module namespace frozen');
   deep(Object.keys(api).sort(), ['__installed', '__version', 'bases', 'createShellIndex', 'kinds', 'schema', 'schemaVersion'], 'A: factory-only module surface');
-  deep([...api.kinds], ['conversation', 'turn', 'message'], 'A: slice-A kinds only');
+  deep([...api.kinds], ['conversation', 'turn', 'message', 'block', 'text'], 'A: the five S4A kinds');
   const codeOnly = indexSource.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/.*$/gm, '');
   assert.doesNotMatch(codeOnly, /setAttribute|innerHTML|localStorage|sessionStorage|indexedDB|MutationObserver|ResizeObserver|IntersectionObserver|scrollIntoView|scrollTo\(|\.focus\(|Date\.now|Math\.random|randomUUID|outerHTML|addEventListener/, 'A: the index never mutates the DOM, persists, observes, navigates or uses non-deterministic identity');
   assert.doesNotMatch(codeOnly, /currentSemanticIndex|Renderer\.current/, 'A: no singleton current index');
@@ -1840,7 +1847,7 @@ function validateSemanticIndexFoundation() {
   const shellsA = [shell('user', { turnNo: 1, messageId: 'm-u1', turnId: 't-1', grid: true }), shell('assistant', { turnNo: 2, messageId: 'm-a1', turnId: 't-2' }), shell('system', { turnNo: 3, messageId: 'm-s1' }), shell('tool', { turnNo: 4 })];
   const ixA = build(shellsA);
   assert.equal(Object.isFrozen(ixA), true, 'C: index instance frozen');
-  deep(Object.keys(ixA).sort(), ['basis', 'getConversation', 'getGeometry', 'getMessage', 'getTurn', 'messages', 'renderMode', 'schema', 'schemaVersion', 'semanticCorrespondenceLost', 'turns', 'version'], 'N: read-only instance API only');
+  deep(Object.keys(ixA).sort(), ['basis', 'blocks', 'getBlock', 'getConversation', 'getGeometry', 'getMessage', 'getText', 'getTurn', 'messages', 'renderMode', 'schema', 'schemaVersion', 'semanticCorrespondenceLost', 'texts', 'turns', 'version'], 'N: read-only instance API only');
   for (const forbidden of ['register', 'set', 'delete', 'clear', 'update', 'mutate', 'append', 'replace', 'scrollTo', 'scrollIntoView', 'focus', 'select', 'highlight', 'decorate', 'navigate', 'selectTurn']) assert.equal(forbidden in ixA, false, `N: no ${forbidden} on the index`);
   assert.equal(Object.isFrozen(ixA.turns()) && Object.isFrozen(ixA.messages()), true, 'C: record arrays frozen');
   for (const rec of [ixA.getConversation(), ...ixA.turns(), ...ixA.messages()]) { assert.equal(Object.isFrozen(rec), true, 'C: records frozen'); if (rec.sourceRef) assert.equal(Object.isFrozen(rec.sourceRef), true, 'C: sourceRef frozen'); }
@@ -1884,7 +1891,7 @@ function validateSemanticIndexFoundation() {
   const ixLost = build(shellsV3.slice(0, 1), { semanticConversation: conversation });
   assert.equal(ixLost.semanticCorrespondenceLost, true); assert.equal(ixLost.basis, 'source'); assert.equal(ixLost.messages()[0].projectionKey, 'message:source:v3-u1'); assert.equal(ixLost.messages()[0].ownerRef, null);
   /* Renderer integration (static): one index per render result, resolved from the installed module, projection meta kept off the DOM. */
-  const renderFn = extractFunction(rendererSource, 'render');
+  const renderFn = extractFunction(rendererSource, 'render') + '\n' + extractFunction(rendererSource, 'renderWithCollector');
   assert.match(renderFn, /const semanticIndex = activeSemanticIndexModule\(\)\.createShellIndex\(\{/, 'render() builds the index through the installed module');
   assert.match(renderFn, /semanticConversation: renderMode === "canonical" \? semanticConversation : null/, 'the semantic conversation reaches the index only on the canonical (semantic-v3) path');
   assert.match(renderFn, /semanticSource: semanticConversation \? "savedChatSnapshotV3" : "",\s*semanticIndex,\s*\};/, 'the index is returned additively as semanticIndex');
@@ -1898,6 +1905,134 @@ function validateSemanticIndexFoundation() {
   assert.equal(refs.filter((r) => r === 'renderer/semantic/semantic-index.v1.js').length, 1, 'studio.html admits the index module exactly once');
   assert.ok(refs.indexOf('renderer/semantic/semantic-index.v1.js') > refs.indexOf('renderer/semantic/semantic-ingress.v1.js') && refs.indexOf('renderer/semantic/semantic-index.v1.js') < refs.indexOf('renderer/presentation/presentation-profile.v1.js') && refs.indexOf('renderer/semantic/semantic-index.v1.js') < refs.indexOf('renderer/chat-renderer.studio.js'), 'index module loads after semantic ingress and before its consumers');
   assert.equal((packSource.match(/"renderer\/semantic\/semantic-index\.v1\.js",/g) || []).length, 2, 'pack-studio carries the module in both source and output lists');
+}
+
+/* M03 P4 S4A T8 slice B - content projections (block / text).
+ *
+ * Executes the REAL ContentRenderer with a fake document that hands out
+ * FakeDomElement / FakeTextNode nodes, so the projection seam is proven on the
+ * renderer that ships: one pre-order `block` report per non-text Render IR
+ * node carrying the element it returned, one `text` report per text node
+ * carrying the Text node itself (before mark wrappers), no extra wrapper, no
+ * attribute. Then the REAL index folds those reports into block / text
+ * records scoped by the parent message key. The chat-renderer integration is
+ * pinned statically: normalized Render IR blocks reach the ContentRenderer,
+ * bodies report through a private per-render collector, and the public
+ * applyEditedMessageBody signature is unchanged. */
+function validateSemanticIndexContentProjections() {
+  const deep = (actual, expected, message) => assert.equal(JSON.stringify(actual), JSON.stringify(expected), message);
+  const indexSource = readRepo(SEMANTIC_INDEX_REL);
+  const irSource = readRepo(RENDER_IR_REL);
+  const contentSource = readRepo(CONTENT_RENDERER_REL);
+  /* A/B: module contract advanced additively. */
+  const context = vm.createContext({});
+  vm.runInContext(`${irSource}\n${indexSource}\nthis.__ir = this.H2O.Studio.Renderer.renderIR; this.__ix = this.H2O.Studio.Renderer.semanticIndex;`, context);
+  const api = context.__ix; const ir = context.__ir;
+  assert.equal(api.__version, '0.2.0-m03-s4a', 'B: index API version advanced for content projections');
+  deep([...api.kinds], ['conversation', 'turn', 'message', 'block', 'text'], 'A: kinds include block + text');
+  assert.equal(api.bases.RENDER_IR, 'render-ir', 'a Render IR basis token is exported');
+  /* ContentRenderer seam (static): optional context hook, no public registry, text target reported before marks, no wrapper or attribute for indexing. */
+  assert.match(contentSource, /^\/\/ @version 1\.1\.0\n"use strict";/, 'ContentRenderer version comment advanced');
+  assert.match(contentSource, /function projectionSinkOf\(context\) \{\s*const sink = context && context\.projectionSink;\s*return typeof sink === "function" \? sink : null;/, 'the sink is an OPTIONAL render-context function');
+  assert.match(contentSource, /const sink = block\.kind === "text" \? null : projectionSinkOf\(ctx\);\s*const report = sink \? \{ projection: "block", block, target: null \} : null;\s*if \(report\) sink\(report\);\s*const node = renderer\(block, ctx\);\s*if \(report\) report\.target = node;/, 'D: one pre-order block report per non-text node, completed with the returned element');
+  assert.match(contentSource, /register\("text", \(block, context\) => \{\s*(?:\/\*[\s\S]*?\*\/\s*)?const node = textNode\(context, block\.text\);\s*const sink = projectionSinkOf\(context\);\s*if \(sink\) sink\(\{ projection: "text", block, target: node \}\);\s*return applyMarks\(node, block\.marks, context\);/, 'E/F/G: the text report carries the Text node itself and marks still wrap that same node - no wrapper element');
+  assert.doesNotMatch(contentSource.replace(/\/\*[\s\S]*?\*\//g, ' '), /projectionSink[^\n]*setAttribute|data-h2o-projection|data-h2o-block-key|data-h2o-text-key/, 'U: the seam emits no DOM attribute');
+  const exported = /Renderer\.contentRenderer = Object\.freeze\(\{([\s\S]*?)\}\);/.exec(contentSource)[1];
+  assert.doesNotMatch(exported, /projection|sink|register\w+Projection/i, 'the seam is not part of the public ContentRenderer API');
+  /* Executed: the real ContentRenderer over a fake document. */
+  const doc = {
+    createElement: (tag) => new FakeDomElement(tag),
+    createTextNode: (text) => new FakeTextNode(text),
+    createDocumentFragment: () => new FakeDomElement('#fragment'),
+  };
+  const contentContext = vm.createContext({});
+  vm.runInContext(`${contentSource}\nthis.__content = this.H2O.Studio.Renderer.contentRenderer;`, contentContext);
+  const content = contentContext.__content;
+  assert.equal(content.__version, '1.1.0');
+  const urlPolicy = { classifyUrl: (value) => (/^https:\/\//.test(String(value)) ? { ok: true } : { ok: false, reason: 'denied' }) };
+  const presentationProfile = installPresentationProfile(vm.createContext({})).reference();
+  const conversation = ir.createConversation({ id: 'h2o.render', messages: [{ id: 'h2o.message', role: 'assistant', blocks: [
+    { kind: 'heading', level: 2, children: [{ kind: 'text', text: 'Title' }] },
+    { kind: 'paragraph', children: [{ kind: 'text', text: 'plain ' }, { kind: 'text', text: 'strong-link', marks: [{ kind: 'strong' }, { kind: 'link', href: 'https://example.test/x' }] }, { kind: 'text', text: 'denied', marks: [{ kind: 'link', href: 'javascript:alert(1)' }] }] },
+    { kind: 'list', ordered: false, items: [{ kind: 'listItem', blocks: [{ kind: 'paragraph', children: [{ kind: 'text', text: 'outer' }] }, { kind: 'list', ordered: true, items: [{ kind: 'listItem', blocks: [{ kind: 'paragraph', children: [{ kind: 'text', text: 'inner' }] }] }] }] }] },
+    { kind: 'table', rows: [{ kind: 'tableRow', header: true, cells: [{ kind: 'tableCell', blocks: [{ kind: 'paragraph', children: [{ kind: 'text', text: 'h' }] }] }] }, { kind: 'tableRow', cells: [{ kind: 'tableCell', blocks: [{ kind: 'paragraph', children: [{ kind: 'text', text: 'c' }] }] }] }] },
+    { kind: 'codeBlock', language: 'js', code: 'const x = 1;' },
+    { kind: 'image', src: 'https://example.test/i.png', alt: 'pic' },
+    { kind: 'file', href: 'https://example.test/f.pdf', name: 'file' },
+    { kind: 'paragraph', children: [{ kind: 'text', text: 'a' }, { kind: 'hardBreak' }, { kind: 'text', text: 'b' }] },
+    { kind: 'thematicBreak' },
+    { kind: 'opaqueProviderBlock', opaqueKind: 'unsupportedOwnerContent', ownerContentType: 'gizmo', ownerContent: { name: 'Thing' } },
+  ] }] });
+  assert.equal(ir.validate(conversation).ok, true);
+  const blocks = conversation.messages[0].blocks;
+  const reports = [];
+  const fragment = content.renderBlocks(blocks, { document: doc, urlPolicy, presentationProfile, projectionSink: (r) => reports.push(r) });
+  const irWalk = []; const walk = (node) => { irWalk.push(node); for (const key of ['children', 'blocks', 'items', 'rows', 'cells']) if (Array.isArray(node[key])) node[key].forEach(walk); }; blocks.forEach(walk);
+  assert.equal(reports.length, irWalk.length, 'D/E: exactly one report per accepted Render IR node (pre-order)');
+  deep(reports.map((r) => r.block.renderKey), irWalk.map((n) => n.renderKey), 'M: reports follow the deterministic depth-first pre-order of the IR');
+  for (const r of reports) {
+    assert.equal(r.projection, r.block.kind === 'text' ? 'text' : 'block', 'text nodes are text projections, everything else a block projection');
+    if (r.projection === 'text') { assert.equal(r.target instanceof FakeTextNode, true, 'F: text target is the Text node'); assert.equal(r.target.nodeValue, r.block.text); }
+    else assert.equal(r.target instanceof FakeDomElement, true, 'D: block target is the returned element');
+  }
+  const byKind = Object.fromEntries(reports.filter((r) => r.projection === 'block').map((r) => [r.block.kind, r.target.tagName]));
+  deep(byKind, { heading: 'H2', paragraph: 'P', list: 'OL', listItem: 'LI', table: 'TABLE', tableRow: 'TR', tableCell: 'TD', codeBlock: 'DIV', image: 'IMG', file: 'A', hardBreak: 'BR', thematicBreak: 'HR', opaqueProviderBlock: 'DIV' }, 'block targets are the existing ContentRenderer nodes (last occurrence per kind)');
+  const marked = reports.find((r) => r.block.text === 'strong-link');
+  assert.equal(marked.target.parentNode.tagName, 'A', 'F: marks wrap the reported Text node (marks[0] = strong outermost, link innermost)'); assert.equal(marked.target.parentNode.parentNode.tagName, 'STRONG');
+  const denied = reports.find((r) => r.block.text === 'denied'); assert.equal(denied.target.parentNode.tagName, 'SPAN'); assert.equal(denied.target.parentNode.getAttribute('data-h2o-link-denied'), 'denied');
+  assert.equal(reports.filter((r) => r.block.kind === 'opaqueProviderBlock').length, 1, 'N: one block record for an opaque block; its descendants are not projections');
+  assert.equal(reports.filter((r) => r.block.kind === 'codeBlock').length, 1, 'the code text is not a text projection (not a Render IR text node)');
+  assert.equal(fragment.children.length, blocks.length, 'G: the fragment carries exactly the top-level blocks - no wrapper added for indexing');
+  /* No-sink render is byte-for-byte the same structure (the seam is inert without a sink). */
+  const plain = content.renderBlocks(blocks, { document: doc, urlPolicy, presentationProfile });
+  const shape = (node) => node instanceof FakeTextNode ? `#${node.nodeValue}` : `${node.tagName}[${[...node.attrs.entries()].map(([k, v]) => `${k}=${v}`).join(',')}](${node.children.map(shape).join('')})`;
+  assert.equal(shape(fragment), shape(plain), 'G: reporting changes nothing in the rendered structure');
+  /* Executed: the real index folds the reports into records scoped by the parent message key. */
+  const turn = new FakeDomElement('article'); turn.className = 'cgTurn cgTurn--assistant'; turn.setAttribute('data-turn', 'assistant');
+  const host = new FakeDomElement('div'); host.className = 'cgMsg cgMsg--assistant'; host.setAttribute('data-message-author-role', 'assistant'); const body = new FakeDomElement('div'); body.className = 'cgMsgBody'; host.appendChild(body); body.appendChild(fragment); turn.appendChild(host);
+  const turnsEl = new FakeDomElement('section'); turnsEl.className = 'cgScroll wbRichRoot'; turnsEl.appendChild(turn); const root = new FakeDomElement('div'); root.className = 'cgFrame'; root.appendChild(turnsEl);
+  const meta = new Map([[turn, { role: 'assistant', turnNo: 1, messageId: 'm-a1', turnId: '' }]]);
+  const build = () => api.createShellIndex({ root, turnsEl, renderMode: 'canonical', source: { chatId: 'c', snapshotId: 's' }, semanticConversation: null, describeTurn: (el) => meta.get(el) || null, contentProjections: reports.map((report) => ({ report, bodyEl: body })), contentBodies: new Set([body]) });
+  const ix = build();
+  assert.equal(ix.blocks().length, reports.filter((r) => r.projection === 'block').length); assert.equal(ix.texts().length, reports.filter((r) => r.projection === 'text').length);
+  const msg = ix.messages()[0];
+  assert.equal(msg.contentIndexed, true); deep(msg.blockKeys, ix.blocks().map((b) => b.projectionKey)); deep(msg.textKeys, ix.texts().map((t) => t.projectionKey));
+  for (const rec of [...ix.blocks(), ...ix.texts()]) {
+    assert.equal(Object.isFrozen(rec), true, 'C: content records frozen'); assert.equal(rec.basis, 'render-ir'); assert.equal(rec.messageKey, msg.projectionKey); assert.equal(rec.messageOrdinal, 0);
+    assert.equal(rec.projectionKey, `${rec.kind}:render:${encodeURIComponent(msg.projectionKey)}:${encodeURIComponent(rec.renderKey)}`, 'I: key = kind + parent message key + Render IR renderKey');
+    assert.equal(rec.ownerRef, null, 'L: ordinary Markdown-shaped blocks carry no ownerRef');
+    assert.equal(ix.getGeometry(rec.projectionKey), null, 'S: fake (never connected) targets measure to null');
+  }
+  deep([...ix.blocks(), ...ix.texts()].sort((a, b) => a.ordinal - b.ordinal).map((r) => r.renderKey), irWalk.map((n) => n.renderKey), 'M: content ordinals follow the pre-order walk');
+  deep(ix.getConversation().blockKeys, msg.blockKeys); deep(ix.getConversation().textKeys, msg.textKeys);
+  const t0 = ix.texts()[0], b0 = ix.blocks()[0];
+  assert.equal(ix.getText(t0.projectionKey), t0); assert.equal(ix.getBlock(b0.projectionKey), b0); assert.equal(ix.getBlock(t0.projectionKey), null, 'K: cross-kind lookups are null'); assert.equal(ix.getText(b0.projectionKey), null); assert.equal(ix.getText('nope'), null); assert.equal(ix.getBlock(''), null);
+  assert.equal(t0.target instanceof FakeTextNode, true, 'F: the indexed text target is the Text node');
+  const ix2 = build(); deep(ix2.blocks().map((b) => b.projectionKey), ix.blocks().map((b) => b.projectionKey), 'deterministic content keys'); assert.notEqual(ix2, ix);
+  const all = [ix.getConversation().projectionKey, ...ix.turns().map((t) => t.projectionKey), ...ix.messages().map((m) => m.projectionKey), ...ix.blocks().map((b) => b.projectionKey), ...ix.texts().map((t) => t.projectionKey)];
+  assert.equal(new Set(all).size, all.length, 'projection keys unique across all five kinds');
+  /* J: a second message with identical Markdown-shaped IR gets different content keys because the parent message key differs. */
+  const turn2 = new FakeDomElement('article'); turn2.className = 'cgTurn cgTurn--assistant'; const host2 = new FakeDomElement('div'); host2.className = 'cgMsg cgMsg--assistant'; host2.setAttribute('data-message-author-role', 'assistant'); const body2 = new FakeDomElement('div'); body2.className = 'cgMsgBody'; host2.appendChild(body2); turn2.appendChild(host2); turnsEl.appendChild(turn2); meta.set(turn2, { role: 'assistant', turnNo: 2, messageId: 'm-a2', turnId: '' });
+  const reports2 = []; body2.appendChild(content.renderBlocks(blocks, { document: doc, urlPolicy, presentationProfile, projectionSink: (r) => reports2.push(r) }));
+  const ixTwin = api.createShellIndex({ root, turnsEl, renderMode: 'canonical', source: { chatId: 'c', snapshotId: 's' }, semanticConversation: null, describeTurn: (el) => meta.get(el) || null, contentProjections: [...reports.map((report) => ({ report, bodyEl: body })), ...reports2.map((report) => ({ report, bodyEl: body2 }))], contentBodies: new Set([body, body2]) });
+  assert.equal(ixTwin.blocks().length, 2 * ix.blocks().length); assert.equal(new Set(ixTwin.blocks().map((b) => b.projectionKey)).size, ixTwin.blocks().length, 'J: identical Markdown in two messages still yields unique keys');
+  deep(ixTwin.messages().map((m) => m.contentIndexed), [true, true]);
+  /* O: a message with no ContentRenderer body is truthfully unindexed at content level. */
+  const ixRaw = api.createShellIndex({ root, turnsEl, renderMode: 'rich', source: { chatId: 'c', snapshotId: 's' }, semanticConversation: null, describeTurn: (el) => meta.get(el) || null, contentProjections: [], contentBodies: new Set() });
+  deep(ixRaw.messages().map((m) => [m.contentIndexed, m.blockKeys.length, m.textKeys.length]), [[false, 0, 0], [false, 0, 0]], 'O: no reports -> no content records, contentIndexed false');
+  /* Chat renderer integration (static). */
+  const bodyFn = extractFunction(rendererSource, 'renderSemanticBody');
+  assert.match(bodyFn, /content\.renderBlocks\(doc\.messages\[0\]\.blocks, contentRenderContext\(bodyEl\)\)/, 'H: the Markdown path renders the validated Render IR blocks (renderKeys attached) through the sink context');
+  assert.doesNotMatch(bodyFn, /renderBlocks\(parsed\.blocks/, 'H: the pre-IR adapter blocks are no longer what the ContentRenderer receives');
+  assert.match(extractFunction(rendererSource, 'renderSemanticBlocks'), /content\.renderBlocks\(blocks, contentRenderContext\(bodyEl\)\)/, 'the semantic-v3 path reports through the same seam');
+  assert.match(rendererSource, /let ACTIVE_CONTENT_COLLECTOR = null;/, 'private per-render collector');
+  assert.match(extractFunction(rendererSource, 'render'), /const collection = openContentCollector\(\);\s*try \{\s*return renderWithCollector\(inputRaw, options, collection\.collector\);\s*\} finally \{\s*collection\.restore\(\);\s*\}/, 'the collector is scoped to one render invocation and always restored');
+  assert.match(extractFunction(rendererSource, 'renderWithCollector'), /contentProjections: contentCollector\.projections,\s*contentBodies: contentCollector\.bodies,/, 'the collection reaches createShellIndex');
+  assert.match(extractFunction(rendererSource, 'contentRenderContext'), /if \(!collector\) return \{ document \};/, 'without an open render the ContentRenderer runs with no sink (later edits do not mutate a snapshot)');
+  assert.match(rendererSource, /function applyEditedMessageBody\(messageEl, role, text\)\{/, 'P: public applyEditedMessageBody signature unchanged');
+  /* The pre-existing Reader text-leak cleanup (cleanReaderUserTextNodeLeaks) walks text nodes for its own accepted purpose; no projection code path may. */
+  for (const name of ['contentRenderContext', 'markContentBody', 'openContentCollector', 'renderWithCollector', 'renderSemanticBody', 'renderSemanticBlocks']) assert.doesNotMatch(extractFunction(rendererSource, name), /querySelector|TreeWalker|createTreeWalker|textContent|innerHTML|outerHTML/, `O: no DOM scraping for projections in ${name}`);
+  assert.doesNotMatch(indexSource.replace(/\/\*[\s\S]*?\*\//g, ' '), /querySelector|TreeWalker|textContent|innerHTML|outerHTML/, 'O: the index never walks or reads DOM content');
 }
 
 function validateExtractedRendererBoundary() {
@@ -1934,6 +2069,7 @@ validatePersistedEditPresentationOwnership();
 validateAttachmentPresentationOwnership();
 validateFinalRendererCssBoundary();
 validateSemanticIndexFoundation();
+validateSemanticIndexContentProjections();
 validateExtractedRendererBoundary();
 
 console.log('Studio renderer contract repair validation passed');

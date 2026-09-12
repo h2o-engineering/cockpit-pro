@@ -255,4 +255,35 @@ check('S4A. the Semantic Index reuses Render IR renderKey / ownerRef verbatim an
   assert.equal(ir.makeRenderKey('message', 'x', 0), 'message:owner%3Ax'); assert.equal(ir.makeRenderKey('message', '', 3), 'message:path%3A3');
 });
 
+check('S4A. content projections keep the Render IR block renderKey as their identity basis, scoped by the parent message projection', () => {
+  const index = sandbox.H2O.Studio.Renderer.semanticIndex;
+  assert.equal(index.__version, '0.2.0-m03-s4a'); assert.equal(JSON.stringify([...index.kinds]), JSON.stringify(['conversation', 'turn', 'message', 'block', 'text']));
+  const conversation = ir.createConversation({ ownerRef: { type: 'h2o.savedChat.snapshot', id: 'chat', version: 'snap' }, messages: [
+    { role: 'assistant', ownerRef: { type: 'h2o.savedChat.message', id: 'a1' }, blocks: [ { kind: 'paragraph', children: [{ kind: 'text', text: 'hello', marks: [{ kind: 'strong' }] }, { kind: 'text', text: ' world' }] }, { kind: 'thematicBreak' }, { kind: 'paragraph', ownerRef: { type: 'owner.block', id: 'b-77' }, children: [{ kind: 'text', text: 'owned' }] } ] },
+  ] });
+  assert.equal(ir.validate(conversation).ok, true);
+  const el = (className, attrs = {}) => ({ nodeType: 1, className, children: [], parentNode: null, classList: { contains: (c) => className.split(' ').includes(c) }, getAttribute: (n) => (n in attrs ? attrs[n] : null), isConnected: false });
+  const textNode = (text) => ({ nodeType: 3, nodeValue: text, isConnected: false });
+  const turn = el('cgTurn cgTurn--assistant', { 'data-turn': 'assistant', 'data-h2o-turn-no': '1' }); const host = el('cgMsg cgMsg--assistant', { 'data-message-author-role': 'assistant' }); const body = el('cgMsgBody'); body.parentNode = host; host.children.push(body); turn.children.push(host);
+  const turnsEl = el('cgScroll wbRichRoot'); turnsEl.children.push(turn); const root = el('cgFrame'); root.children.push(turnsEl);
+  /* Reports as the ContentRenderer seam issues them: pre-order, text targets are Text nodes. */
+  const message = conversation.messages[0]; const reports = [];
+  const walk = (node) => { reports.push({ report: { projection: node.kind === 'text' ? 'text' : 'block', block: node, target: node.kind === 'text' ? textNode(node.text) : el(node.kind) }, bodyEl: body }); for (const key of ['children', 'blocks', 'items', 'rows', 'cells']) if (Array.isArray(node[key])) node[key].forEach(walk); };
+  message.blocks.forEach(walk);
+  const built = index.createShellIndex({ root, turnsEl, renderMode: 'canonical', source: { chatId: 'chat', snapshotId: 'snap' }, semanticConversation: conversation, describeTurn: () => null, contentProjections: reports, contentBodies: new Set([body]) });
+  const msg = built.messages()[0];
+  assert.equal(msg.projectionKey, message.renderKey); assert.equal(msg.contentIndexed, true);
+  const records = [...built.blocks(), ...built.texts()].sort((a, b) => a.ordinal - b.ordinal);
+  assert.equal(JSON.stringify(records.map((r) => r.renderKey)), JSON.stringify(reports.map((r) => r.report.block.renderKey)), 'every content record retains its Render IR renderKey, in pre-order');
+  for (const r of records) {
+    assert.equal(r.basis, 'render-ir'); assert.equal(r.messageKey, message.renderKey);
+    assert.equal(r.projectionKey, `${r.kind}:render:${encodeURIComponent(message.renderKey)}:${encodeURIComponent(r.renderKey)}`, 'projection key = kind : parent message key : Render IR renderKey');
+    assert.equal(Object.prototype.hasOwnProperty.call(r, 'contentBlockId'), false); assert.equal(Object.isFrozen(r), true);
+  }
+  assert.equal(JSON.stringify(records.map((r) => r.ownerRef)), JSON.stringify([null, null, null, null, { type: 'owner.block', id: 'b-77' }, null]), 'ownerRef comes only from the Render IR block ownerRef (owner-supplied), never from ids or text');
+  assert.equal(built.texts().every((t) => t.target.nodeType === 3), true, 'text targets are Text nodes'); assert.equal(built.blocks().every((b) => b.target.nodeType === 1), true);
+  assert.equal(built.texts().length, 3); assert.equal(built.blocks().length, 3);
+  assert.equal(built.getGeometry(built.texts()[0].projectionKey), null, 'unconnected text target -> null geometry');
+});
+
 console.log(`PASS ${checks.length}`);
