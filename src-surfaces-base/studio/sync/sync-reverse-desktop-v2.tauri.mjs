@@ -591,6 +591,92 @@ export function createDesktopP02ReverseRuntime({
   });
 }
 
+/*
+ * Round 2A projection dependency of the canonical Apply runtime.
+ *
+ * sync-object-runtime.tauri.js resolves H2O.Desktop.SyncObjectProjection
+ * lazily and fails closed (round2a-projection-unavailable) when it is absent.
+ * The Legacy operator entrypoint preloaded that module at boot and published
+ * H2O.Desktop.Sync.round2aReady; the New UI Local Folder panel loads only the
+ * runtime script and then imports this module, so on the canonical surface
+ * nothing else guarantees the projection. This facade owns that guarantee for
+ * the runtime members it consumes: await round2aReady when a loader already
+ * owns it, otherwise attach the canonical packed module once from the governed
+ * root asset namespace - exactly how the runtime attaches its own local source
+ * - and verify the API before delegating. Loading only attaches an API: no
+ * store, SQL, repository or importer call occurs. A load that cannot produce
+ * the API stays the same typed failure the runtime would have raised.
+ */
+const ROUND2A_PROJECTION_ASSET = '/sync/sync-object-projection.tauri.js';
+const projectionUnavailable = (detail) => {
+  const error = new Error('round2a-projection-unavailable');
+  error.code = 'round2a-projection-unavailable';
+  error.detail = detail;
+  return error;
+};
+const round2aProjectionLoads = new WeakMap();
+export function ensureRound2AProjection(scope) {
+  const H2O = scope?.H2O;
+  const present = () => !!H2O?.Desktop?.SyncObjectProjection;
+  if (present()) return Promise.resolve();
+  const ready = H2O?.Desktop?.Sync?.round2aReady;
+  if (ready && typeof ready.then === 'function') {
+    return Promise.resolve(ready).then(() => {
+      if (!present()) throw projectionUnavailable('round2a-ready-without-projection');
+    });
+  }
+  const memoized = scope && typeof scope === 'object';
+  let load = memoized ? round2aProjectionLoads.get(scope) : null;
+  if (!load) {
+    load = new Promise((resolve, reject) => {
+      const document = scope?.document;
+      if (!document || typeof document.createElement !== 'function') {
+        reject(projectionUnavailable('projection-document-unavailable'));
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = ROUND2A_PROJECTION_ASSET;
+      script.async = false;
+      script.onload = () => {
+        if (present()) resolve();
+        else reject(projectionUnavailable('projection-api-missing-after-load'));
+      };
+      script.onerror = () => {
+        reject(projectionUnavailable('projection-asset-load-failed'));
+      };
+      const parent = document.head || document.documentElement;
+      if (!parent || typeof parent.appendChild !== 'function') {
+        reject(projectionUnavailable('projection-document-unavailable'));
+        return;
+      }
+      parent.appendChild(script);
+    }).catch((error) => {
+      if (memoized) round2aProjectionLoads.delete(scope);
+      throw error;
+    });
+    if (memoized) round2aProjectionLoads.set(scope, load);
+  }
+  return load.then(() => {
+    if (!present()) throw projectionUnavailable('projection-api-missing-after-load');
+  });
+}
+
+/* The canonical runtime members this facade consumes, each guaranteed its
+ * projection dependency immediately before the runtime is invoked. Order and
+ * arguments are unchanged; the runtime itself is untouched. */
+export function projectionGuardedRuntime(scope, canonicalRuntime) {
+  return Object.freeze({
+    resolveCanonicalAnchor: async (objectId, options) => {
+      await ensureRound2AProjection(scope);
+      return canonicalRuntime.resolveCanonicalAnchor(objectId, options);
+    },
+    applyNextAdmittedP02Revision: async (objectId) => {
+      await ensureRound2AProjection(scope);
+      return canonicalRuntime.applyNextAdmittedP02Revision(objectId);
+    }
+  });
+}
+
 export function installDesktopP02Reverse(globalScope = globalThis) {
   const scope = globalScope || {};
   /* Packaged on both Studio surfaces, activated only by the native invoke
@@ -606,13 +692,14 @@ export function installDesktopP02Reverse(globalScope = globalThis) {
     if (runtime) return runtime;
     const invoke = invokeFrom(scope);
     const sync = H2O.Studio.sync;
-    const canonicalApply = H2O.Desktop.SyncObjectRuntime;
+    const canonicalRuntime = H2O.Desktop.SyncObjectRuntime;
     if (!invoke || typeof sync.getConfig !== 'function' ||
         typeof sync.setConfig !== 'function' ||
         typeof sync.mutateCanonicalConfig !== 'function' ||
-        typeof canonicalApply?.applyNextAdmittedP02Revision !== 'function') {
+        typeof canonicalRuntime?.applyNextAdmittedP02Revision !== 'function') {
       fail('p02-desktop-reverse-runtime-unavailable');
     }
+    const canonicalApply = projectionGuardedRuntime(scope, canonicalRuntime);
     runtime = createDesktopP02ReverseRuntime({
       invoke,
       configOwner: sync,
