@@ -778,6 +778,10 @@ if (!chromium) {
         'renderer/markdown/markdown-ir-adapter.v1.js',
         'renderer/semantic/render-ir.v1.js',
         'renderer/semantic/semantic-ingress.v1.js',
+        /* S4A/T8: the Renderer builds one Semantic Index per render through the
+         * index module and fails clearly without it, so the Tier-2 chain admits
+         * it in its production position. */
+        'renderer/semantic/semantic-index.v1.js',
         /* S3B/T6: the Renderer resolves its presentation hooks from the profile
          * module and fails clearly without it, so the Tier-2 chain admits it in
          * its production position. */
@@ -1230,6 +1234,91 @@ if (!chromium) {
   check('a missing live sanitizer fails closed with no partial tree', () => {
     assert.equal(s2c.noSanitizer.threw, true);
     assert.equal(s2c.noSanitizer.hostChildren, 0);
+  });
+
+  /* M03 P4 S4A T8 slice A: the Semantic Index over the real rendered shells in
+   * a real document - identity paths, instance-per-render, geometry after
+   * mount and after detach, and the no-new-attribute / read-only contracts. */
+  const s4a = await page.evaluate(() => {
+    const cr = globalThis.H2O.Studio.chatRenderer; const host = document.getElementById('host');
+    const richTurn = (role, idx, inner, ids = {}) => ({ role, turnIdx: idx, messageId: ids.messageId ?? '', turnId: ids.turnId ?? '', outerHTML: '<article data-testid="conversation-turn-' + idx + '"><div data-message-author-role="' + role + '" data-message-id="prov-' + idx + '">' + inner + '</div></article>' });
+    const keys = (ix) => ({ conversation: ix.getConversation().projectionKey, turns: ix.turns().map((t) => t.projectionKey), messages: ix.messages().map((m) => m.projectionKey) });
+    const out = {};
+    const canon = { chatId: 'chat-1', snapshotId: 'snap-1', messages: [ { role: 'user', text: 'hello', messageId: 'm-u1', turnId: 't-1' }, { role: 'assistant', text: 'reply', messageId: 'm-a1', turnId: 't-2' }, { role: 'system', text: 'sys', messageId: 'm-s1' }, { role: 'tool', text: 'tool', messageId: 'm-t1' } ] };
+    const r1 = cr.render(canon, { getEditOverride: () => null }); const r1b = cr.render(canon, { getEditOverride: () => null });
+    out.canonical = { ...keys(r1.semanticIndex), basis: r1.semanticIndex.basis, roles: r1.semanticIndex.turns().map((t) => t.role), targetsAreShells: r1.semanticIndex.turns().every((t, i) => t.target === r1.turnsEl.children[i] && t.target.classList.contains('cgTurn')) && r1.semanticIndex.messages().every((m, i) => m.target === r1.turnsEl.children[i].querySelector(':scope > .cgMsg')), conversationTarget: r1.semanticIndex.getConversation().target === r1.root, sourceRef: r1.semanticIndex.messages()[0].sourceRef, ownerRef: r1.semanticIndex.messages()[0].ownerRef, resultKeys: Object.keys(r1) };
+    out.rerender = { distinct: r1.semanticIndex !== r1b.semanticIndex, sameKeys: JSON.stringify(keys(r1.semanticIndex)) === JSON.stringify(keys(r1b.semanticIndex)), distinctTargets: r1.semanticIndex.turns()[0].target !== r1b.semanticIndex.turns()[0].target };
+    out.pathFallback = keys(cr.render({ messages: [ { role: 'user', text: 'a' }, { role: 'assistant', text: 'b' } ] }, { getEditOverride: () => null }).semanticIndex);
+    const dup = cr.render({ chatId: 'c', snapshotId: 's', messages: [ { role: 'user', text: 'a', messageId: 'dup', turnId: 'tdup' }, { role: 'assistant', text: 'b', messageId: 'dup', turnId: 'tdup' }, { role: 'user', text: 'c', messageId: 'dup' } ] }, { getEditOverride: () => null }).semanticIndex;
+    out.duplicatesCanonical = { ...keys(dup), records: dup.messages().length, sourceRefs: dup.messages().map((m) => m.sourceRef) };
+    const richDup = cr.render({ chatId: 'c', snapshotId: 's', messages: [ { role: 'user', text: 'q', messageId: 'u1' }, { role: 'assistant', text: 'a', messageId: 'a1' } ], richTurns: [ richTurn('user', 1, '<div class="user-message-bubble-color"><div class="whitespace-pre-wrap">q</div></div>', { messageId: 'same', turnId: 'same-turn' }), richTurn('assistant', 2, '<div class="markdown prose"><p>a</p></div>', { messageId: 'same', turnId: 'same-turn' }) ] }, { getEditOverride: () => null });
+    out.duplicatesRich = { mode: richDup.renderMode, ...keys(richDup.semanticIndex), sourceRefs: richDup.semanticIndex.messages().map((m) => m.sourceRef), domIds: Array.from(richDup.turnsEl.querySelectorAll('.cgMsg')).map((h) => h.getAttribute('data-message-id')) };
+    const v3 = { schema: 'h2o.savedChatSnapshot', schemaVersion: 3, chatId: 'chat-v3', snapshotId: 'snap-v3', messages: [ { id: 'v3-u1', role: 'user', content: [{ type: 'text', text: 'question' }] }, { id: 'v3-a1', parentId: 'v3-u1', role: 'assistant', content: [{ type: 'text', text: 'answer' }] } ] };
+    const rv = cr.render(v3, { getEditOverride: () => null }); const ir = globalThis.H2O.Studio.Renderer.semanticIngress.fromSavedChatV3Snapshot(v3);
+    out.semantic = { mode: rv.renderMode, source: rv.semanticSource, basis: rv.semanticIndex.basis, lost: rv.semanticIndex.semanticCorrespondenceLost, conversationKeyIsRenderKey: rv.semanticIndex.getConversation().projectionKey === ir.renderKey, messageKeysAreRenderKeys: JSON.stringify(rv.semanticIndex.messages().map((m) => m.projectionKey)) === JSON.stringify(ir.messages.map((m) => m.renderKey)), ownerRefs: rv.semanticIndex.messages().map((m) => JSON.stringify(m.ownerRef)), irOwnerRefs: ir.messages.map((m) => JSON.stringify(m.ownerRef)), turnKeys: rv.semanticIndex.turns().map((t) => t.projectionKey), sourceRefs: rv.semanticIndex.messages().map((m) => m.sourceRef), ownerCarried: JSON.stringify(rv.semanticIndex.getConversation().ownerRef) === JSON.stringify(ir.ownerRef) };
+    const rich = cr.render({ chatId: 'c', snapshotId: 's', messages: [ { role: 'user', text: 'q', messageId: 'u1' }, { role: 'assistant', text: 'a', messageId: 'a1' } ], richTurns: [ richTurn('user', 1, '<div class="flex w-full flex-col items-end"><div class="user-message-bubble-color"><div class="whitespace-pre-wrap">rich q</div></div></div>', { messageId: 'rich-u1', turnId: 'rich-t1' }), richTurn('assistant', 2, '<div class="markdown prose"><p>rich a</p><div class="grid"><img alt="x"></div></div>', { messageId: 'rich-a1', turnId: 'rich-t2' }) ] }, { getEditOverride: () => null });
+    const ix = rich.semanticIndex; const tk = ix.turns()[0].projectionKey; const mk = ix.messages()[1].projectionKey;
+    out.rich = { mode: rich.renderMode, ...keys(ix), hostTargets: ix.messages().map((m) => m.target.className), providerDescendantsNotIndexed: ix.turns().length === 2 && ix.messages().length === 2, targetInsideTurn: ix.messages().every((m) => m.target.parentElement.classList.contains('cgTurn')) };
+    out.geometry = { beforeMount: ix.getGeometry(tk) };
+    host.replaceChildren(rich.root);
+    const g = ix.getGeometry(tk); const rect = ix.turns()[0].target.getBoundingClientRect();
+    out.geometry.afterMount = g; out.geometry.frozen = Object.isFrozen(g); out.geometry.plain = !(g instanceof DOMRect) && Object.getPrototypeOf(g) === Object.prototype; out.geometry.matchesLiveRect = g.x === rect.x && g.y === rect.y && g.width === rect.width && g.height === rect.height && g.top === rect.top && g.left === rect.left; out.geometry.message = ix.getGeometry(mk); out.geometry.conversation = ix.getGeometry(ix.getConversation().projectionKey);
+    out.geometry.fresh = ix.getGeometry(tk) !== g;
+    out.geometry.unknown = ix.getGeometry('nope');
+    rich.root.remove(); out.geometry.detached = ix.getGeometry(tk);
+    out.unknown = [ix.getTurn('nope'), ix.getMessage('nope'), ix.getTurn(mk), ix.getMessage(tk)];
+    out.api = Object.keys(ix); out.frozen = [Object.isFrozen(ix), Object.isFrozen(ix.turns()), ix.turns().every((t) => Object.isFrozen(t)), Object.isFrozen(ix.getConversation())];
+    out.attrs = Array.from(rich.root.querySelectorAll('*')).concat([rich.root]).flatMap((el) => Array.from(el.attributes).map((a) => a.name)).filter((n) => /^data-h2o-/.test(n) && !['data-h2o-turn-no', 'data-h2o-create-time', 'data-h2o-presentation-profile'].includes(n));
+    out.rendererGlobals = Object.keys(globalThis.H2O.Studio.Renderer).filter((k) => /current|index/i.test(k));
+    return out;
+  });
+
+  check('Semantic Index: one frozen read-only index per render, source/path keys, targets are the H2O shells (S4A slice A)', () => {
+    assert.deepEqual(s4a.canonical.resultKeys, ['root', 'turnsEl', 'scrollEl', 'assistantTurnEls', 'mountedTurnCount', 'renderMode', 'semanticSource', 'semanticIndex'], 'render result gains semanticIndex additively');
+    assert.deepEqual(s4a.api, ['schema', 'schemaVersion', 'version', 'renderMode', 'basis', 'semanticCorrespondenceLost', 'getConversation', 'getTurn', 'getMessage', 'turns', 'messages', 'getGeometry'], 'N: read-only API only');
+    assert.deepEqual(s4a.frozen, [true, true, true, true], 'C: frozen index, arrays and records');
+    assert.equal(s4a.canonical.basis, 'source'); assert.equal(s4a.canonical.conversation, 'conversation:source:snap-1');
+    assert.deepEqual(s4a.canonical.turns, ['turn:source:t-1', 'turn:source:t-2', 'turn:source-message:m-s1', 'turn:source-message:m-t1']);
+    assert.deepEqual(s4a.canonical.messages, ['message:source:m-u1', 'message:source:m-a1', 'message:source:m-s1', 'message:source:m-t1']);
+    assert.deepEqual(s4a.canonical.roles, ['user', 'assistant', 'system', 'tool']);
+    assert.equal(s4a.canonical.targetsAreShells, true, 'J: turn/message targets are the live cgTurn / cgMsg shells'); assert.equal(s4a.canonical.conversationTarget, true, 'J: conversation target is the cgFrame root');
+    assert.deepEqual(s4a.canonical.sourceRef, { turnId: 't-1', messageId: 'm-u1' }, 'G: source ids are sourceRef metadata'); assert.equal(s4a.canonical.ownerRef, null, 'G: never ownerRef');
+    assert.deepEqual(s4a.rerender, { distinct: true, sameKeys: true, distinctTargets: true }, 'B/D: a rerender yields a new instance with the same deterministic keys');
+    assert.deepEqual(s4a.pathFallback, { conversation: 'conversation:path:0', turns: ['turn:path:0', 'turn:path:1'], messages: ['message:path:0', 'message:path:1'] }, 'I: path fallback without ids');
+    assert.deepEqual(s4a.unknown, [null, null, null, null], 'K: unknown / cross-kind keys return null');
+    assert.deepEqual(s4a.attrs, [], 'O: no new data-h2o projection attributes'); assert.deepEqual(s4a.rendererGlobals, ['semanticIndex'], 'no mutable current index on the Renderer namespace');
+  });
+
+  check('Semantic Index: duplicate source ids stay collision-free (Renderer collision protection on the canonical path, ordinal suffix on the rich path) (S4A slice A)', () => {
+    /* Canonical normalization blanks later duplicate ids (accepted identity collision protection), so those records fall to path keys; nothing is dropped or overwritten. */
+    assert.equal(s4a.duplicatesCanonical.records, 3);
+    assert.deepEqual(s4a.duplicatesCanonical.messages, ['message:source:dup', 'message:path:1', 'message:path:2']);
+    assert.deepEqual(s4a.duplicatesCanonical.turns, ['turn:source:tdup', 'turn:path:1', 'turn:path:2']);
+    assert.deepEqual(s4a.duplicatesCanonical.sourceRefs, [{ turnId: 'tdup', messageId: 'dup' }, null, null]);
+    /* Rich turn metadata keeps its ids while the DOM dedupes them; the index disambiguates deterministically and preserves the sourceRef. */
+    assert.equal(s4a.duplicatesRich.mode, 'rich');
+    assert.deepEqual(s4a.duplicatesRich.messages, ['message:source:same', 'message:source:same:ordinal:1']);
+    assert.deepEqual(s4a.duplicatesRich.turns, ['turn:source:same-turn', 'turn:source:same-turn:ordinal:1']);
+    assert.deepEqual(s4a.duplicatesRich.sourceRefs, [{ turnId: 'same-turn', messageId: 'same' }, { turnId: 'same-turn', messageId: 'same' }], 'H: sourceRef preserved on the duplicate');
+    assert.deepEqual(s4a.duplicatesRich.domIds, ['same', null], 'the DOM-level identity collision protection is unchanged');
+  });
+
+  check('Semantic Index: the semantic-v3 path reuses Render IR renderKeys / ownerRefs; rich replay indexes only the H2O shells (S4A slice A)', () => {
+    assert.equal(s4a.semantic.mode, 'canonical'); assert.equal(s4a.semantic.source, 'savedChatSnapshotV3'); assert.equal(s4a.semantic.basis, 'semantic'); assert.equal(s4a.semantic.lost, false);
+    assert.equal(s4a.semantic.conversationKeyIsRenderKey, true, 'F: conversation key = Render IR renderKey'); assert.equal(s4a.semantic.messageKeysAreRenderKeys, true, 'F: message keys = Render IR renderKeys'); assert.equal(s4a.semantic.ownerCarried, true);
+    assert.deepEqual(s4a.semantic.ownerRefs, s4a.semantic.irOwnerRefs, 'F: ownerRefs reused'); assert.ok(s4a.semantic.turnKeys.every((k) => k.startsWith('turn:semantic:message%3A')), 'F: turn keys wrap the message renderKey');
+    assert.deepEqual(s4a.semantic.sourceRefs, [{ messageId: 'v3-u1' }, { messageId: 'v3-a1' }], 'G: v3 ids stay sourceRef metadata');
+    assert.equal(s4a.rich.mode, 'rich'); assert.deepEqual(s4a.rich.turns, ['turn:source:rich-t1', 'turn:source:rich-t2']); assert.deepEqual(s4a.rich.messages, ['message:source:rich-u1', 'message:source:rich-a1']);
+    assert.equal(s4a.rich.providerDescendantsNotIndexed, true, 'provider descendants (.grid, provider ids) are not shell authority'); assert.equal(s4a.rich.targetInsideTurn, true); assert.deepEqual(s4a.rich.hostTargets, ['cgMsg', 'cgMsg']);
+  });
+
+  check('Semantic Index: geometry is a fresh immutable viewport snapshot after mount and null before mount / after detach (S4A slice A)', () => {
+    assert.equal(s4a.geometry.beforeMount, null, 'M: not mounted -> null');
+    const g = s4a.geometry.afterMount; assert.ok(g && g.width > 0 && g.height > 0, 'L: measurable after mount');
+    assert.deepEqual(Object.keys(g), ['x', 'y', 'width', 'height', 'top', 'right', 'bottom', 'left', 'coordinateSpace']); assert.equal(g.coordinateSpace, 'viewport');
+    assert.equal(s4a.geometry.frozen, true); assert.equal(s4a.geometry.plain, true, 'L: plain frozen object, not a DOMRect'); assert.equal(s4a.geometry.matchesLiveRect, true); assert.equal(s4a.geometry.fresh, true, 'no cached geometry');
+    assert.ok(s4a.geometry.message && s4a.geometry.message.height > 0); assert.ok(s4a.geometry.conversation && s4a.geometry.conversation.height > 0);
+    assert.equal(s4a.geometry.unknown, null); assert.equal(s4a.geometry.detached, null, 'M: detached -> null');
   });
 
   await browser.close();

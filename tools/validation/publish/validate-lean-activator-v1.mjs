@@ -161,9 +161,10 @@ const BATCH11_VALIDATOR_SHA256 = "c8a1abd5c21a9328dc13a8bf19aba508ab476095d9e988
 // authority") advanced the publisher, so the two roles are now pinned separately:
 // BASE_HEAD immutability above, executed-fixture bytes here. M03 P2 S2A T4
 // Stage B advanced the publisher again (markdown STUDIO_REQUIRED_ORDER), and
-// M03 P3 S3B T6 admitted the Renderer presentation profile, so this moving
-// pin follows the new committed publisher bytes.
-const SYNCED_PUBLISHER_SHA256 = "f1f41c9c9a6c1d09c5483ae6d507b7706744b5081eec629de00f3a900a5959ea";
+// M03 P3 S3B T6 admitted the Renderer presentation profile, and M03 P4 S4A T8
+// admitted the Renderer semantic index, so this moving pin follows the new
+// committed publisher bytes.
+const SYNCED_PUBLISHER_SHA256 = "d258f26f04561503531a37344c14e4a15592e3ba8059a03d20b1e4f6a680853f";
 const ACCEPTED_ACTIVATOR_SHA256 = "531bb4e9b5d7d61584e013d0d10c8007c78f75498988ba64bac4d24a8d4f2f36";
 const REQUIRED_FILES = Object.freeze([
   "manifest.json", "loader.js", "bg.js", "title-contract-bridge.js",

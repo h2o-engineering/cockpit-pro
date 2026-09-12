@@ -791,6 +791,24 @@ function attachUserAttachmentsToTurn(turnEl, messageEl, attachmentsRaw){
  */
 const PRESENTATION_PROFILE_ATTR = "data-h2o-presentation-profile";
 
+/* S4A: the Semantic Index module is a passive Renderer dependency admitted by
+ * the Studio script chain; like the PresentationProfile it has no embedded
+ * fallback, so a missing module fails clearly instead of rendering an
+ * index-less result. */
+function activeSemanticIndexModule(){
+  const api = Studio.Renderer && Studio.Renderer.semanticIndex;
+  if (!api || api.__installed !== true || typeof api.createShellIndex !== "function"){
+    throw new Error("Studio Chat Renderer requires H2O.Studio.Renderer.semanticIndex (renderer/semantic/semantic-index.v1.js); no embedded index fallback exists");
+  }
+  return api;
+}
+
+/* Projection metadata the Renderer knows while it builds each turn shell (role,
+ * turn number, source ids as supplied by the normalized input). Kept beside the
+ * element, never on it: no DOM attribute is emitted for it, and the entries die
+ * with their shells. The Semantic Index reads it as source metadata only. */
+const TURN_PROJECTION_META = new WeakMap();
+
 function activePresentationProfile(){
   const api = Studio.Renderer && Studio.Renderer.presentationProfile;
   if (!api || api.__installed !== true || typeof api.reference !== "function"){
@@ -839,6 +857,13 @@ function buildTurnShell(role, mode, meta = {}){
   if (role === "assistant" && meta.answerIdx > 0){
     turn.dataset.turnIdx = String(meta.answerIdx);
   }
+  TURN_PROJECTION_META.set(turn, Object.freeze({
+    role,
+    mode,
+    turnNo: Number(meta.turnNo) > 0 ? Number(meta.turnNo) : 0,
+    messageId: String(meta.messageId || "").trim(),
+    turnId: String(meta.turnId || "").trim(),
+  }));
   return turn;
 }
 
@@ -1346,6 +1371,20 @@ function render(inputRaw, options){
       : buildCanonicalConversation(turnsEl, input);
   }
 
+  /* S4A: one read-only Semantic Index per render result, built over the final
+   * H2O shells (cgFrame / cgTurn / cgMsg). The semantic-v3 path hands its
+   * accepted Render IR conversation over so the index reuses its renderKeys and
+   * ownerRefs; every other path keys on source ids or projection order. The
+   * index is owned by this result and never stored on the Renderer. */
+  const semanticIndex = activeSemanticIndexModule().createShellIndex({
+    root,
+    turnsEl,
+    renderMode,
+    source: { chatId: input.chatId, snapshotId: input.snapshotId },
+    semanticConversation: renderMode === "canonical" ? semanticConversation : null,
+    describeTurn: (turnEl) => TURN_PROJECTION_META.get(turnEl) || null,
+  });
+
   return {
     root,
     turnsEl,
@@ -1354,6 +1393,7 @@ function render(inputRaw, options){
     mountedTurnCount: turnsEl.children.length,
     renderMode,
     semanticSource: semanticConversation ? "savedChatSnapshotV3" : "",
+    semanticIndex,
   };
 }
 

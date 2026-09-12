@@ -107,6 +107,7 @@ const STUDIO_REQUIRED_ORDER = Object.freeze([
   "renderer/markdown/markdown-ir-adapter.v1.js",
   "renderer/semantic/render-ir.v1.js",
   "renderer/semantic/semantic-ingress.v1.js",
+  "renderer/semantic/semantic-index.v1.js",
   "renderer/presentation/presentation-profile.v1.js",
   "renderer/content/content-renderer.v1.js",
   "renderer/chat-renderer.studio.js",

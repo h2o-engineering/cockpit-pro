@@ -703,6 +703,11 @@
        Owner HTML parts reach the DOM only as sanitizer-v2 fragments inside
        H2O-owned content nodes. -->
   <script src="./renderer/semantic/semantic-ingress.v1.js"></script>
+  <!-- S4A/T8: read-only Semantic Index (conversation / turn / message
+       projection identity + geometry lookup over the H2O shells). Passive
+       Renderer dependency; one index per render result, no global state.
+       Must load before the Renderer that consumes it. -->
+  <script src="./renderer/semantic/semantic-index.v1.js"></script>
   <!-- S3B/T6: PresentationProfile contract + ChatGPT reference profile. No
        semantic dependency; loads before the renderers that consume its
        presentation class hooks. -->

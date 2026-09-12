@@ -33,6 +33,9 @@ const SEMANTIC_SOURCE_RELS = Object.freeze([
   'src-surfaces-base/studio/renderer/markdown/markdown-ir-adapter.v1.js',
 ]);
 const CONTENT_RENDERER_REL = 'src-surfaces-base/studio/renderer/content/content-renderer.v1.js';
+const SEMANTIC_INDEX_REL = 'src-surfaces-base/studio/renderer/semantic/semantic-index.v1.js';
+const RENDER_IR_REL = 'src-surfaces-base/studio/renderer/semantic/render-ir.v1.js';
+const PACK_STUDIO_REL = 'tools/product/studio/pack-studio.mjs';
 
 function readRepo(rel) {
   return fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');
@@ -764,6 +767,10 @@ function createRendererBuildHarness(richResult) {
      * must stay dormant and the rich/canonical decision must be unchanged. */
     semanticV3Conversation: () => null,
     buildSemanticConversation: () => { throw new Error('semantic branch must not run for non-v3 input'); },
+    /* S4A: render() builds one Semantic Index per result through the installed
+     * module; the decision harness records the call and returns a marker. */
+    TURN_PROJECTION_META: new WeakMap(),
+    activeSemanticIndexModule: () => ({ createShellIndex: (input) => ({ __stubIndex: true, renderMode: input.renderMode, semanticConversation: input.semanticConversation }) }),
     mountRichTurns: (container) => {
       richMountCalls += 1;
       for (let i = 0; i < richResult.mountedTurnCount; i += 1) container.appendChild({ kind: 'rich' });
@@ -886,6 +893,7 @@ function validateStructuralShellAuthority() {
     ROLE_ATTR: 'data-message-author-role', MESSAGE_ID_ATTR: 'data-message-id', TURN_ID_ATTR: 'data-turn-id',
     ROLES: roleContract,
     stampReplayTurnMeta: () => {},
+    TURN_PROJECTION_META: new WeakMap(),
     attachUserAttachmentsToTurn: () => {},
     cleanReaderUserText: (text) => text,
     renderSemanticBody: (bodyEl) => { bodyEl.appendChild(new FakeDomElement('p')); },
@@ -1027,6 +1035,7 @@ function validateRichUserBubbleAuthority() {
     TESTID_ATTR: 'data-testid', TURN_TESTID: 'conversation-turn', ROLE_ATTR: 'data-message-author-role',
     MESSAGE_ID_ATTR: 'data-message-id', TURN_ID_ATTR: 'data-turn-id', ROLES: roleContract,
     stampReplayTurnMeta: () => {},
+    TURN_PROJECTION_META: new WeakMap(),
     removeNativeUserAttachmentImages: () => {},
     buildUserAttachmentGrid: () => { const grid = new FakeDomElement('div'); grid.className = 'cgUserAttachmentGrid'; return grid; },
     seamCalls,
@@ -1358,6 +1367,7 @@ function validatePresentationProfileContract() {
     Element: FakeDomElement, String, Number, Set, Array, Object,
     TESTID_ATTR: 'data-testid', TURN_TESTID: 'conversation-turn', TURNS_TESTID: 'conversation-turns',
     ROLE_ATTR: 'data-message-author-role', MESSAGE_ID_ATTR: 'data-message-id', TURN_ID_ATTR: 'data-turn-id', ROLES: roleContract,
+    TURN_PROJECTION_META: new WeakMap(),
   });
   Object.assign(seams, presentationProfileGlobals(seams));
   vm.runInContext([
@@ -1455,6 +1465,7 @@ function validateRichShellPresentationOwnership() {
     TESTID_ATTR: 'data-testid', TURN_TESTID: 'conversation-turn', TURNS_TESTID: 'conversation-turns',
     ROLE_ATTR: 'data-message-author-role', MESSAGE_ID_ATTR: 'data-message-id', TURN_ID_ATTR: 'data-turn-id', ROLES: roleContract,
     stampReplayTurnMeta: () => {},
+    TURN_PROJECTION_META: new WeakMap(),
   });
   Object.assign(seams, presentationProfileGlobals(seams));
   vm.runInContext([
@@ -1568,6 +1579,7 @@ function validatePersistedEditPresentationOwnership() {
     TESTID_ATTR: 'data-testid', TURN_TESTID: 'conversation-turn', TURNS_TESTID: 'conversation-turns',
     ROLE_ATTR: 'data-message-author-role', MESSAGE_ID_ATTR: 'data-message-id', TURN_ID_ATTR: 'data-turn-id', ROLES: roleContract,
     stampReplayTurnMeta: () => {},
+    TURN_PROJECTION_META: new WeakMap(),
   });
   Object.assign(seams, presentationProfileGlobals(seams));
   vm.runInContext([
@@ -1614,6 +1626,7 @@ function validateAttachmentPresentationOwnership() {
     TESTID_ATTR: 'data-testid', TURN_TESTID: 'conversation-turn', TURNS_TESTID: 'conversation-turns',
     ROLE_ATTR: 'data-message-author-role', MESSAGE_ID_ATTR: 'data-message-id', TURN_ID_ATTR: 'data-turn-id', ROLES: roleContract,
     stampReplayTurnMeta: () => {},
+    TURN_PROJECTION_META: new WeakMap(),
     removeNativeUserAttachmentImages: () => {},
   });
   Object.assign(seams, presentationProfileGlobals(seams));
@@ -1722,6 +1735,7 @@ function validateFinalRendererCssBoundary() {
     TESTID_ATTR: 'data-testid', TURN_TESTID: 'conversation-turn', TURNS_TESTID: 'conversation-turns',
     ROLE_ATTR: 'data-message-author-role', MESSAGE_ID_ATTR: 'data-message-id', TURN_ID_ATTR: 'data-turn-id', ROLES: roleContract,
     stampReplayTurnMeta: () => {},
+    TURN_PROJECTION_META: new WeakMap(),
   });
   Object.assign(seams, presentationProfileGlobals(seams));
   vm.runInContext([
@@ -1783,6 +1797,109 @@ function validateFinalRendererCssBoundary() {
   assert.match(rendererSource, /turn\.className = \["cgTurn", `cgTurn--\$\{role\}`, \.\.\.activePresentationProfile\(\)\.turnClasses\(role, mode\)\]\.join\(" "\);|cgTurn--\$\{role\}/, 'L: the Renderer stamps cgTurn--<role> structurally');
 }
 
+/* M03 P4 S4A T8 slice A - Semantic Index shell foundation.
+ *
+ * Executes the REAL index module (and the real Render IR for the semantic
+ * path) over FakeDomElement H2O shells, and pins the Renderer integration:
+ * one frozen read-only index per render result, projection-local keys that
+ * reuse Render IR identity, source ids as metadata, deterministic path /
+ * ordinal fallbacks, no navigation or mutation API, no new DOM attributes. */
+function validateSemanticIndexFoundation() {
+  /* Records are built in the module's VM realm, so structural equality is compared as JSON (strict deepEqual also compares prototypes). */
+  const deep = (actual, expected, message) => assert.equal(JSON.stringify(actual), JSON.stringify(expected), message);
+  const indexSource = readRepo(SEMANTIC_INDEX_REL);
+  const irSource = readRepo(RENDER_IR_REL);
+  const packSource = readRepo(PACK_STUDIO_REL);
+  /* A. Module contract: frozen, versioned, factory-only, no global current index, no DOM/persistence/navigation authority. */
+  assert.match(indexSource, /^\/\/ @version 0\.1\.0-m03-s4a\n"use strict";/, 'A: module version comment convention');
+  const context = vm.createContext({});
+  vm.runInContext(`${irSource}\n${indexSource}\nthis.__ir = this.H2O.Studio.Renderer.renderIR; this.__ix = this.H2O.Studio.Renderer.semanticIndex;`, context);
+  const api = context.__ix; const ir = context.__ir;
+  assert.equal(api.__installed, true); assert.equal(api.__version, '0.1.0-m03-s4a'); assert.equal(api.schema, 'h2o.renderer.semantic-index'); assert.equal(api.schemaVersion, 1);
+  assert.equal(Object.isFrozen(api), true, 'A: module namespace frozen');
+  deep(Object.keys(api).sort(), ['__installed', '__version', 'bases', 'createShellIndex', 'kinds', 'schema', 'schemaVersion'], 'A: factory-only module surface');
+  deep([...api.kinds], ['conversation', 'turn', 'message'], 'A: slice-A kinds only');
+  const codeOnly = indexSource.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/.*$/gm, '');
+  assert.doesNotMatch(codeOnly, /setAttribute|innerHTML|localStorage|sessionStorage|indexedDB|MutationObserver|ResizeObserver|IntersectionObserver|scrollIntoView|scrollTo\(|\.focus\(|Date\.now|Math\.random|randomUUID|outerHTML|addEventListener/, 'A: the index never mutates the DOM, persists, observes, navigates or uses non-deterministic identity');
+  assert.doesNotMatch(codeOnly, /currentSemanticIndex|Renderer\.current/, 'A: no singleton current index');
+  assert.doesNotMatch(codeOnly, /^  (const|let|var) \w+ = new (Map|WeakMap|Set)\(/m, 'A: no module-level registry (maps live inside createShellIndex only)');
+  /* Fake H2O shells as the Renderer emits them. */
+  const shell = (role, opts = {}) => {
+    const turn = new FakeDomElement('article'); turn.className = `cgTurn cgTurn--${role} wbTurn wbTurn--fallback wbTurn--${role}`; turn.setAttribute('data-turn', role);
+    if (opts.turnNo) turn.setAttribute('data-h2o-turn-no', String(opts.turnNo));
+    const host = new FakeDomElement('div'); host.className = `cgMsg cgMsg--${role}`; host.setAttribute('data-message-author-role', role);
+    if (opts.messageId) host.setAttribute('data-message-id', opts.messageId);
+    if (opts.turnId) host.setAttribute('data-turn-id', opts.turnId);
+    if (opts.grid) { const grid = new FakeDomElement('div'); grid.className = 'cgUserAttachmentGrid'; turn.appendChild(grid); }
+    turn.appendChild(host);
+    return { turn, host, meta: Object.freeze({ role, mode: 'canonical', turnNo: opts.turnNo || 0, messageId: opts.messageId || '', turnId: opts.turnId || '' }) };
+  };
+  const frame = (shells) => { const root = new FakeDomElement('div'); root.className = 'cgFrame'; const turnsEl = new FakeDomElement('section'); turnsEl.className = 'cgScroll wbRichRoot'; for (const s of shells) turnsEl.appendChild(s.turn); root.appendChild(turnsEl); const meta = new Map(shells.map((s) => [s.turn, s.meta])); return { root, turnsEl, describeTurn: (el) => meta.get(el) || null }; };
+  const build = (shells, extra = {}) => { const f = frame(shells); return api.createShellIndex({ root: f.root, turnsEl: f.turnsEl, renderMode: 'canonical', source: { chatId: 'chat-1', snapshotId: 'snap-1' }, semanticConversation: null, describeTurn: f.describeTurn, ...extra }); };
+  /* B/C/N: instance shape - read-only, frozen, no navigation or mutation methods. */
+  const shellsA = [shell('user', { turnNo: 1, messageId: 'm-u1', turnId: 't-1', grid: true }), shell('assistant', { turnNo: 2, messageId: 'm-a1', turnId: 't-2' }), shell('system', { turnNo: 3, messageId: 'm-s1' }), shell('tool', { turnNo: 4 })];
+  const ixA = build(shellsA);
+  assert.equal(Object.isFrozen(ixA), true, 'C: index instance frozen');
+  deep(Object.keys(ixA).sort(), ['basis', 'getConversation', 'getGeometry', 'getMessage', 'getTurn', 'messages', 'renderMode', 'schema', 'schemaVersion', 'semanticCorrespondenceLost', 'turns', 'version'], 'N: read-only instance API only');
+  for (const forbidden of ['register', 'set', 'delete', 'clear', 'update', 'mutate', 'append', 'replace', 'scrollTo', 'scrollIntoView', 'focus', 'select', 'highlight', 'decorate', 'navigate', 'selectTurn']) assert.equal(forbidden in ixA, false, `N: no ${forbidden} on the index`);
+  assert.equal(Object.isFrozen(ixA.turns()) && Object.isFrozen(ixA.messages()), true, 'C: record arrays frozen');
+  for (const rec of [ixA.getConversation(), ...ixA.turns(), ...ixA.messages()]) { assert.equal(Object.isFrozen(rec), true, 'C: records frozen'); if (rec.sourceRef) assert.equal(Object.isFrozen(rec.sourceRef), true, 'C: sourceRef frozen'); }
+  /* D/E/G/I/J: source keys, source-message turn fallback, path fallback, uniqueness, targets, ownerRef stays null on the source path. */
+  assert.equal(ixA.getConversation().projectionKey, 'conversation:source:snap-1'); deep(ixA.getConversation().sourceRef, { chatId: 'chat-1', snapshotId: 'snap-1' }); assert.equal(ixA.getConversation().ownerRef, null, 'G: source ids never become ownerRef'); assert.equal(ixA.getConversation().target.className, 'cgFrame', 'J: conversation target is the cgFrame root'); assert.equal(ixA.getConversation().target.children[0].children[0], shellsA[0].turn, 'J: the root owns the indexed turn shells');
+  deep(ixA.turns().map((t) => t.projectionKey), ['turn:source:t-1', 'turn:source:t-2', 'turn:source-message:m-s1', 'turn:path:3'], 'D/I: turn keys - source, source-message fallback, path fallback');
+  deep(ixA.messages().map((m) => m.projectionKey), ['message:source:m-u1', 'message:source:m-a1', 'message:source:m-s1', 'message:path:3'], 'D/I: message keys');
+  deep(ixA.turns().map((t) => t.role), ['user', 'assistant', 'system', 'tool'], 'all four roles indexed');
+  deep(ixA.turns().map((t) => [t.ordinal, t.turnNo]), [[0, 1], [1, 2], [2, 3], [3, 4]]);
+  deep(ixA.messages()[0].sourceRef, { turnId: 't-1', messageId: 'm-u1' }, 'G: source ids are sourceRef metadata'); assert.equal(ixA.messages()[0].ownerRef, null); assert.equal(ixA.messages()[3].sourceRef, null);
+  assert.equal(ixA.getTurn('turn:source:t-1').target, shellsA[0].turn, 'J: turn target is the H2O turn shell'); assert.equal(ixA.getMessage('message:source:m-u1').target, shellsA[0].host, 'J: message target is the cgMsg host, not the attachment grid');
+  assert.equal(ixA.getTurn('turn:source:t-1').messageKey, 'message:source:m-u1'); assert.equal(ixA.getMessage('message:source:m-u1').turnKey, 'turn:source:t-1');
+  deep(ixA.getConversation().turnKeys, ixA.turns().map((t) => t.projectionKey));
+  const allKeys = [ixA.getConversation().projectionKey, ...ixA.turns().map((t) => t.projectionKey), ...ixA.messages().map((m) => m.projectionKey)];
+  assert.equal(new Set(allKeys).size, allKeys.length, 'E: projection keys unique');
+  /* K: unknown / cross-kind keys return null, never throw. */
+  for (const bad of ['nope', '', null, undefined, 42, 'message:source:m-u1']) assert.equal(ixA.getTurn(bad), null); for (const bad of ['nope', 'turn:source:t-1']) assert.equal(ixA.getMessage(bad), null);
+  assert.equal(ixA.getGeometry('nope'), null, 'K: unknown geometry null');
+  /* M: fake targets are never connected to a live document -> geometry null without throwing. */
+  assert.equal(ixA.getGeometry('turn:source:t-1'), null, 'M: unmeasurable (detached / no live document) target -> null');
+  /* B/D: determinism + distinct instances. */
+  const ixA2 = build(shellsA);
+  assert.notEqual(ixA2, ixA, 'B: each build is a distinct instance'); deep(ixA2.turns().map((t) => t.projectionKey), ixA.turns().map((t) => t.projectionKey), 'D: deterministic keys for equivalent input');
+  /* H: duplicate source ids reaching the index never overwrite; later duplicates get a deterministic ordinal suffix and keep their sourceRef. */
+  const shellsDup = [shell('user', { turnNo: 1, messageId: 'dup', turnId: 'tdup' }), shell('assistant', { turnNo: 2, messageId: 'dup', turnId: 'tdup' }), shell('user', { turnNo: 3, messageId: 'dup' })];
+  const ixDup = build(shellsDup);
+  deep(ixDup.messages().map((m) => m.projectionKey), ['message:source:dup', 'message:source:dup:ordinal:1', 'message:source:dup:ordinal:2'], 'H: collision-safe message keys');
+  deep(ixDup.turns().map((t) => t.projectionKey), ['turn:source:tdup', 'turn:source:tdup:ordinal:1', 'turn:source-message:dup'], 'H: collision-safe turn keys');
+  assert.equal(ixDup.messages().length, 3, 'H: no record dropped'); deep(ixDup.messages()[1].sourceRef, { turnId: 'tdup', messageId: 'dup' }, 'H: sourceRef preserved on the duplicate');
+  assert.equal(ixDup.getMessage('message:source:dup').target, shellsDup[0].host, 'H: first record not overwritten');
+  /* F: semantic path - Render IR renderKeys / ownerRefs are reused verbatim; turns wrap the message key. */
+  const conversation = ir.createConversation({ ownerRef: { type: 'h2o.savedChat.snapshot', id: 'chat-v3', version: 'snap-v3' }, messages: [ { role: 'user', ownerRef: { type: 'h2o.savedChat.message', id: 'v3-u1' }, blocks: [] }, { role: 'assistant', ownerRef: { type: 'h2o.savedChat.message', id: 'v3-a1', anchor: 'v3-u1' }, blocks: [] } ] });
+  const shellsV3 = [shell('user', { turnNo: 1, messageId: 'v3-u1' }), shell('assistant', { turnNo: 2, messageId: 'v3-a1' })];
+  const ixV3 = build(shellsV3, { semanticConversation: conversation, source: { chatId: 'chat-v3', snapshotId: 'snap-v3' } });
+  assert.equal(ixV3.basis, 'semantic'); assert.equal(ixV3.semanticCorrespondenceLost, false);
+  assert.equal(ixV3.getConversation().projectionKey, conversation.renderKey, 'F: conversation key is the Render IR renderKey'); deep(ixV3.getConversation().ownerRef, conversation.ownerRef, 'F: conversation ownerRef reused');
+  deep(ixV3.messages().map((m) => m.projectionKey), conversation.messages.map((m) => m.renderKey), 'F: message keys are the Render IR renderKeys'); deep(ixV3.messages().map((m) => m.ownerRef), conversation.messages.map((m) => m.ownerRef), 'F: message ownerRefs reused');
+  deep(ixV3.turns().map((t) => t.projectionKey), conversation.messages.map((m) => `turn:semantic:${encodeURIComponent(m.renderKey)}`), 'F: turn keys wrap the message renderKey by kind');
+  deep(ixV3.turns().map((t) => t.ownerRef), [null, null], 'G: turns carry no owner identity of their own'); deep(ixV3.messages()[0].sourceRef, { messageId: 'v3-u1' }, 'G: v3 ids stay sourceRef metadata');
+  /* One-to-one correspondence is required; a mismatch falls back to source/path identity instead of guessing ownership. */
+  const ixLost = build(shellsV3.slice(0, 1), { semanticConversation: conversation });
+  assert.equal(ixLost.semanticCorrespondenceLost, true); assert.equal(ixLost.basis, 'source'); assert.equal(ixLost.messages()[0].projectionKey, 'message:source:v3-u1'); assert.equal(ixLost.messages()[0].ownerRef, null);
+  /* Renderer integration (static): one index per render result, resolved from the installed module, projection meta kept off the DOM. */
+  const renderFn = extractFunction(rendererSource, 'render');
+  assert.match(renderFn, /const semanticIndex = activeSemanticIndexModule\(\)\.createShellIndex\(\{/, 'render() builds the index through the installed module');
+  assert.match(renderFn, /semanticConversation: renderMode === "canonical" \? semanticConversation : null/, 'the semantic conversation reaches the index only on the canonical (semantic-v3) path');
+  assert.match(renderFn, /semanticSource: semanticConversation \? "savedChatSnapshotV3" : "",\s*semanticIndex,\s*\};/, 'the index is returned additively as semanticIndex');
+  assert.match(extractFunction(rendererSource, 'activeSemanticIndexModule'), /no embedded index fallback exists/, 'no embedded index fallback');
+  assert.match(rendererSource, /const TURN_PROJECTION_META = new WeakMap\(\);/, 'projection meta lives in a WeakMap beside the shells');
+  assert.match(extractFunction(rendererSource, 'buildTurnShell'), /TURN_PROJECTION_META\.set\(turn, Object\.freeze\(\{/, 'buildTurnShell records frozen projection meta');
+  assert.doesNotMatch(rendererSource, /currentSemanticIndex|data-h2o-projection|data-h2o-turn-key|data-h2o-message-key|data-h2o-block-key/, 'O: no mutable current index and no new projection DOM attributes');
+  assert.doesNotMatch(extractFunction(rendererSource, 'buildTurnShell'), /setAttribute\("data-h2o-(?!turn-no|create-time)/, 'O: buildTurnShell emits no new data-h2o attributes');
+  /* Admission: studio.html + both pack lists carry the module once, after semantic ingress and before the profile / renderers. */
+  const refs = [...studioHtmlSource.matchAll(/<script src="\.\/([^"?]+)(?:\?[^"]*)?"><\/script>/g)].map((m) => m[1]);
+  assert.equal(refs.filter((r) => r === 'renderer/semantic/semantic-index.v1.js').length, 1, 'studio.html admits the index module exactly once');
+  assert.ok(refs.indexOf('renderer/semantic/semantic-index.v1.js') > refs.indexOf('renderer/semantic/semantic-ingress.v1.js') && refs.indexOf('renderer/semantic/semantic-index.v1.js') < refs.indexOf('renderer/presentation/presentation-profile.v1.js') && refs.indexOf('renderer/semantic/semantic-index.v1.js') < refs.indexOf('renderer/chat-renderer.studio.js'), 'index module loads after semantic ingress and before its consumers');
+  assert.equal((packSource.match(/"renderer\/semantic\/semantic-index\.v1\.js",/g) || []).length, 2, 'pack-studio carries the module in both source and output lists');
+}
+
 function validateExtractedRendererBoundary() {
   const sanitizerTag = '<script src="./platform/html-sanitizer.js"></script>';
   const rendererTag = '<script src="./renderer/chat-renderer.studio.js"></script>';
@@ -1816,6 +1933,7 @@ validateRichShellPresentationOwnership();
 validatePersistedEditPresentationOwnership();
 validateAttachmentPresentationOwnership();
 validateFinalRendererCssBoundary();
+validateSemanticIndexFoundation();
 validateExtractedRendererBoundary();
 
 console.log('Studio renderer contract repair validation passed');

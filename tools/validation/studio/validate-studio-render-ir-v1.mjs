@@ -220,4 +220,39 @@ check('S0. T2 invariants survive the vocabulary addition', () => {
   assert.doesNotMatch(source, /localStorage|sessionStorage|indexedDB|document\./);
 });
 
+/* M03 P4 S4A T8 slice A: the Semantic Index projects Render IR identity, it
+ * never competes with it. Loaded into the same sandbox so the invariant is
+ * checked against the real modules, over minimal element-like shells. */
+check('S4A. the Semantic Index reuses Render IR renderKey / ownerRef verbatim and mints no competing or durable identity', () => {
+  const indexPath = path.join(REPO_ROOT, 'src-surfaces-base/studio/renderer/semantic/semantic-index.v1.js');
+  const indexSource = fs.readFileSync(indexPath, 'utf8');
+  vm.runInContext(indexSource, sandbox, { filename: indexPath });
+  const index = sandbox.H2O.Studio.Renderer.semanticIndex;
+  assert.equal(index.__installed, true); assert.equal(index.schema, 'h2o.renderer.semantic-index'); assert.equal(index.schemaVersion, 1);
+  assert.equal(Object.isFrozen(index), true);
+  const conversation = ir.createConversation({ ownerRef: { type: 'h2o.savedChat.snapshot', id: 'chat', version: 'snap' }, messages: [
+    { role: 'user', ownerRef: { type: 'h2o.savedChat.message', id: 'u1' }, blocks: [{ kind: 'paragraph', children: [{ kind: 'text', text: 'q' }] }] },
+    { role: 'assistant', ownerRef: { type: 'h2o.savedChat.message', id: 'a1', anchor: 'u1' }, blocks: [] },
+  ] });
+  assert.equal(ir.validate(conversation).ok, true);
+  /* Minimal element-like shells: nodeType 1, class list, attributes, children. */
+  const el = (className, attrs = {}) => { const node = { nodeType: 1, className, children: [], attrs, classList: { contains: (c) => className.split(' ').includes(c) }, getAttribute: (n) => (n in attrs ? attrs[n] : null), isConnected: false }; return node; };
+  const shells = conversation.messages.map((m, i) => { const turn = el(`cgTurn cgTurn--${m.role}`, { 'data-turn': m.role, 'data-h2o-turn-no': String(i + 1) }); const host = el(`cgMsg cgMsg--${m.role}`, { 'data-message-author-role': m.role }); turn.children.push(host); return turn; });
+  const turnsEl = el('cgScroll wbRichRoot'); turnsEl.children.push(...shells); const root = el('cgFrame'); root.children.push(turnsEl);
+  const built = index.createShellIndex({ root, turnsEl, renderMode: 'canonical', source: { chatId: 'chat', snapshotId: 'snap' }, semanticConversation: conversation, describeTurn: () => null });
+  assert.equal(built.basis, 'semantic');
+  assert.equal(built.getConversation().projectionKey, conversation.renderKey, 'conversation projection key is the Render IR renderKey');
+  assert.equal(JSON.stringify(built.getConversation().ownerRef), JSON.stringify(conversation.ownerRef));
+  assert.equal(JSON.stringify(built.messages().map((m) => m.projectionKey)), JSON.stringify(conversation.messages.map((m) => m.renderKey)), 'message projection keys are the Render IR renderKeys, verbatim');
+  assert.equal(JSON.stringify(built.messages().map((m) => m.ownerRef)), JSON.stringify(conversation.messages.map((m) => m.ownerRef)), 'ownerRefs pass through untouched');
+  assert.equal(JSON.stringify(built.turns().map((t) => t.projectionKey)), JSON.stringify(conversation.messages.map((m) => `turn:semantic:${encodeURIComponent(m.renderKey)}`)), 'turn keys wrap the message renderKey by projection kind');
+  for (const rec of [built.getConversation(), ...built.turns(), ...built.messages()]) {
+    assert.equal(Object.prototype.hasOwnProperty.call(rec, 'contentBlockId'), false, 'no Renderer-owned durable id');
+    assert.equal(Object.isFrozen(rec), true);
+  }
+  assert.doesNotMatch(indexSource, /contentBlockId|Date\.now|Math\.random|randomUUID|localStorage|sessionStorage|indexedDB/, 'the index neither mints durable identity nor persists');
+  /* The Render IR module itself is untouched by the index: same frozen API, same key algorithm. */
+  assert.equal(ir.makeRenderKey('message', 'x', 0), 'message:owner%3Ax'); assert.equal(ir.makeRenderKey('message', '', 3), 'message:path%3A3');
+});
+
 console.log(`PASS ${checks.length}`);
