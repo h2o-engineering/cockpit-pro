@@ -1,0 +1,976 @@
+{
+  "schema": "h2o.renderer.performance-budget",
+  "schemaVersion": 1,
+  "budgetVersion": "m03-s5c-v1",
+  "productBaselineCommit": "e786d920ec3aa287d38197db54270c0b8ae64e1b",
+  "generatedAt": "2026-09-12T19:38:14.088Z",
+  "environment": {
+    "browserFamily": "chromium",
+    "browserVersion": "147.0.7727.15",
+    "playwrightVersion": "1.59.1",
+    "platform": "darwin",
+    "arch": "arm64",
+    "osRelease": "25.6.0",
+    "osMajor": "25",
+    "cpuModel": "Apple M2 Pro",
+    "hardwareConcurrency": 12
+  },
+  "strictEnvironmentKeys": [
+    "browserFamily",
+    "browserVersion",
+    "platform",
+    "arch",
+    "osMajor",
+    "cpuModel",
+    "hardwareConcurrency"
+  ],
+  "derivation": {
+    "reference": "median of the per-run medians",
+    "dispersion": "median absolute deviation (MAD) of the per-run medians",
+    "ceilingFormula": "max(reference * 1.20, reference + 3 * MAD, reference + resolutionFloor)",
+    "relativeMargin": 1.2,
+    "madMultiplier": 3,
+    "resolutionFloorMs": 0.5,
+    "calibrationRuns": 3,
+    "memoryFloors": {
+      "settledUsedJSHeapMiB": 1,
+      "trendGrowthMiB": 1,
+      "settledNodes": 8,
+      "settledJsEventListeners": 2
+    }
+  },
+  "fixture": {
+    "longChat": {
+      "benchmark": "tools/validation/studio/benchmark-studio-renderer-long-chat.mjs",
+      "sizes": [
+        50,
+        250,
+        1000,
+        2000
+      ],
+      "warmups": 2,
+      "samples": 7,
+      "statistic": "median with min/max",
+      "fixture": "deterministic mixed-role saved-chat content with paragraphs, Markdown, lists, code, tables, links, Unicode, and sparse image attachments",
+      "chain": "accepted M03 Renderer chain in production order (sanitizer policy/engine/v2, markdown-it, H2O GFM, markdown engine, IR adapter, Render IR, semantic ingress, Semantic Index, DecorationContribution, PresentationProfile, ContentRenderer, chat renderer)",
+      "stages": {
+        "NORMALIZE": {
+          "metric": "normalizeMs",
+          "measurementKind": "ISOLATED_STAGE",
+          "additivity": "EXCLUSIVE",
+          "note": "renderer.normalizeInput() called before render(), exactly as renderReader does"
+        },
+        "PARSE_ADAPTER": {
+          "metric": "parseAdapterMs",
+          "measurementKind": "ACTUAL_PIPELINE",
+          "additivity": "INCLUSIVE_WITHIN_END_TO_END",
+          "note": "markdownIrAdapter.markdownToBlocks calls made by renderSemanticBody during render()"
+        },
+        "RENDER_IR": {
+          "metric": "renderIrMs",
+          "measurementKind": "ACTUAL_PIPELINE",
+          "additivity": "INCLUSIVE_WITHIN_END_TO_END",
+          "note": "renderIR.createConversation + validate calls during render()"
+        },
+        "RENDERER_PROFILE": {
+          "metric": "contentRendererMs",
+          "measurementKind": "ACTUAL_PIPELINE",
+          "additivity": "INCLUSIVE_WITHIN_END_TO_END",
+          "note": "contentRenderer.renderBlocks (content DOM through PresentationProfile hooks); shell composition is only measurable inside END_TO_END (shellCompositionResidualMs = renderMs minus the measured stages) without Product instrumentation"
+        },
+        "SEMANTIC_INDEX": {
+          "metric": "semanticIndexMs",
+          "measurementKind": "ACTUAL_PIPELINE",
+          "additivity": "INCLUSIVE_WITHIN_END_TO_END",
+          "note": "semanticIndex.createShellIndex during render()"
+        },
+        "DECORATION_LIFECYCLE": {
+          "metric": "decorationLifecycleMs",
+          "measurementKind": "ACTUAL_PIPELINE",
+          "additivity": "INCLUSIVE_WITHIN_END_TO_END",
+          "note": "decorationContribution.createLifecycle during render()"
+        },
+        "SANITIZER_V2": {
+          "metric": "rich.sanitizerMs",
+          "measurementKind": "ACTUAL_PIPELINE",
+          "additivity": "INCLUSIVE_WITHIN_END_TO_END",
+          "note": "htmlSanitizer.sanitizeToFragment on the rich replay path (replaces the retired v1 seam; NB-1)"
+        },
+        "END_TO_END_RENDER": {
+          "metric": "renderMs",
+          "measurementKind": "ACTUAL_PIPELINE",
+          "additivity": "NON_ADDITIVE",
+          "note": "chatRenderer.render() wall time; the stage intervals above are disjoint sub-intervals of it"
+        },
+        "EXACT_EQUIVALENCE_REFRESH": {
+          "metric": "fastRefresh.immediateTotalMs",
+          "measurementKind": "ACTUAL_PIPELINE",
+          "additivity": "NON_ADDITIVE",
+          "note": "normalize + canReuseReaderDOM gate + host.updateSnapshot with the mounted root, index and lifecycle preserved (0 index builds, 0 disposals)"
+        },
+        "CHANGED_CONTENT_REFRESH": {
+          "metric": "changedRefresh.immediateTotalMs",
+          "measurementKind": "ACTUAL_PIPELINE",
+          "additivity": "NON_ADDITIVE",
+          "note": "gate rejection + studioHostUnmount (disposeAll) + full render + bind + mount + insertion"
+        }
+      }
+    },
+    "memory": {
+      "benchmark": "tools/validation/studio/benchmark-studio-renderer-memory.mjs",
+      "canonicalTurns": 2000,
+      "richTurns": 1000,
+      "cycles": 12,
+      "batchSize": 2,
+      "warmups": 2,
+      "fastRefreshCycles": 30,
+      "chain": "accepted M03 Renderer chain in production order; Reader mounts through the extracted buildReaderDOM (bindReaderSemanticIndex) and discards through studioHostUnmount (disposeReaderRenderDecorations)",
+      "m03Probes": {
+        "semanticIndex": "discarded render's Semantic Index (state.currentReaderRender.semanticIndex) tracked before unmount/replace",
+        "decorationLifecycle": "discarded render's DecorationContribution lifecycle tracked before unmount/replace",
+        "decorationHandle": "first/last registered benchmark-owned contribution handle of the discarded lifecycle",
+        "decorationNode": "first/last decoration DOM node applied by the benchmark-owned contributions",
+        "registration": "one benchmark-owned contribution per assistant message projection (S4C B consumer precedent); disposeAll must leave list() empty and remove every stamp"
+      }
+    }
+  },
+  "metricDefinitions": {
+    "longChat": {
+      "canonical.normalizeMs": {
+        "stage": "NORMALIZE",
+        "measurementKind": "ISOLATED_STAGE",
+        "additivity": "EXCLUSIVE",
+        "unit": "ms"
+      },
+      "canonical.parseAdapterMs": {
+        "stage": "PARSE_ADAPTER",
+        "measurementKind": "ACTUAL_PIPELINE",
+        "additivity": "INCLUSIVE_WITHIN_END_TO_END",
+        "unit": "ms"
+      },
+      "canonical.renderIrMs": {
+        "stage": "RENDER_IR",
+        "measurementKind": "ACTUAL_PIPELINE",
+        "additivity": "INCLUSIVE_WITHIN_END_TO_END",
+        "unit": "ms"
+      },
+      "canonical.contentRendererMs": {
+        "stage": "RENDERER_PROFILE",
+        "measurementKind": "ACTUAL_PIPELINE",
+        "additivity": "INCLUSIVE_WITHIN_END_TO_END",
+        "unit": "ms"
+      },
+      "canonical.semanticIndexMs": {
+        "stage": "SEMANTIC_INDEX",
+        "measurementKind": "ACTUAL_PIPELINE",
+        "additivity": "INCLUSIVE_WITHIN_END_TO_END",
+        "unit": "ms"
+      },
+      "canonical.renderMs": {
+        "stage": "END_TO_END_RENDER",
+        "measurementKind": "ACTUAL_PIPELINE",
+        "additivity": "NON_ADDITIVE",
+        "unit": "ms"
+      },
+      "canonical.insertionMs": {
+        "stage": "DOM_INSERTION_AND_LAYOUT",
+        "measurementKind": "ISOLATED_STAGE",
+        "additivity": "EXCLUSIVE",
+        "unit": "ms"
+      },
+      "rich.sanitizerMs": {
+        "stage": "SANITIZER_V2",
+        "measurementKind": "ACTUAL_PIPELINE",
+        "additivity": "INCLUSIVE_WITHIN_END_TO_END",
+        "unit": "ms"
+      },
+      "rich.renderMs": {
+        "stage": "END_TO_END_RENDER_RICH",
+        "measurementKind": "ACTUAL_PIPELINE",
+        "additivity": "NON_ADDITIVE",
+        "unit": "ms"
+      },
+      "fastRefresh.immediateTotalMs": {
+        "stage": "EXACT_EQUIVALENCE_REFRESH",
+        "measurementKind": "ACTUAL_PIPELINE",
+        "additivity": "NON_ADDITIVE",
+        "unit": "ms"
+      },
+      "changedRefresh.immediateTotalMs": {
+        "stage": "CHANGED_CONTENT_REFRESH",
+        "measurementKind": "ACTUAL_PIPELINE",
+        "additivity": "NON_ADDITIVE",
+        "unit": "ms"
+      }
+    },
+    "memory": {
+      "settledUsedJSHeapMiB": {
+        "unit": "MiB",
+        "floor": 1,
+        "note": "used JS heap after the scenario is torn down and GC has run"
+      },
+      "trendGrowthMiB": {
+        "unit": "MiB",
+        "floor": 1,
+        "note": "used JS heap at the last batch minus the warm sample (leak trend)"
+      },
+      "settledNodes": {
+        "unit": "nodes",
+        "floor": 8,
+        "note": "DOM node count after teardown"
+      },
+      "settledJsEventListeners": {
+        "unit": "listeners",
+        "floor": 2,
+        "note": "JS event listener count after teardown"
+      }
+    }
+  },
+  "invariants": [
+    {
+      "key": "canonical.parseAdapterCalls",
+      "label": "one IR adapter parse per canonical message"
+    },
+    {
+      "key": "rich.sanitizerCalls",
+      "label": "one sanitizer v2 fragment per rich turn (NB-1 seam)"
+    },
+    {
+      "key": "fastRefresh.rootPreserved",
+      "label": "exact-equivalence refresh preserves the mounted root"
+    },
+    {
+      "key": "fastRefresh.fullRenderAvoided",
+      "label": "exact-equivalence refresh avoids the full render"
+    },
+    {
+      "key": "fastRefresh.indexBuilds",
+      "label": "exact-equivalence refresh builds no Semantic Index"
+    },
+    {
+      "key": "fastRefresh.lifecycleBuilds",
+      "label": "exact-equivalence refresh creates no decoration lifecycle"
+    },
+    {
+      "key": "changedRefresh.rootReplaced",
+      "label": "changed-content refresh replaces the root"
+    },
+    {
+      "key": "changedRefresh.fullRenderPerformed",
+      "label": "changed-content refresh performs the full render"
+    },
+    {
+      "key": "changedRefresh.indexBuilds",
+      "label": "changed-content refresh builds exactly one Semantic Index"
+    },
+    {
+      "key": "changedRefresh.previousLifecycleDisposed",
+      "label": "changed-content refresh disposes the previous lifecycle once"
+    }
+  ],
+  "longChat": {
+    "50": {
+      "fixtureBytes": {
+        "canonical": 15194,
+        "rich": 36910
+      },
+      "metrics": {
+        "canonical.normalizeMs": {
+          "reference": 0,
+          "mad": 0,
+          "ceiling": 0.5,
+          "runMedians": [
+            0.1,
+            0,
+            0
+          ]
+        },
+        "canonical.parseAdapterMs": {
+          "reference": 1.8,
+          "mad": 0.1,
+          "ceiling": 2.3,
+          "runMedians": [
+            1.7,
+            1.9,
+            1.8
+          ]
+        },
+        "canonical.renderIrMs": {
+          "reference": 1.4,
+          "mad": 0,
+          "ceiling": 1.9,
+          "runMedians": [
+            1.4,
+            1.4,
+            1.3
+          ]
+        },
+        "canonical.contentRendererMs": {
+          "reference": 0.3,
+          "mad": 0.1,
+          "ceiling": 0.8,
+          "runMedians": [
+            0.4,
+            0.2,
+            0.3
+          ]
+        },
+        "canonical.semanticIndexMs": {
+          "reference": 0.7,
+          "mad": 0,
+          "ceiling": 1.2,
+          "runMedians": [
+            0.7,
+            0.8,
+            0.7
+          ]
+        },
+        "canonical.renderMs": {
+          "reference": 4.9,
+          "mad": 0.1,
+          "ceiling": 5.88,
+          "runMedians": [
+            4.7,
+            4.9,
+            5
+          ]
+        },
+        "canonical.insertionMs": {
+          "reference": 3.6,
+          "mad": 0.1,
+          "ceiling": 4.32,
+          "runMedians": [
+            3.3,
+            3.7,
+            3.6
+          ]
+        },
+        "rich.sanitizerMs": {
+          "reference": 2.9,
+          "mad": 0.1,
+          "ceiling": 3.48,
+          "runMedians": [
+            3,
+            2.7,
+            2.9
+          ]
+        },
+        "rich.renderMs": {
+          "reference": 4.8,
+          "mad": 0.1,
+          "ceiling": 5.76,
+          "runMedians": [
+            4.7,
+            4.8,
+            5
+          ]
+        },
+        "fastRefresh.immediateTotalMs": {
+          "reference": 0.1,
+          "mad": 0,
+          "ceiling": 0.6,
+          "runMedians": [
+            0.2,
+            0.1,
+            0.1
+          ]
+        },
+        "changedRefresh.immediateTotalMs": {
+          "reference": 8.3,
+          "mad": 0.1,
+          "ceiling": 9.96,
+          "runMedians": [
+            8.2,
+            8.8,
+            8.3
+          ]
+        }
+      }
+    },
+    "250": {
+      "fixtureBytes": {
+        "canonical": 76486,
+        "rich": 187095
+      },
+      "metrics": {
+        "canonical.normalizeMs": {
+          "reference": 0.2,
+          "mad": 0,
+          "ceiling": 0.7,
+          "runMedians": [
+            0.2,
+            0.1,
+            0.2
+          ]
+        },
+        "canonical.parseAdapterMs": {
+          "reference": 7.9,
+          "mad": 0,
+          "ceiling": 9.48,
+          "runMedians": [
+            7.9,
+            7.9,
+            8.1
+          ]
+        },
+        "canonical.renderIrMs": {
+          "reference": 6,
+          "mad": 0,
+          "ceiling": 7.2,
+          "runMedians": [
+            6,
+            6.1,
+            6
+          ]
+        },
+        "canonical.contentRendererMs": {
+          "reference": 1.7,
+          "mad": 0.1,
+          "ceiling": 2.2,
+          "runMedians": [
+            1.6,
+            1.9,
+            1.7
+          ]
+        },
+        "canonical.semanticIndexMs": {
+          "reference": 3.9,
+          "mad": 0,
+          "ceiling": 4.68,
+          "runMedians": [
+            3.7,
+            3.9,
+            3.9
+          ]
+        },
+        "canonical.renderMs": {
+          "reference": 21.8,
+          "mad": 0,
+          "ceiling": 26.16,
+          "runMedians": [
+            20.9,
+            21.8,
+            21.8
+          ]
+        },
+        "canonical.insertionMs": {
+          "reference": 15.7,
+          "mad": 0,
+          "ceiling": 18.84,
+          "runMedians": [
+            14.6,
+            15.7,
+            15.7
+          ]
+        },
+        "rich.sanitizerMs": {
+          "reference": 11.9,
+          "mad": 0.1,
+          "ceiling": 14.28,
+          "runMedians": [
+            12,
+            11.9,
+            11.6
+          ]
+        },
+        "rich.renderMs": {
+          "reference": 20.6,
+          "mad": 0.3,
+          "ceiling": 24.72,
+          "runMedians": [
+            20.3,
+            20.9,
+            20.6
+          ]
+        },
+        "fastRefresh.immediateTotalMs": {
+          "reference": 0.4,
+          "mad": 0,
+          "ceiling": 0.9,
+          "runMedians": [
+            0.3,
+            0.4,
+            0.4
+          ]
+        },
+        "changedRefresh.immediateTotalMs": {
+          "reference": 37.8,
+          "mad": 0.5,
+          "ceiling": 45.36,
+          "runMedians": [
+            36.7,
+            38.3,
+            37.8
+          ]
+        }
+      }
+    },
+    "1000": {
+      "fixtureBytes": {
+        "canonical": 307794,
+        "rich": 756266
+      },
+      "metrics": {
+        "canonical.normalizeMs": {
+          "reference": 0.6,
+          "mad": 0,
+          "ceiling": 1.1,
+          "runMedians": [
+            0.6,
+            0.6,
+            0.6
+          ]
+        },
+        "canonical.parseAdapterMs": {
+          "reference": 27.2,
+          "mad": 1.4,
+          "ceiling": 32.64,
+          "runMedians": [
+            25.6,
+            28.6,
+            27.2
+          ]
+        },
+        "canonical.renderIrMs": {
+          "reference": 22.2,
+          "mad": 0.3,
+          "ceiling": 26.64,
+          "runMedians": [
+            21.9,
+            22.2,
+            22.6
+          ]
+        },
+        "canonical.contentRendererMs": {
+          "reference": 6.1,
+          "mad": 0.3,
+          "ceiling": 7.32,
+          "runMedians": [
+            5.3,
+            6.4,
+            6.1
+          ]
+        },
+        "canonical.semanticIndexMs": {
+          "reference": 16.1,
+          "mad": 0.1,
+          "ceiling": 19.32,
+          "runMedians": [
+            15.6,
+            16.2,
+            16.1
+          ]
+        },
+        "canonical.renderMs": {
+          "reference": 80.1,
+          "mad": 0.4,
+          "ceiling": 96.12,
+          "runMedians": [
+            76.9,
+            80.1,
+            80.5
+          ]
+        },
+        "canonical.insertionMs": {
+          "reference": 61.2,
+          "mad": 0,
+          "ceiling": 73.44,
+          "runMedians": [
+            56.4,
+            61.2,
+            61.2
+          ]
+        },
+        "rich.sanitizerMs": {
+          "reference": 47.2,
+          "mad": 0.3,
+          "ceiling": 56.64,
+          "runMedians": [
+            46.9,
+            49.9,
+            47.2
+          ]
+        },
+        "rich.renderMs": {
+          "reference": 81.7,
+          "mad": 2.9,
+          "ceiling": 98.04,
+          "runMedians": [
+            78.8,
+            85.3,
+            81.7
+          ]
+        },
+        "fastRefresh.immediateTotalMs": {
+          "reference": 1.3,
+          "mad": 0,
+          "ceiling": 1.8,
+          "runMedians": [
+            1.3,
+            1.3,
+            1.2
+          ]
+        },
+        "changedRefresh.immediateTotalMs": {
+          "reference": 140.4,
+          "mad": 3.3,
+          "ceiling": 168.48,
+          "runMedians": [
+            136.5,
+            143.7,
+            140.4
+          ]
+        }
+      }
+    },
+    "2000": {
+      "fixtureBytes": {
+        "canonical": 620118,
+        "rich": 1524976
+      },
+      "metrics": {
+        "canonical.normalizeMs": {
+          "reference": 1,
+          "mad": 0,
+          "ceiling": 1.5,
+          "runMedians": [
+            1.2,
+            1,
+            1
+          ]
+        },
+        "canonical.parseAdapterMs": {
+          "reference": 48,
+          "mad": 0.4,
+          "ceiling": 57.6,
+          "runMedians": [
+            49.6,
+            48,
+            47.6
+          ]
+        },
+        "canonical.renderIrMs": {
+          "reference": 47.6,
+          "mad": 0.1,
+          "ceiling": 57.12,
+          "runMedians": [
+            47.7,
+            47.6,
+            43.7
+          ]
+        },
+        "canonical.contentRendererMs": {
+          "reference": 12.2,
+          "mad": 1,
+          "ceiling": 15.2,
+          "runMedians": [
+            13.3,
+            12.2,
+            11.2
+          ]
+        },
+        "canonical.semanticIndexMs": {
+          "reference": 32.7,
+          "mad": 0.6,
+          "ceiling": 39.24,
+          "runMedians": [
+            33.6,
+            32.7,
+            32.1
+          ]
+        },
+        "canonical.renderMs": {
+          "reference": 153.9,
+          "mad": 2.8,
+          "ceiling": 184.68,
+          "runMedians": [
+            162.1,
+            153.9,
+            151.1
+          ]
+        },
+        "canonical.insertionMs": {
+          "reference": 126.1,
+          "mad": 3.2,
+          "ceiling": 151.32,
+          "runMedians": [
+            126.1,
+            129.3,
+            120.7
+          ]
+        },
+        "rich.sanitizerMs": {
+          "reference": 99.4,
+          "mad": 0.8,
+          "ceiling": 119.28,
+          "runMedians": [
+            99.4,
+            100.2,
+            96.4
+          ]
+        },
+        "rich.renderMs": {
+          "reference": 169.4,
+          "mad": 1.2,
+          "ceiling": 203.28,
+          "runMedians": [
+            170.6,
+            169.4,
+            164.4
+          ]
+        },
+        "fastRefresh.immediateTotalMs": {
+          "reference": 2.2,
+          "mad": 0,
+          "ceiling": 2.7,
+          "runMedians": [
+            2.2,
+            2.2,
+            2.2
+          ]
+        },
+        "changedRefresh.immediateTotalMs": {
+          "reference": 288.4,
+          "mad": 12.6,
+          "ceiling": 346.08,
+          "runMedians": [
+            307.5,
+            288.4,
+            275.8
+          ]
+        }
+      }
+    }
+  },
+  "memory": {
+    "canonicalReplacement": {
+      "settledUsedJSHeapMiB": {
+        "reference": 2.791,
+        "mad": 0,
+        "ceiling": 3.791,
+        "runValues": [
+          2.791,
+          2.791,
+          2.79
+        ]
+      },
+      "trendGrowthMiB": {
+        "reference": 0.281,
+        "mad": 0.002,
+        "ceiling": 1.281,
+        "runValues": [
+          0.283,
+          0.272,
+          0.281
+        ]
+      },
+      "settledNodes": {
+        "reference": 73,
+        "mad": 0,
+        "ceiling": 87.6,
+        "runValues": [
+          73,
+          73,
+          73
+        ]
+      },
+      "settledJsEventListeners": {
+        "reference": 35,
+        "mad": 0,
+        "ceiling": 42,
+        "runValues": [
+          35,
+          35,
+          35
+        ]
+      }
+    },
+    "readerLeaveReturn": {
+      "settledUsedJSHeapMiB": {
+        "reference": 2.824,
+        "mad": 0,
+        "ceiling": 3.824,
+        "runValues": [
+          2.824,
+          2.824,
+          2.824
+        ]
+      },
+      "trendGrowthMiB": {
+        "reference": 0.057,
+        "mad": 0,
+        "ceiling": 1.057,
+        "runValues": [
+          0.057,
+          0.057,
+          0.057
+        ]
+      },
+      "settledNodes": {
+        "reference": 73,
+        "mad": 0,
+        "ceiling": 87.6,
+        "runValues": [
+          73,
+          73,
+          73
+        ]
+      },
+      "settledJsEventListeners": {
+        "reference": 35,
+        "mad": 0,
+        "ceiling": 42,
+        "runValues": [
+          35,
+          35,
+          35
+        ]
+      }
+    },
+    "fastRefresh": {
+      "settledUsedJSHeapMiB": {
+        "reference": 2.888,
+        "mad": 0,
+        "ceiling": 3.888,
+        "runValues": [
+          2.888,
+          2.888,
+          2.888
+        ]
+      },
+      "trendGrowthMiB": {
+        "reference": -0.024,
+        "mad": 0,
+        "ceiling": 0.976,
+        "runValues": [
+          -0.024,
+          -0.023,
+          -0.024
+        ]
+      },
+      "settledNodes": {
+        "reference": 73,
+        "mad": 0,
+        "ceiling": 87.6,
+        "runValues": [
+          73,
+          73,
+          73
+        ]
+      },
+      "settledJsEventListeners": {
+        "reference": 35,
+        "mad": 0,
+        "ceiling": 42,
+        "runValues": [
+          35,
+          35,
+          35
+        ]
+      }
+    },
+    "changedSameId": {
+      "settledUsedJSHeapMiB": {
+        "reference": 2.92,
+        "mad": 0,
+        "ceiling": 3.92,
+        "runValues": [
+          2.92,
+          2.92,
+          2.919
+        ]
+      },
+      "trendGrowthMiB": {
+        "reference": 0.125,
+        "mad": 0.001,
+        "ceiling": 1.125,
+        "runValues": [
+          0.128,
+          0.125,
+          0.124
+        ]
+      },
+      "settledNodes": {
+        "reference": 73,
+        "mad": 0,
+        "ceiling": 87.6,
+        "runValues": [
+          73,
+          73,
+          73
+        ]
+      },
+      "settledJsEventListeners": {
+        "reference": 35,
+        "mad": 0,
+        "ceiling": 42,
+        "runValues": [
+          35,
+          35,
+          35
+        ]
+      }
+    },
+    "richReplacement": {
+      "settledUsedJSHeapMiB": {
+        "reference": 3.284,
+        "mad": 0,
+        "ceiling": 4.284,
+        "runValues": [
+          3.284,
+          3.284,
+          3.286
+        ]
+      },
+      "trendGrowthMiB": {
+        "reference": -0.009,
+        "mad": 0,
+        "ceiling": 0.991,
+        "runValues": [
+          -0.009,
+          -0.009,
+          0.013
+        ]
+      },
+      "settledNodes": {
+        "reference": 84,
+        "mad": 0,
+        "ceiling": 100.8,
+        "runValues": [
+          84,
+          84,
+          84
+        ]
+      },
+      "settledJsEventListeners": {
+        "reference": 35,
+        "mad": 0,
+        "ceiling": 42,
+        "runValues": [
+          35,
+          35,
+          35
+        ]
+      }
+    }
+  },
+  "calibration": {
+    "runs": [
+      {
+        "index": 1,
+        "longChatGeneratedAt": "2026-09-12T19:35:36.676Z",
+        "memoryGeneratedAt": "2026-09-12T19:35:52.840Z"
+      },
+      {
+        "index": 2,
+        "longChatGeneratedAt": "2026-09-12T19:36:49.108Z",
+        "memoryGeneratedAt": "2026-09-12T19:37:05.913Z"
+      },
+      {
+        "index": 3,
+        "longChatGeneratedAt": "2026-09-12T19:37:58.684Z",
+        "memoryGeneratedAt": "2026-09-12T19:38:14.009Z"
+      }
+    ]
+  }
+}

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { createRequire } from "node:module";
@@ -20,16 +21,32 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
 const studioRoot = path.join(repoRoot, "src-surfaces-base/studio");
 const files = {
-  selectors: path.join(studioRoot, "platform/selectors.contract.js"),
-  sanitizer: path.join(studioRoot, "platform/html-sanitizer.js"),
-  sanitizerPolicyV2: path.join(studioRoot, "renderer/safety/sanitizer-policy.v1.js"),
-  sanitizerEngineV2: path.join(studioRoot, "renderer/safety/vendor/dompurify/purify.js"),
-  sanitizerV2: path.join(studioRoot, "renderer/safety/html-sanitizer.v2.js"),
-  renderer: path.join(studioRoot, "renderer/chat-renderer.studio.js"),
   studio: path.join(studioRoot, "studio.js"),
   host: path.join(studioRoot, "S0D3e. 🎬 Transcript Studio Host - Studio.js"),
   css: path.join(studioRoot, "studio.css"),
+  profileCss: path.join(studioRoot, "renderer/presentation/chatgpt-reference.v1.css"),
 };
+/* M03 P5 S5C T10: the accepted Renderer chain in production order (studio.html /
+ * pack lists). The benchmark loads the real modules; nothing is copied or
+ * reimplemented here. */
+const RENDERER_CHAIN = Object.freeze([
+  "platform/selectors.contract.js",
+  "platform/html-sanitizer.js",
+  "renderer/safety/sanitizer-policy.v1.js",
+  "renderer/safety/vendor/dompurify/purify.js",
+  "renderer/safety/html-sanitizer.v2.js",
+  "renderer/markdown/vendor/markdown-it/markdown-it.umd.min.js",
+  "renderer/markdown/h2o-gfm.v1.js",
+  "renderer/markdown/markdown-engine.v1.js",
+  "renderer/markdown/markdown-ir-adapter.v1.js",
+  "renderer/semantic/render-ir.v1.js",
+  "renderer/semantic/semantic-ingress.v1.js",
+  "renderer/semantic/semantic-index.v1.js",
+  "renderer/decoration/decoration-contribution.v1.js",
+  "renderer/presentation/presentation-profile.v1.js",
+  "renderer/content/content-renderer.v1.js",
+  "renderer/chat-renderer.studio.js",
+]);
 
 function parsePositiveInteger(value, fallback) {
   const parsed = Number.parseInt(String(value || ""), 10);
@@ -111,13 +128,10 @@ try {
       <body><main id="viewReader"></main></body>
     </html>`);
   await page.addStyleTag({ path: files.css });
-  await page.addScriptTag({ path: files.selectors });
-  await page.addScriptTag({ path: files.sanitizer });
-  // M03 P1 S1A T1: rich replay consumes Renderer sanitizer v2.
-  await page.addScriptTag({ path: files.sanitizerPolicyV2 });
-  await page.addScriptTag({ path: files.sanitizerEngineV2 });
-  await page.addScriptTag({ path: files.sanitizerV2 });
-  await page.addScriptTag({ path: files.renderer });
+  await page.addStyleTag({ path: files.profileCss });
+  for (const rel of RENDERER_CHAIN) {
+    await page.addScriptTag({ path: path.join(studioRoot, rel) });
+  }
 
   await page.evaluate(() => {
     const queues = { raf: [], timers: [], nextId: 1 };
@@ -162,6 +176,12 @@ try {
     "canReuseReaderDOM",
     "refreshReaderOverlay",
     "buildReaderDOM",
+    /* M03 S4C: the Reader current-render bridge (bind on build) and its unmount
+     * seam (disposeAll + clear) are part of the production teardown path. */
+    "bindReaderSemanticIndex",
+    "getReaderSemanticIndex",
+    "getReaderDecorationContributions",
+    "disposeReaderRenderDecorations",
   ].map((name) => extractFunction(studioSource, name)).join("\n");
 
   await page.addScriptTag({ content: `
@@ -170,6 +190,7 @@ try {
     const state = {
       currentReaderSnapshot: null,
       currentReaderEditOverrides: null,
+      currentReaderRender: null,
       activeRoute: "reader",
       renderToken: 1,
     };
@@ -186,6 +207,8 @@ try {
       canReuseReaderDOM,
       refreshReaderOverlay,
       buildReaderDOM,
+      getReaderSemanticIndex,
+      getReaderDecorationContributions,
     };
   ` });
 
@@ -308,13 +331,88 @@ try {
       if (guard >= 1000) throw new Error("Lifecycle queues did not settle");
     }
 
+    /* M03 collectability probes: the discarded render's Semantic Index, its
+     * DecorationContribution lifecycle and a sample of registered handles /
+     * decoration nodes must all become unreachable once the Reader discards
+     * the render through the real S4C unmount seam. */
+    function trackCurrentRender(label) {
+      const current = studio.state.currentReaderRender;
+      if (!current) return;
+      track("semanticIndex", current.semanticIndex, `${label}-semantic-index`);
+      track("decorationLifecycle", current.decorationContributions, `${label}-decoration-lifecycle`);
+      const registered = registeredDecorations.get(current.decorationContributions);
+      if (registered) {
+        for (const handle of registered.handles) track("decorationHandle", handle, `${label}-decoration-handle`);
+        for (const node of registered.nodes) track("decorationNode", node, `${label}-decoration-node`);
+      }
+    }
+
+    /* Exercise the lifecycle the way an M03 consumer does (S4C B precedent:
+     * one contribution per assistant message projection) so disposeAll performs
+     * real work on every discard. Only the first and last handle/node are
+     * probed to keep the probe table bounded. */
+    const registeredDecorations = new WeakMap();
+    const DECORATION_OWNER = "benchmark-memory-probe";
+    function registerBenchmarkDecorations() {
+      const current = studio.state.currentReaderRender;
+      const lifecycle = current?.decorationContributions;
+      const semanticIndex = current?.semanticIndex;
+      if (!lifecycle || !semanticIndex) throw new Error("Reader current-render bridge did not bind the render");
+      if (studio.getReaderSemanticIndex(current.root) !== semanticIndex || studio.getReaderDecorationContributions(current.root) !== lifecycle) {
+        throw new Error("Reader bridge accessors disagree with the bound render");
+      }
+      const handles = [];
+      const nodes = [];
+      let registeredCount = 0;
+      for (const message of semanticIndex.messages()) {
+        if (message.role !== "assistant") continue;
+        const handle = lifecycle.register({
+          owner: DECORATION_OWNER,
+          id: message.projectionKey,
+          targetKey: message.projectionKey,
+          apply(context, value) {
+            const stamp = document.createElement("span");
+            stamp.className = "h2o-benchmark-decoration";
+            stamp.textContent = String(value ?? "");
+            context.target.appendChild(stamp);
+            nodes.push(stamp);
+            return {
+              update(next) { stamp.textContent = String(next ?? ""); },
+              dispose() { stamp.remove(); },
+            };
+          },
+        }, `probe ${registeredCount}`);
+        registeredCount += 1;
+        handles.push(handle);
+      }
+      if (registeredCount === 0) throw new Error("No assistant messages available for decoration registration");
+      if (lifecycle.list().length !== registeredCount) throw new Error("Lifecycle registry count mismatch");
+      registeredDecorations.set(lifecycle, {
+        count: registeredCount,
+        handles: handles.length > 1 ? [handles[0], handles[handles.length - 1]] : handles,
+        nodes: nodes.length > 1 ? [nodes[0], nodes[nodes.length - 1]] : nodes,
+      });
+      return registeredCount;
+    }
+
+    function assertDiscardedRenderDisposed(previous) {
+      if (!previous) return;
+      if (studio.state.currentReaderRender === previous) throw new Error("Unmount left the discarded render bound");
+      const lifecycle = previous.decorationContributions;
+      if (lifecycle && lifecycle.list().length !== 0) throw new Error("Unmount left decoration contributions registered on the discarded lifecycle");
+      if (previous.root?.querySelector?.(".h2o-benchmark-decoration")) throw new Error("Unmount left decoration nodes in the discarded root");
+    }
+
     function teardown(trackCurrent = false) {
+      const previousRender = studio.state.currentReaderRender;
       if (trackCurrent) {
         track("root", host.getReaderRoot(), "teardown-root");
         track("snapshot", studio.state.currentReaderSnapshot, "teardown-snapshot");
+        trackCurrentRender("teardown");
       }
       studio.state.currentReaderSnapshot = null;
       studio.studioHostUnmount("memory:teardown");
+      assertDiscardedRenderDisposed(previousRender);
       viewReader.replaceChildren();
       drainQueues();
     }
@@ -322,17 +420,22 @@ try {
     function installSnapshot(snapshot) {
       const previousRoot = host.getReaderRoot();
       const previousSnapshot = studio.state.currentReaderSnapshot;
+      const previousRender = studio.state.currentReaderRender;
       if (previousRoot) track("root", previousRoot, "replaced-root");
       if (previousSnapshot) track("snapshot", previousSnapshot, "replaced-snapshot");
+      trackCurrentRender("replaced");
       studio.state.currentReaderSnapshot = null;
       studio.studioHostUnmount("memory:replace");
+      assertDiscardedRenderDisposed(previousRender);
       viewReader.replaceChildren();
       const input = renderer.normalizeInput(snapshot);
       const overrides = studio.collectRendererEditOverrides(input);
       studio.state.currentReaderSnapshot = snapshot;
       const root = studio.buildReaderDOM(snapshot, input);
+      if (studio.state.currentReaderRender?.root !== root) throw new Error("buildReaderDOM did not bind the current render");
       viewReader.replaceChildren(root);
       studio.state.currentReaderEditOverrides = overrides;
+      registerBenchmarkDecorations();
       drainQueues();
       return root;
     }
@@ -371,10 +474,14 @@ try {
       });
       if (!eligible) throw new Error("Equivalent snapshot did not qualify for memory fast-refresh scenario");
       track("snapshot", previousSnapshot, "fast-refresh-snapshot");
+      const boundRender = studio.state.currentReaderRender;
       studio.state.currentReaderSnapshot = snapshot;
       studio.state.currentReaderEditOverrides = nextOverrides;
       if (host.updateSnapshot(snapshot) !== true) {
         throw new Error("Fast refresh could not publish the fresh snapshot to the mounted Studio host");
+      }
+      if (studio.state.currentReaderRender !== boundRender || boundRender?.root !== mount.root) {
+        throw new Error("Fast refresh must keep the bound Semantic Index / lifecycle of the reused root");
       }
       drainQueues();
       return mount.root;
@@ -460,6 +567,23 @@ try {
       drainQueues();
     }
 
+    /* Retention negative control: deliberately hold a strong reference to the
+     * discarded render's Semantic Index and lifecycle across a replacement.
+     * The probes MUST report them alive while retained and collected once
+     * released; otherwise the collectability probes are vacuous. */
+    let retained = null;
+    function beginRetentionControl({ turns }) {
+      installSnapshot(makeSnapshot(turns, { variant: "retention-A", snapshotId: "retention-A", chatId: "retention-chat" }));
+      const current = studio.state.currentReaderRender;
+      retained = { semanticIndex: current.semanticIndex, lifecycle: current.decorationContributions };
+      installSnapshot(makeSnapshot(turns, { variant: "retention-B", snapshotId: "retention-B", chatId: "retention-chat" }));
+      return true;
+    }
+    function releaseRetentionControl() {
+      retained = null;
+      return true;
+    }
+
     window.__h2oRendererMemory = {
       resetProbes,
       probeSummary,
@@ -473,10 +597,15 @@ try {
       removeListenerDiagnosticRoot,
       beginPendingOverlay,
       resolvePendingOverlay,
+      beginRetentionControl,
+      releaseRetentionControl,
       current: () => ({
         root: !!host.getReaderRoot(),
         turns: host.getTurnsRoot()?.children.length || 0,
         snapshotId: studio.state.currentReaderSnapshot?.snapshotId || "",
+        bound: !!studio.state.currentReaderRender,
+        registeredDecorations: studio.state.currentReaderRender?.decorationContributions?.list().length || 0,
+        retained: !!retained,
       }),
     };
   });
@@ -600,11 +729,24 @@ try {
   scenarios.asyncOverlayDiagnostic.push(await measure("async-overlay:settled"));
 
   await resetScenario();
+  await page.evaluate((turns) => window.__h2oRendererMemory.beginRetentionControl({ turns }), Math.min(1000, config.canonicalTurns));
+  scenarios.retentionNegativeControl = [await measure("retention-control:retained")];
+  await page.evaluate(() => window.__h2oRendererMemory.releaseRetentionControl());
+  scenarios.retentionNegativeControl.push(await measure("retention-control:released"));
+
+  await resetScenario();
 
   console.log(JSON.stringify({
     generatedAt: new Date().toISOString(),
     environment: {
       browserExecutable: executablePath,
+      browserFamily: "chromium",
+      browserVersion: browser.version(),
+      playwrightVersion: (() => { try { return require("playwright/package.json").version; } catch { return null; } })(),
+      nodePlatform: process.platform,
+      arch: process.arch,
+      osRelease: os.release(),
+      osMajor: String(os.release()).split(".")[0],
       userAgent: await page.evaluate(() => navigator.userAgent),
       forcedGc: "HeapProfiler.collectGarbage x3 per sample",
       cssLoaded: true,
@@ -614,6 +756,15 @@ try {
       ...config,
       statistic: "post-settlement, post-GC trend sampled after each batch",
       reachability: "WeakRef probes checked only after out-of-job CDP garbage collection",
+      chain: "accepted M03 Renderer chain in production order; Reader mounts through the extracted buildReaderDOM (bindReaderSemanticIndex) and discards through studioHostUnmount (disposeReaderRenderDecorations)",
+      m03Probes: {
+        semanticIndex: "discarded render's Semantic Index (state.currentReaderRender.semanticIndex) tracked before unmount/replace",
+        decorationLifecycle: "discarded render's DecorationContribution lifecycle tracked before unmount/replace",
+        decorationHandle: "first/last registered benchmark-owned contribution handle of the discarded lifecycle",
+        decorationNode: "first/last decoration DOM node applied by the benchmark-owned contributions",
+        registration: "one benchmark-owned contribution per assistant message projection (S4C B consumer precedent); disposeAll must leave list() empty and remove every stamp",
+      },
+      retentionNegativeControl: "a discarded Semantic Index + lifecycle are deliberately retained across one replacement (probes must report alive), then released (probes must report collected)",
     },
     scenarios,
     pageErrors,

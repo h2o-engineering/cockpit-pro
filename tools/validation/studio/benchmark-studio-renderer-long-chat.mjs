@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { createRequire } from "node:module";
@@ -20,16 +21,32 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../../..");
 const studioRoot = path.join(repoRoot, "src-surfaces-base/studio");
 const files = {
-  selectors: path.join(studioRoot, "platform/selectors.contract.js"),
-  sanitizer: path.join(studioRoot, "platform/html-sanitizer.js"),
-  sanitizerPolicyV2: path.join(studioRoot, "renderer/safety/sanitizer-policy.v1.js"),
-  sanitizerEngineV2: path.join(studioRoot, "renderer/safety/vendor/dompurify/purify.js"),
-  sanitizerV2: path.join(studioRoot, "renderer/safety/html-sanitizer.v2.js"),
-  renderer: path.join(studioRoot, "renderer/chat-renderer.studio.js"),
   studio: path.join(studioRoot, "studio.js"),
   host: path.join(studioRoot, "S0D3e. 🎬 Transcript Studio Host - Studio.js"),
   css: path.join(studioRoot, "studio.css"),
+  profileCss: path.join(studioRoot, "renderer/presentation/chatgpt-reference.v1.css"),
 };
+/* M03 P5 S5C T10: the accepted Renderer chain in production order (studio.html /
+ * pack lists). The benchmark loads the real modules; nothing is copied or
+ * reimplemented here. */
+const RENDERER_CHAIN = Object.freeze([
+  "platform/selectors.contract.js",
+  "platform/html-sanitizer.js",
+  "renderer/safety/sanitizer-policy.v1.js",
+  "renderer/safety/vendor/dompurify/purify.js",
+  "renderer/safety/html-sanitizer.v2.js",
+  "renderer/markdown/vendor/markdown-it/markdown-it.umd.min.js",
+  "renderer/markdown/h2o-gfm.v1.js",
+  "renderer/markdown/markdown-engine.v1.js",
+  "renderer/markdown/markdown-ir-adapter.v1.js",
+  "renderer/semantic/render-ir.v1.js",
+  "renderer/semantic/semantic-ingress.v1.js",
+  "renderer/semantic/semantic-index.v1.js",
+  "renderer/decoration/decoration-contribution.v1.js",
+  "renderer/presentation/presentation-profile.v1.js",
+  "renderer/content/content-renderer.v1.js",
+  "renderer/chat-renderer.studio.js",
+]);
 
 function extractFunction(source, name) {
   const match = new RegExp(`\\bfunction\\s+${name}\\s*\\(`).exec(source);
@@ -64,6 +81,8 @@ const config = {
   sizes: parseSizes(process.env.H2O_RENDERER_BENCH_SIZES),
   warmups: parsePositiveInteger(process.env.H2O_RENDERER_BENCH_WARMUPS, 2),
   samples: parsePositiveInteger(process.env.H2O_RENDERER_BENCH_SAMPLES, 7),
+  /* Negative control only (S5C): artificial per-parse busy wait, default 0. */
+  slowdownMs: Math.max(0, Number.parseFloat(String(process.env.H2O_RENDERER_BENCH_SLOWDOWN_MS || "0")) || 0),
 };
 
 async function resolveChromiumExecutable() {
@@ -106,25 +125,59 @@ try {
       <body><main id="viewReader"></main></body>
     </html>`);
   await page.addStyleTag({ path: files.css });
-  await page.addScriptTag({ path: files.selectors });
-  await page.addScriptTag({ path: files.sanitizer });
-  // M03 P1 S1A T1: rich replay consumes Renderer sanitizer v2, so the accepted
-  // load chain must be present or every rich turn correctly fails closed to the
-  // canonical renderer.
-  await page.addScriptTag({ path: files.sanitizerPolicyV2 });
-  await page.addScriptTag({ path: files.sanitizerEngineV2 });
-  await page.addScriptTag({ path: files.sanitizerV2 });
-
-  let rendererSource = await fs.readFile(files.renderer, "utf8");
-  const rendererInstallNeedle = "Studio.chatRenderer = Object.freeze({";
-  if (!rendererSource.includes(rendererInstallNeedle)) {
-    throw new Error("Renderer benchmark hook could not locate the public API installation point");
+  await page.addStyleTag({ path: files.profileCss });
+  for (const rel of RENDERER_CHAIN) {
+    await page.addScriptTag({ path: path.join(studioRoot, rel) });
   }
-  rendererSource = rendererSource.replace(
-    rendererInstallNeedle,
-    "Studio.__chatRendererBenchmark = Object.freeze({ renderTextAsChatGPTBlocks });\n" + rendererInstallNeedle,
-  );
-  await page.addScriptTag({ content: rendererSource });
+
+  /* M03 stage-timing seam (benchmark-only). The chat renderer resolves these
+   * module entries from H2O.Studio.Renderer on every call, so replacing the
+   * namespace entries with timing delegates measures the ACTUAL calls made on
+   * the production-faithful path. Every delegate forwards to the frozen real
+   * module unchanged; only wall time and call counts are recorded. The stage
+   * intervals are disjoint from one another and nested INSIDE render() - they
+   * are inclusive within END_TO_END_RENDER and must never be added to it. */
+  await page.evaluate((slowdownMs) => {
+    const Renderer = window.H2O?.Studio?.Renderer;
+    if (!Renderer) throw new Error("Renderer namespace missing after chain load");
+    const stages = { parseAdapterMs: 0, parseAdapterCalls: 0, renderIrMs: 0, renderIrCalls: 0, contentRendererMs: 0, contentRendererCalls: 0, semanticIndexMs: 0, semanticIndexCalls: 0, decorationLifecycleMs: 0, decorationLifecycleCalls: 0, sanitizerV2Ms: 0, sanitizerV2Calls: 0, disposeAllCalls: 0 };
+    window.__h2oRendererStages = stages;
+    const timed = (msKey, callsKey, fn) => function timedDelegate(...args) {
+      const start = performance.now();
+      try { return fn.apply(this, args); }
+      finally { stages[msKey] += performance.now() - start; stages[callsKey] += 1; }
+    };
+    const wrap = (key, methods) => {
+      const original = Renderer[key];
+      if (!original) throw new Error(`Renderer.${key} missing after chain load`);
+      const delegate = { ...original };
+      for (const [method, msKey, callsKey, after] of methods) {
+        if (typeof original[method] !== "function") throw new Error(`Renderer.${key}.${method} is not a function`);
+        const inner = original[method].bind(original);
+        delegate[method] = timed(msKey, callsKey, after ? (...args) => after(inner(...args)) : inner);
+      }
+      Renderer[key] = Object.freeze(delegate);
+    };
+    /* Negative-control seam (H2O_RENDERER_BENCH_SLOWDOWN_MS > 0 only): an
+     * artificial per-parse busy wait on the ACTUAL pipeline so a budget
+     * comparator can be proven to fire on a real measured slowdown. */
+    const slowdown = slowdownMs > 0
+      ? (result) => { const until = performance.now() + slowdownMs; while (performance.now() < until) { /* busy */ } return result; }
+      : null;
+    wrap("markdownIrAdapter", [["markdownToBlocks", "parseAdapterMs", "parseAdapterCalls", slowdown]]);
+    wrap("renderIR", [["createConversation", "renderIrMs", "renderIrCalls"], ["validate", "renderIrMs", "renderIrCalls"]]);
+    wrap("contentRenderer", [["renderBlocks", "contentRendererMs", "contentRendererCalls"]]);
+    wrap("semanticIndex", [["createShellIndex", "semanticIndexMs", "semanticIndexCalls"]]);
+    wrap("decorationContribution", [["createLifecycle", "decorationLifecycleMs", "decorationLifecycleCalls", (controller) => Object.freeze({
+      ...controller,
+      disposeAll(...args) { stages.disposeAllCalls += 1; return controller.disposeAll(...args); },
+    })]]);
+    /* NB-1 resolution: the rich path consumes sanitizer v2 (sanitizeToFragment); the
+     * sub-metric now instruments that seam instead of the retired v1 seam. */
+    wrap("htmlSanitizer", [["sanitizeToFragment", "sanitizerV2Ms", "sanitizerV2Calls"]]);
+    window.__h2oResetRendererStages = () => { for (const key of Object.keys(stages)) stages[key] = 0; };
+    window.__h2oReadRendererStages = () => ({ ...stages });
+  }, config.slowdownMs);
 
   await page.evaluate(() => {
     const lifecycle = {
@@ -180,6 +233,14 @@ try {
     "collectRendererEditOverrides",
     "haveEquivalentRendererEditOverrides",
     "canReuseReaderDOM",
+    /* M03 S4C: the Reader current-render bridge and its unmount seam are part of
+     * the production refresh/teardown path (bind on build, disposeAll + clear
+     * on discard). Extracted verbatim so the benchmark exercises them. */
+    "bindReaderSemanticIndex",
+    "getReaderSemanticIndex",
+    "getReaderDecorationContributions",
+    "disposeReaderRenderDecorations",
+    "studioHostUnmount",
   ].map((name) => extractFunction(studioSource, name)).join("\n");
   await page.addScriptTag({ content: `
     const W = window;
@@ -187,6 +248,7 @@ try {
     const state = {
       currentReaderSnapshot: null,
       currentReaderEditOverrides: null,
+      currentReaderRender: null,
       activeRoute: "reader",
       renderToken: 1,
     };
@@ -207,6 +269,9 @@ try {
       },
       getSnapshot(){ return state.currentReaderSnapshot; },
       getOverrides(){ return state.currentReaderEditOverrides; },
+      getCurrentRender(){ return state.currentReaderRender; },
+      bind(rendererResult){ bindReaderSemanticIndex(rendererResult); },
+      unmount(reason){ studioHostUnmount(reason); },
       getReusableReaderMount,
       collectRendererEditOverrides,
       canReuseReaderDOM,
@@ -217,12 +282,13 @@ try {
     "use strict";
 
     const renderer = window.H2O?.Studio?.chatRenderer;
-    const rendererBench = window.H2O?.Studio?.__chatRendererBenchmark;
-    const sanitizer = window.H2O?.Studio?.html?.sanitize;
     const host = window.H2O?.studioHost;
     const refreshBench = window.__h2oStudioRefreshBenchmark;
+    const resetStages = window.__h2oResetRendererStages;
+    const readStages = window.__h2oReadRendererStages;
     const viewReader = document.getElementById("viewReader");
-    if (!renderer || !rendererBench || !sanitizer || !host || !refreshBench || !viewReader) {
+    const Renderer = window.H2O?.Studio?.Renderer;
+    if (!renderer || !host || !refreshBench || !resetStages || !readStages || !viewReader || !Renderer?.semanticIndex || !Renderer?.decorationContribution) {
       throw new Error("Studio Renderer benchmark dependencies did not initialize");
     }
 
@@ -378,10 +444,31 @@ try {
     }
 
     function resetMountedState() {
-      try { host.unmount("benchmark:reset"); } catch {}
+      try { refreshBench.unmount("benchmark:reset"); } catch {}
       viewReader.replaceChildren();
       refreshBench.clearState();
       clearLifecycleQueues();
+    }
+
+    /* Mount exactly the way buildReaderDOM + renderReader do: bind the render's
+     * Semantic Index / DecorationContribution lifecycle, then publish to the host. */
+    function mountRendered(rendered, snapshot) {
+      refreshBench.bind(rendered);
+      host.mount({
+        readerRoot: rendered.root,
+        turnsEl: rendered.turnsEl,
+        scrollEl: rendered.scrollEl,
+        snapshot,
+        assistantTurnEls: rendered.assistantTurnEls,
+      });
+    }
+
+    function assertBound(rendered) {
+      const current = refreshBench.getCurrentRender();
+      if (!current || current.root !== rendered.root || current.semanticIndex !== rendered.semanticIndex || current.decorationContributions !== rendered.decorationContributions) {
+        throw new Error("Reader current-render bridge is not bound to the mounted render");
+      }
+      if (rendered.decorationContributions.list().length !== 0) throw new Error("benchmark render carries unexpected decoration contributions");
     }
 
     function drainDeferredLifecycle() {
@@ -429,27 +516,24 @@ try {
       const normalized = renderer.normalizeInput(snapshot);
       const normalizeMs = performance.now() - start;
 
-      start = performance.now();
-      for (const message of normalized.messages) {
-        rendererBench.renderTextAsChatGPTBlocks(message.text);
-      }
-      const markdownMs = performance.now() - start;
-
+      resetStages();
       start = performance.now();
       const rendered = renderer.render(normalized);
       const renderMs = performance.now() - start;
+      const stages = readStages();
       assertRender(rendered, "canonical", snapshot.messages.length);
+      if (stages.semanticIndexCalls !== 1 || stages.decorationLifecycleCalls !== 1) {
+        throw new Error(`Expected one Semantic Index build and one decoration lifecycle per render, received ${stages.semanticIndexCalls}/${stages.decorationLifecycleCalls}`);
+      }
+      if (stages.parseAdapterCalls !== snapshot.messages.length) {
+        throw new Error(`Expected ${snapshot.messages.length} adapter parses on the canonical path, received ${stages.parseAdapterCalls}`);
+      }
 
       clearLifecycleQueues();
       start = performance.now();
-      host.mount({
-        readerRoot: rendered.root,
-        turnsEl: rendered.turnsEl,
-        scrollEl: rendered.scrollEl,
-        snapshot,
-        assistantTurnEls: rendered.assistantTurnEls,
-      });
+      mountRendered(rendered, snapshot);
       const mountMs = performance.now() - start;
+      assertBound(rendered);
 
       start = performance.now();
       viewReader.replaceChildren(rendered.root);
@@ -457,10 +541,19 @@ try {
       const insertionMs = performance.now() - start;
       const deferred = drainDeferredLifecycle();
       const nodeCount = rendered.root.querySelectorAll("*").length + 1;
+      const indexed = rendered.semanticIndex;
 
       return {
         normalizeMs,
-        markdownMs,
+        parseAdapterMs: stages.parseAdapterMs,
+        parseAdapterCalls: stages.parseAdapterCalls,
+        renderIrMs: stages.renderIrMs,
+        renderIrCalls: stages.renderIrCalls,
+        contentRendererMs: stages.contentRendererMs,
+        contentRendererCalls: stages.contentRendererCalls,
+        semanticIndexMs: stages.semanticIndexMs,
+        decorationLifecycleMs: stages.decorationLifecycleMs,
+        shellCompositionResidualMs: renderMs - (stages.parseAdapterMs + stages.renderIrMs + stages.contentRendererMs + stages.semanticIndexMs + stages.decorationLifecycleMs),
         renderMs,
         insertionMs,
         mountMs,
@@ -469,6 +562,9 @@ try {
         deferredLateMs: deferred.lateMs,
         lifecycleHookCalls: deferred.hookCallCount,
         nodeCount,
+        indexedMessages: indexed.messages().length,
+        indexedBlocks: indexed.blocks().length,
+        indexedTexts: indexed.texts().length,
       };
     }
 
@@ -480,39 +576,22 @@ try {
       const normalized = renderer.normalizeInput(snapshot);
       const normalizeMs = performance.now() - start;
 
-      const originalSanitizeHtml = sanitizer.sanitizeHtml;
-      let sanitizerMs = 0;
-      let sanitizerCalls = 0;
-      sanitizer.sanitizeHtml = function measuredSanitizeHtml(value) {
-        const sanitizeStart = performance.now();
-        try {
-          return originalSanitizeHtml.call(this, value);
-        } finally {
-          sanitizerMs += performance.now() - sanitizeStart;
-          sanitizerCalls += 1;
-        }
-      };
-
-      let rendered;
+      resetStages();
       start = performance.now();
-      try {
-        rendered = renderer.render(normalized);
-      } finally {
-        sanitizer.sanitizeHtml = originalSanitizeHtml;
-      }
+      const rendered = renderer.render(normalized);
       const renderMs = performance.now() - start;
+      const stages = readStages();
       assertRender(rendered, "rich", snapshot.messages.length);
+      if (stages.sanitizerV2Calls !== snapshot.messages.length) {
+        throw new Error(`Expected ${snapshot.messages.length} sanitizer v2 fragments on the rich path, received ${stages.sanitizerV2Calls}`);
+      }
+      if (stages.semanticIndexCalls !== 1) throw new Error("Expected one Semantic Index build per rich render");
 
       clearLifecycleQueues();
       start = performance.now();
-      host.mount({
-        readerRoot: rendered.root,
-        turnsEl: rendered.turnsEl,
-        scrollEl: rendered.scrollEl,
-        snapshot,
-        assistantTurnEls: rendered.assistantTurnEls,
-      });
+      mountRendered(rendered, snapshot);
       const mountMs = performance.now() - start;
+      assertBound(rendered);
 
       start = performance.now();
       viewReader.replaceChildren(rendered.root);
@@ -523,8 +602,10 @@ try {
 
       return {
         normalizeMs,
-        sanitizerMs,
-        sanitizerCalls,
+        sanitizerMs: stages.sanitizerV2Ms,
+        sanitizerCalls: stages.sanitizerV2Calls,
+        semanticIndexMs: stages.semanticIndexMs,
+        decorationLifecycleMs: stages.decorationLifecycleMs,
         renderMs,
         insertionMs,
         mountMs,
@@ -540,13 +621,7 @@ try {
       resetMountedState();
       const normalized = renderer.normalizeInput(snapshot);
       const rendered = renderer.render(normalized);
-      host.mount({
-        readerRoot: rendered.root,
-        turnsEl: rendered.turnsEl,
-        scrollEl: rendered.scrollEl,
-        snapshot,
-        assistantTurnEls: rendered.assistantTurnEls,
-      });
+      mountRendered(rendered, snapshot);
       viewReader.replaceChildren(rendered.root);
       forceLayout();
       drainDeferredLifecycle();
@@ -561,7 +636,9 @@ try {
       const previousSnapshot = refreshBench.getSnapshot();
       const previousEditOverrides = refreshBench.getOverrides();
       const previousRoot = host.getReaderRoot();
+      const previousRender = refreshBench.getCurrentRender();
       const freshSnapshot = structuredClone(snapshot);
+      resetStages();
 
       const totalStart = performance.now();
       const mount = refreshBench.getReusableReaderMount(previousSnapshot);
@@ -585,13 +662,26 @@ try {
       }
       refreshBench.setState(freshSnapshot, nextEditOverrides, 1);
       const immediateTotalMs = performance.now() - totalStart;
+      const stages = readStages();
       if (host.getReaderRoot() !== previousRoot) throw new Error("Fast refresh replaced the mounted Reader root");
+      /* Exact-equivalence reuse is a behavioral invariant: no Renderer rebuild, no
+       * new Semantic Index, no new decoration lifecycle, no disposal. */
+      if (stages.semanticIndexCalls !== 0 || stages.decorationLifecycleCalls !== 0 || stages.parseAdapterCalls !== 0 || stages.disposeAllCalls !== 0) {
+        throw new Error(`Fast refresh performed render work: index=${stages.semanticIndexCalls} lifecycle=${stages.decorationLifecycleCalls} parse=${stages.parseAdapterCalls} disposeAll=${stages.disposeAllCalls}`);
+      }
+      const currentRender = refreshBench.getCurrentRender();
+      if (!currentRender || currentRender !== previousRender || currentRender.semanticIndex !== previousRender.semanticIndex) {
+        throw new Error("Fast refresh replaced the bound current-render Semantic Index / lifecycle");
+      }
 
       return {
         immediateTotalMs,
         normalizeMs,
         equivalenceGateMs,
         rootPreserved: 1,
+        fullRenderAvoided: 1,
+        indexBuilds: stages.semanticIndexCalls,
+        lifecycleBuilds: stages.decorationLifecycleCalls,
       };
     }
 
@@ -622,32 +712,36 @@ try {
       const equivalenceGateMs = performance.now() - start;
       if (eligible) throw new Error("Changed canonical content incorrectly qualified for fast refresh");
 
-      host.unmount("benchmark:changed-snapshot-refresh");
+      const previousRender = refreshBench.getCurrentRender();
+      resetStages();
+      refreshBench.unmount("benchmark:changed-snapshot-refresh");
       viewReader.replaceChildren();
       clearLifecycleQueues();
       start = performance.now();
       const rendered = renderer.render(rendererInput);
       const renderMs = performance.now() - start;
       assertRender(rendered, "canonical", changedSnapshot.messages.length);
-      host.mount({
-        readerRoot: rendered.root,
-        turnsEl: rendered.turnsEl,
-        scrollEl: rendered.scrollEl,
-        snapshot: changedSnapshot,
-        assistantTurnEls: rendered.assistantTurnEls,
-      });
+      mountRendered(rendered, changedSnapshot);
       viewReader.replaceChildren(rendered.root);
       forceLayout();
       refreshBench.setState(changedSnapshot, nextEditOverrides, 1);
       const immediateTotalMs = performance.now() - totalStart;
+      const stages = readStages();
       drainDeferredLifecycle();
       if (previousRoot?.isConnected) throw new Error("Changed refresh left the previous Reader root connected");
+      if (stages.disposeAllCalls !== 1) throw new Error(`Changed refresh must dispose the previous decoration lifecycle exactly once (received ${stages.disposeAllCalls})`);
+      if (stages.semanticIndexCalls !== 1 || stages.decorationLifecycleCalls !== 1) throw new Error("Changed refresh must build exactly one new Semantic Index and lifecycle");
+      const currentRender = refreshBench.getCurrentRender();
+      if (!currentRender || currentRender === previousRender || currentRender.root !== rendered.root) throw new Error("Changed refresh did not rebind the new render");
 
       return {
         immediateTotalMs,
         equivalenceGateMs,
         renderMs,
         rootReplaced: 1,
+        fullRenderPerformed: 1,
+        indexBuilds: stages.semanticIndexCalls,
+        previousLifecycleDisposed: stages.disposeAllCalls,
       };
     }
 
@@ -657,7 +751,7 @@ try {
 
       const totalStart = performance.now();
       let start = performance.now();
-      host.unmount("benchmark:same-snapshot-refresh");
+      refreshBench.unmount("benchmark:same-snapshot-refresh");
       viewReader.replaceChildren();
       const teardownMs = performance.now() - start;
 
@@ -672,13 +766,7 @@ try {
 
       clearLifecycleQueues();
       start = performance.now();
-      host.mount({
-        readerRoot: rendered.root,
-        turnsEl: rendered.turnsEl,
-        scrollEl: rendered.scrollEl,
-        snapshot,
-        assistantTurnEls: rendered.assistantTurnEls,
-      });
+      mountRendered(rendered, snapshot);
       const mountMs = performance.now() - start;
 
       start = performance.now();
@@ -746,8 +834,9 @@ try {
         fastRefresh,
         changedRefresh,
         derived: {
-          canonicalDomConstructionResidualMs: round(canonical.renderMs.median - canonical.markdownMs.median),
-          richParseCleanupDomResidualMs: round(rich.renderMs.median - rich.sanitizerMs.median),
+          canonicalShellCompositionResidualMs: round(canonical.shellCompositionResidualMs.median),
+          richSanitizerShareOfRenderMs: round(rich.sanitizerMs.median),
+          richNonSanitizerResidualMs: round(rich.renderMs.median - rich.sanitizerMs.median),
         },
       });
     }
@@ -767,16 +856,37 @@ try {
         sizes: benchmarkConfig.sizes,
         warmups: benchmarkConfig.warmups,
         samples: benchmarkConfig.samples,
+        slowdownMs: benchmarkConfig.slowdownMs,
         statistic: "median with min/max",
         fixture: "deterministic mixed-role saved-chat content with paragraphs, Markdown, lists, code, tables, links, Unicode, and sparse image attachments",
-        insertion: "replaceChildren plus forced layout with Studio CSS loaded",
-        refresh: "T14 full-rebuild baseline plus T15 exact-equivalence fast refresh and changed-content full fallback, all excluding archive retrieval",
+        insertion: "replaceChildren plus forced layout with Studio CSS + reference profile CSS loaded",
+        refresh: "T14 full-rebuild baseline plus T15 exact-equivalence fast refresh and changed-content full fallback through the S4C Reader bridge/unmount seam, all excluding archive retrieval",
+        chain: "accepted M03 Renderer chain in production order (sanitizer policy/engine/v2, markdown-it, H2O GFM, markdown engine, IR adapter, Render IR, semantic ingress, Semantic Index, DecorationContribution, PresentationProfile, ContentRenderer, chat renderer)",
+        stages: {
+          NORMALIZE: { metric: "normalizeMs", measurementKind: "ISOLATED_STAGE", additivity: "EXCLUSIVE", note: "renderer.normalizeInput() called before render(), exactly as renderReader does" },
+          PARSE_ADAPTER: { metric: "parseAdapterMs", measurementKind: "ACTUAL_PIPELINE", additivity: "INCLUSIVE_WITHIN_END_TO_END", note: "markdownIrAdapter.markdownToBlocks calls made by renderSemanticBody during render()" },
+          RENDER_IR: { metric: "renderIrMs", measurementKind: "ACTUAL_PIPELINE", additivity: "INCLUSIVE_WITHIN_END_TO_END", note: "renderIR.createConversation + validate calls during render()" },
+          RENDERER_PROFILE: { metric: "contentRendererMs", measurementKind: "ACTUAL_PIPELINE", additivity: "INCLUSIVE_WITHIN_END_TO_END", note: "contentRenderer.renderBlocks (content DOM through PresentationProfile hooks); shell composition is only measurable inside END_TO_END (shellCompositionResidualMs = renderMs minus the measured stages) without Product instrumentation" },
+          SEMANTIC_INDEX: { metric: "semanticIndexMs", measurementKind: "ACTUAL_PIPELINE", additivity: "INCLUSIVE_WITHIN_END_TO_END", note: "semanticIndex.createShellIndex during render()" },
+          DECORATION_LIFECYCLE: { metric: "decorationLifecycleMs", measurementKind: "ACTUAL_PIPELINE", additivity: "INCLUSIVE_WITHIN_END_TO_END", note: "decorationContribution.createLifecycle during render()" },
+          SANITIZER_V2: { metric: "rich.sanitizerMs", measurementKind: "ACTUAL_PIPELINE", additivity: "INCLUSIVE_WITHIN_END_TO_END", note: "htmlSanitizer.sanitizeToFragment on the rich replay path (replaces the retired v1 seam; NB-1)" },
+          END_TO_END_RENDER: { metric: "renderMs", measurementKind: "ACTUAL_PIPELINE", additivity: "NON_ADDITIVE", note: "chatRenderer.render() wall time; the stage intervals above are disjoint sub-intervals of it" },
+          EXACT_EQUIVALENCE_REFRESH: { metric: "fastRefresh.immediateTotalMs", measurementKind: "ACTUAL_PIPELINE", additivity: "NON_ADDITIVE", note: "normalize + canReuseReaderDOM gate + host.updateSnapshot with the mounted root, index and lifecycle preserved (0 index builds, 0 disposals)" },
+          CHANGED_CONTENT_REFRESH: { metric: "changedRefresh.immediateTotalMs", measurementKind: "ACTUAL_PIPELINE", additivity: "NON_ADDITIVE", note: "gate rejection + studioHostUnmount (disposeAll) + full render + bind + mount + insertion" },
+        },
       },
       results,
     };
   }, config);
 
   result.environment.browserExecutable = chromiumExecutable;
+  result.environment.browserFamily = "chromium";
+  result.environment.browserVersion = browser.version();
+  result.environment.playwrightVersion = (() => { try { return require("playwright/package.json").version; } catch { return null; } })();
+  result.environment.nodePlatform = process.platform;
+  result.environment.arch = process.arch;
+  result.environment.osRelease = os.release();
+  result.environment.osMajor = String(os.release()).split(".")[0];
 
   if (pageErrors.length) {
     result.pageErrors = pageErrors;
