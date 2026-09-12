@@ -29,6 +29,12 @@ const A1_3_VALIDATOR_REL = 'tools/validation/reader-notes/validate-reader-notes-
 const A1_2_VALIDATOR_REL = 'tools/validation/reader-notes/validate-reader-notes-mvp-a1_2.mjs';
 const A1_1_VALIDATOR_REL = 'tools/validation/reader-notes/validate-reader-notes-mvp-a1_1.mjs';
 const A0_VALIDATOR_REL = 'tools/validation/reader-notes/validate-reader-notes-architecture-contract-v1_2.mjs';
+/* M03 P4 S4C T8 slice A: the message-root lookup migrates to the Renderer's
+ * read-only Semantic Index (primary) with the [data-message-id] scan retained
+ * as the compatibility fallback; studio.js exposes the current render's index. */
+const SEMANTIC_INDEX_REL = 'src-surfaces-base/studio/renderer/semantic/semantic-index.v1.js';
+const STUDIO_JS_REL = 'src-surfaces-base/studio/studio.js';
+const SEMANTIC_INDEX_SCHEMA = 'h2o.renderer.semantic-index';
 
 const RESOLVER_FLAG_KEY = 'studio.readerNotes.anchorResolver.enabled';
 const CONSUMER_FLAG_KEY = 'studio.readerNotes.highlightResolutionConsumer.enabled';
@@ -218,6 +224,22 @@ function makeElement(owner, tagName, attrs = {}, children = [], queryLog = null)
     hasAttribute(name) {
       return attr.has(name);
     },
+    removeAttribute(name) {
+      attr.delete(name);
+      delete this._attrs[name];
+    },
+    /* S4C: the real Semantic Index walks element children and class lists. */
+    get children() {
+      return this.childNodes.filter((child) => child && child.nodeType === 1);
+    },
+    get className() {
+      return attr.has('class') ? attr.get('class') : '';
+    },
+    classList: {
+      contains(name) {
+        return String(attr.get('class') || '').split(/\s+/).includes(name);
+      },
+    },
     querySelectorAll(selector) {
       if (queryLog) queryLog.push(String(selector));
       const out = [];
@@ -308,13 +330,14 @@ function jsonClone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function makeSandbox({ consumerFlag = false, resolverFlag = true, annotations = [], resolverOverride = null, annotationsThrow = null } = {}) {
+function makeSandbox({ consumerFlag = false, resolverFlag = true, annotations = [], resolverOverride = null, annotationsThrow = null, readerSemanticIndex = undefined, withSemanticIndexModule = false } = {}) {
   const storageCalls = [];
   const flagCalls = [];
   const writeCalls = [];
   const hookCalls = [];
   const annotationCalls = [];
   const resolverCalls = [];
+  const accessorCalls = [];
   const sandbox = {
     H2O: {
       flags: {
@@ -369,14 +392,89 @@ function makeSandbox({ consumerFlag = false, resolverFlag = true, annotations = 
   };
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
+  /* S4C: the Reader bridge (H2O.Studio.getReaderSemanticIndex) is a stub here -
+   * a function, a throwing function, or absent - so the consumer's use of it is
+   * observable; the real studio.js functions are executed separately. */
+  if (readerSemanticIndex !== undefined) {
+    sandbox.H2O.Studio.getReaderSemanticIndex = function (root) {
+      accessorCalls.push(root);
+      if (typeof readerSemanticIndex === 'function') return readerSemanticIndex(root);
+      return readerSemanticIndex;
+    };
+  }
   vm.createContext(sandbox);
+  if (withSemanticIndexModule) vm.runInContext(read(SEMANTIC_INDEX_REL), sandbox, { filename: SEMANTIC_INDEX_REL });
   vm.runInContext(read(CORE_REL), sandbox, { filename: CORE_REL });
   vm.runInContext(read(DOM_REL), sandbox, { filename: DOM_REL });
   if (resolverOverride) {
     sandbox.H2O.Studio.readerNotes.anchorResolverDom = resolverOverride(resolverCalls);
   }
   vm.runInContext(read(CONSUMER_REL), sandbox, { filename: CONSUMER_REL });
-  return { sandbox, storageCalls, flagCalls, writeCalls, hookCalls, annotationCalls, resolverCalls };
+  return { sandbox, storageCalls, flagCalls, writeCalls, hookCalls, annotationCalls, resolverCalls, accessorCalls };
+}
+
+/* S4C helpers: the REAL Semantic Index module over the fake reader fixture. The
+ * Renderer supplies projection metadata through describeTurn (never through
+ * DOM attributes), so a fixture may carry NO data-message-id at all and still
+ * project sourceRef.messageId. */
+function buildSemanticIndex(rt, fixture, { chatId = CHAT_ID, snapshotId = 'snap-a2a4', meta = null } = {}) {
+  const api = rt.sandbox.H2O.Studio.Renderer.semanticIndex;
+  assert.ok(api && api.__installed === true, 'real Semantic Index module installed in the sandbox');
+  return api.createShellIndex({
+    root: fixture.frame,
+    turnsEl: fixture.scroll,
+    renderMode: 'canonical',
+    source: { chatId, snapshotId },
+    semanticConversation: null,
+    describeTurn: (turnEl) => (meta ? (meta.get(turnEl) || null) : null),
+    contentProjections: [],
+    contentBodies: new Set(),
+  });
+}
+
+/* A shape-valid index whose records are chosen by the test (identity traps). */
+function fakeSemanticIndex(root, messages) {
+  return Object.freeze({
+    schema: SEMANTIC_INDEX_SCHEMA,
+    schemaVersion: 1,
+    version: 'fake',
+    getConversation: () => ({ projectionKey: 'conversation:path:0', kind: 'conversation', target: root }),
+    messages: () => messages,
+  });
+}
+
+function extractStudioFunction(source, name) {
+  const match = new RegExp(`\\bfunction\\s+${name}\\s*\\(`).exec(source);
+  assert.ok(match, `studio.js function ${name} must exist`);
+  const braceOpen = source.indexOf('{', match.index);
+  let depth = 0;
+  for (let i = braceOpen; i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(match.index, i + 1);
+    }
+  }
+  throw new Error(`unterminated studio.js function ${name}`);
+}
+
+function spyResolver(calls) {
+  return (resolverCalls) => ({
+    __installed: true,
+    readonly: true,
+    flagKey: RESOLVER_FLAG_KEY,
+    isEnabled: () => true,
+    resolveHighlight(annotation, msgEl, options) {
+      resolverCalls.push('called');
+      calls.push({ msgEl, options });
+      return { status: 'anchored', span: { start: 6, end: 24 }, selectorUsed: 'textQuote', confidence: 1, reason: 'textQuote-exact', range: { toString: () => EXACT }, diagnostics: { xpathDeferred: true } };
+    },
+    diagnose: () => ({ coreAvailable: true, deferredSelectors: ['xpath'] }),
+  });
+}
+
+function resolveWith(rt, fixture, options) {
+  return rt.sandbox.H2O.Studio.readerNotes.highlightResolutionConsumer.resolveForItem(ITEM_ID, fixture.frame, options);
 }
 
 function storageWrites(calls) {
@@ -676,6 +774,279 @@ check('own feature flag gates only the consumer and upstream self-gating is resp
   const out = rt.sandbox.H2O.Studio.readerNotes.highlightResolutionConsumer.resolveForItem(ITEM_ID, buildSavedReaderFixture().frame);
   assert.equal(out.diagnostics.upstream.resolverEnabled, false);
   assert.equal(out.unresolved[0].reason, 'resolver-disabled');
+});
+
+/* ---- M03 P4 S4C T8 slice A: Semantic Index becomes the primary message-root
+ * authority; data-message-id stays the compatibility fallback. --------------- */
+
+const ACCEPTED_ROW_KEYS = ['annotationId', 'nativeId', 'answerId', 'source', 'status', 'span', 'selectorUsed', 'confidence', 'reason', 'text', 'diagnostics'];
+
+function buildIndexedFixture({ answerId = ANSWER_ID, withAttribute = true, queryLog = [] } = {}) {
+  /* The Renderer's projection metadata path: sourceRef.messageId comes from
+   * describeTurn, not from the attribute; the attribute may be absent. */
+  const fixture = buildSavedReaderFixture(answerId, queryLog);
+  if (!withAttribute) fixture.msgEl.removeAttribute('data-message-id');
+  const meta = new Map([[fixture.turn, { role: 'assistant', turnNo: 2, messageId: answerId, turnId: 't-2' }]]);
+  return { fixture, meta };
+}
+
+check('S4C: consumer source names the Semantic Index primary authority and keeps the compatibility scan verbatim', () => {
+  const source = read(CONSUMER_REL);
+  has(source, 'getReaderSemanticIndex', 'current Reader index bridge');
+  has(source, 'options.semanticIndex', 'explicit index option');
+  has(source, "sourceRef.messageId !== answerId", 'answerId matched against sourceRef.messageId only');
+  has(source, 'function findMessageRootBySemanticIndex', 'index path');
+  has(source, 'function findMessageRootByCompatibilityAttribute', 'compat path');
+  has(source, "querySelectorAll('[data-message-id]')", 'compat scan retained');
+  hasNot(source, '[data-message-id="', 'no selector interpolation');
+  for (const token of ['projectionKey === answerId', 'renderKey === answerId', 'ownerRef === answerId', 'answerId === record.projectionKey', 'answerId === record.renderKey', 'textContent', 'decorationContribution', 'decorationContributions', '.register(', 'data-h2o-projection', 'data-h2o-message-key', 'data-h2o-turn-key', 'data-h2o-block-key', 'data-h2o-text-key', 'scrollIntoView', 'scrollTo(', 'TreeWalker']) {
+    hasNot(source, token, `S4C consumer must not contain ${token}`);
+  }
+  assert.ok(!/\b(?:semanticIndex|index|explicit|current)\.\w+\s*=[^=]/.test(source.replace(/\/\*[\s\S]*?\*\//g, '')), '16: the consumer never writes into a Semantic Index');
+  sourceSafetyChecks();
+});
+
+check('S4C: studio.js exposes a read-only current-render Semantic Index bridge on the existing Reader lifecycle seam (static)', () => {
+  const studio = read(STUDIO_JS_REL);
+  has(studio, 'H2O.Studio.getReaderSemanticIndex = getReaderSemanticIndex;', 'accessor exposed beside the other read-only Studio accessors');
+  has(studio, 'currentReaderRender: null,', 'Reader-owned current-render state field');
+  const build = extractStudioFunction(studio, 'buildReaderDOM');
+  has(build, 'const rendererResult = renderer.render(rendererInput, { getEditOverride });', 'Renderer result received');
+  has(build, 'bindReaderSemanticIndex(rendererResult);', 'binding happens when buildReaderDOM receives the Renderer result');
+  const unmount = extractStudioFunction(studio, 'studioHostUnmount');
+  has(unmount, 'state.currentReaderRender = null;', 'unmount clears the bridge');
+  has(unmount, 'state.currentReaderEditOverrides = null;', 'existing per-render Reader state is cleared on the same seam');
+  const bind = extractStudioFunction(studio, 'bindReaderSemanticIndex');
+  const get = extractStudioFunction(studio, 'getReaderSemanticIndex');
+  for (const [name, text] of [['bindReaderSemanticIndex', bind], ['getReaderSemanticIndex', get]]) {
+    for (const token of ['querySelector', 'getElementById', 'document.', 'localStorage', 'sessionStorage', 'indexedDB', 'decorationContributions', 'scrollTo', 'scrollIntoView', 'createShellIndex', 'Object.assign(', 'JSON.parse']) {
+      hasNot(text, token, `${name} must not contain ${token}`);
+    }
+  }
+  has(get, 'if (root !== undefined && root !== current.root) return null;', 'an unmatched root yields null');
+  has(bind, 'Object.freeze({ root, semanticIndex })', 'binding is a frozen root/index pair');
+  assert.equal((studio.match(/bindReaderSemanticIndex\(/g) || []).length, 2, 'exactly one binding call site (definition + buildReaderDOM)');
+});
+
+check('S4C: current Reader Semantic Index accessor returns the exact bound index, null for a foreign root, null once unmounted (executed real studio.js functions)', () => {
+  const studio = read(STUDIO_JS_REL);
+  const state = { currentReaderEditOverrides: [], currentReaderRender: null };
+  const unmounts = [];
+  const sandbox = vm.createContext({ state, W: { H2O: { studioHost: { unmount(reason) { unmounts.push(reason); } } } } });
+  vm.runInContext([
+    extractStudioFunction(studio, 'bindReaderSemanticIndex'),
+    extractStudioFunction(studio, 'getReaderSemanticIndex'),
+    extractStudioFunction(studio, 'studioHostUnmount'),
+    'this.bind = bindReaderSemanticIndex; this.get = getReaderSemanticIndex; this.unmount = studioHostUnmount;',
+  ].join('\n'), sandbox);
+  const rootA = { tag: 'cgFrame-A' }; const rootB = { tag: 'cgFrame-B' };
+  const ixA = Object.freeze({ schema: SEMANTIC_INDEX_SCHEMA, id: 'A' }); const ixB = Object.freeze({ schema: SEMANTIC_INDEX_SCHEMA, id: 'B' });
+  assert.equal(sandbox.get(), null, 'no current render -> null'); assert.equal(sandbox.get(rootA), null);
+  sandbox.bind({ root: rootA, semanticIndex: ixA, turnsEl: {}, decorationContributions: { list() { return []; } } });
+  assert.equal(sandbox.get(rootA), ixA, '1: the exact index of the current render'); assert.equal(sandbox.get(), ixA, 'unqualified call returns the current index');
+  assert.equal(sandbox.get(rootB), null, '2: a foreign root receives nothing'); assert.equal(sandbox.get(null), null, 'null is not the current root'); assert.equal(sandbox.get({ ...rootA }), null, 'identity, not shape');
+  assert.equal(Object.isFrozen(state.currentReaderRender), true, 'bound pair frozen'); assert.deepEqual(Object.keys(state.currentReaderRender), ['root', 'semanticIndex'], 'only root + index are tracked (no decoration lifecycle, no Reader internals)');
+  sandbox.bind({ root: rootB, semanticIndex: ixB });
+  assert.equal(sandbox.get(rootA), null, 'a replaced render no longer answers for the old root'); assert.equal(sandbox.get(rootB), ixB, 'the new render answers');
+  sandbox.unmount('studio:test');
+  assert.deepEqual(unmounts, ['studio:test']); assert.equal(state.currentReaderRender, null, '3: unmount clears the bridge'); assert.equal(state.currentReaderEditOverrides, null); assert.equal(sandbox.get(), null); assert.equal(sandbox.get(rootB), null);
+  sandbox.bind({ root: rootA }); assert.equal(state.currentReaderRender, null, 'never manufactures an index'); assert.equal(sandbox.get(rootA), null);
+  sandbox.bind({ semanticIndex: ixA }); assert.equal(sandbox.get(), null, 'no root, no binding');
+  sandbox.bind(null); assert.equal(sandbox.get(), null);
+});
+
+check('S4C: the Semantic Index path resolves the message root by sourceRef.messageId with data-message-id REMOVED and without the compatibility scan', () => {
+  const annotation = attributedHighlightFixture();
+  const rows = {};
+  for (const mode of ['reader-bridge', 'explicit-option']) {
+    const resolverSeen = [];
+    const queryLog = [];
+    const { fixture, meta } = buildIndexedFixture({ withAttribute: false, queryLog });
+    let index = null;
+    const rt = makeSandbox({ consumerFlag: true, resolverFlag: true, annotations: [annotation], withSemanticIndexModule: true, resolverOverride: spyResolver(resolverSeen), readerSemanticIndex: mode === 'reader-bridge' ? (root) => (root === fixture.frame ? index : null) : undefined });
+    index = buildSemanticIndex(rt, fixture, { meta });
+    assert.equal(index.messages().length, 1); assert.deepEqual(plain(index.messages()[0].sourceRef), { turnId: 't-2', messageId: ANSWER_ID }, 'sourceRef carried by describeTurn metadata, not by the attribute');
+    assert.equal(fixture.msgEl.hasAttribute('data-message-id'), false, 'fixture target carries no data-message-id');
+    assert.equal(fixture.frame.querySelectorAll('[data-message-id]').length, 0, 'the compatibility scan could not find it'); queryLog.length = 0;
+    const before = markupSnapshot(fixture.frame);
+    const out = resolveWith(rt, fixture, mode === 'explicit-option' ? { semanticIndex: index, consumer: 's4c' } : { consumer: 's4c' });
+    assert.equal(out.diagnostics.reason, 'ok'); assert.equal(out.resolved.length, 1, `${mode}: resolved through the index`); assert.equal(out.unresolved.length, 0);
+    assert.deepEqual(queryLog, [], `${mode}: 6/7 - no querySelectorAll("[data-message-id]") on the successful index path`);
+    assert.equal(resolverSeen.length, 1); assert.equal(resolverSeen[0].msgEl, fixture.msgEl, `${mode}: 13 - the anchor resolver receives the exact indexed message element`); assert.equal(resolverSeen[0].msgEl, index.messages()[0].target);
+    assert.deepEqual(plain(out.diagnostics.messageRootLookup), { primary: 'semantic-index', fallback: 'data-message-id', semanticIndexAvailable: true, bySemanticIndex: 1, byCompatibilityAttribute: 0 });
+    if (mode === 'reader-bridge') { assert.equal(rt.accessorCalls.length, 1, 'one bridge read per invocation'); assert.equal(rt.accessorCalls[0], fixture.frame, 'the bridge is asked for THIS root'); }
+    else assert.equal(rt.accessorCalls.length, 0, 'a valid explicit index takes priority; the bridge is not consulted');
+    assert.equal(markupSnapshot(fixture.frame), before, 'read-only: no wrapper, attribute or node added'); assert.equal(Object.isFrozen(index), true, '16: the index stays frozen'); assert.deepEqual(Object.keys(index).sort(), ['basis', 'blocks', 'getBlock', 'getConversation', 'getGeometry', 'getMessage', 'getText', 'getTurn', 'messages', 'renderMode', 'schema', 'schemaVersion', 'semanticCorrespondenceLost', 'texts', 'turns', 'version'], '16: no mutation method on the index');
+    const row = out.resolved[0]; assert.deepEqual(Object.keys(row), ACCEPTED_ROW_KEYS, '14: row schema unchanged'); assertNoLiveReferences(row); assertSerializable(out);
+    rows[mode] = plain(out.resolved);
+  }
+  assert.deepEqual(rows['reader-bridge'], rows['explicit-option']);
+  /* Same fixture WITH the attribute present: the index still wins and the scan never runs. */
+  const queryLog = []; const resolverSeen = []; const { fixture, meta } = buildIndexedFixture({ withAttribute: true, queryLog });
+  let index = null; const rt = makeSandbox({ consumerFlag: true, annotations: [annotation], withSemanticIndexModule: true, resolverOverride: spyResolver(resolverSeen), readerSemanticIndex: (root) => (root === fixture.frame ? index : null) });
+  index = buildSemanticIndex(rt, fixture, { meta }); queryLog.length = 0;
+  const out = resolveWith(rt, fixture);
+  assert.equal(out.resolved.length, 1); assert.deepEqual(queryLog, [], 'index primary even when the attribute exists'); assert.equal(resolverSeen[0].msgEl, fixture.msgEl);
+  assert.deepEqual(rows['reader-bridge'], plain(out.resolved), 'rows identical with or without the attribute');
+});
+
+check('S4C: answerId is a SOURCE identifier - projectionKey, renderKey and ownerRef never match it', () => {
+  const resolverSeen = [];
+  const { fixture } = buildIndexedFixture({ withAttribute: false });
+  /* Records whose projection / render / owner identities EQUAL the answerId but whose sourceRef does not. */
+  const trapIndex = fakeSemanticIndex(fixture.frame, Object.freeze([
+    Object.freeze({ projectionKey: ANSWER_ID, kind: 'message', renderKey: ANSWER_ID, ownerRef: Object.freeze({ id: ANSWER_ID }), sourceRef: Object.freeze({ messageId: 'other-source-id' }), target: fixture.msgEl }),
+  ]));
+  let rt = makeSandbox({ consumerFlag: true, annotations: [attributedHighlightFixture()], resolverOverride: spyResolver(resolverSeen), readerSemanticIndex: trapIndex });
+  let out = resolveWith(rt, fixture);
+  assert.equal(out.resolved.length, 0); assert.equal(out.unresolved.length, 1); assert.equal(out.unresolved[0].reason, 'message-root-missing', '5: identity traps do not resolve; compat cannot either (attribute absent)'); assert.deepEqual(resolverSeen, []);
+  assert.deepEqual(plain(out.diagnostics.messageRootLookup), { primary: 'semantic-index', fallback: 'data-message-id', semanticIndexAvailable: true, bySemanticIndex: 0, byCompatibilityAttribute: 0 });
+  /* Control: the same record with a matching sourceRef resolves. */
+  const okIndex = fakeSemanticIndex(fixture.frame, Object.freeze([
+    Object.freeze({ projectionKey: 'message:path:0', kind: 'message', renderKey: null, ownerRef: null, sourceRef: Object.freeze({ messageId: ANSWER_ID }), target: fixture.msgEl }),
+  ]));
+  rt = makeSandbox({ consumerFlag: true, annotations: [attributedHighlightFixture()], resolverOverride: spyResolver(resolverSeen), readerSemanticIndex: okIndex });
+  out = resolveWith(rt, fixture);
+  assert.equal(out.resolved.length, 1); assert.equal(resolverSeen[0].msgEl, fixture.msgEl);
+  /* An annotation whose answerId is literally a projection key must not match a record by key. */
+  const real = makeSandbox({ consumerFlag: true, annotations: [attributedHighlightFixture('message:source:' + ANSWER_ID)], withSemanticIndexModule: true, resolverOverride: spyResolver(resolverSeen), readerSemanticIndex: (root) => (root === fixture.frame ? realIndex : null) });
+  const { fixture: f2, meta } = buildIndexedFixture({ withAttribute: false }); const realIndex = buildSemanticIndex(real, f2, { meta });
+  assert.equal(realIndex.messages()[0].projectionKey, 'message:source:' + ANSWER_ID, 'the projection key literally equals the crafted answerId');
+  out = resolveWith(real, f2);
+  assert.equal(out.unresolved.length, 1); assert.equal(out.unresolved[0].reason, 'message-root-missing', '5: a projection key is not a source id');
+});
+
+check('S4C: without any Semantic Index the compatibility lookup stays the sole authority with identical rows (8)', () => {
+  const annotation = attributedHighlightFixture();
+  const resolverSeen = [];
+  /* No bridge at all (accessor absent), attribute present -> compat path, one scan. */
+  let queryLog = []; let fixture = buildSavedReaderFixture(ANSWER_ID, queryLog);
+  let rt = makeSandbox({ consumerFlag: true, annotations: [annotation], resolverOverride: spyResolver(resolverSeen) });
+  assert.equal(typeof rt.sandbox.H2O.Studio.getReaderSemanticIndex, 'undefined');
+  const compat = resolveWith(rt, fixture);
+  assert.equal(compat.resolved.length, 1); assert.deepEqual(queryLog, ['[data-message-id]'], '8: the compat scan runs exactly as before'); assert.equal(resolverSeen[0].msgEl, fixture.msgEl);
+  assert.deepEqual(plain(compat.diagnostics.messageRootLookup), { primary: 'semantic-index', fallback: 'data-message-id', semanticIndexAvailable: false, bySemanticIndex: 0, byCompatibilityAttribute: 1 });
+  /* Bridge present but returning null (no current render) -> same. */
+  queryLog = []; fixture = buildSavedReaderFixture(ANSWER_ID, queryLog);
+  rt = makeSandbox({ consumerFlag: true, annotations: [annotation], resolverOverride: spyResolver(resolverSeen), readerSemanticIndex: null });
+  const viaNull = resolveWith(rt, fixture);
+  assert.equal(viaNull.resolved.length, 1); assert.deepEqual(queryLog, ['[data-message-id]']); assert.equal(rt.accessorCalls.length, 1);
+  /* Bridge returning a non-index or throwing -> compat, contained. */
+  for (const bad of [{}, 'nope', () => { throw new Error('bridge boom'); }]) {
+    queryLog = []; fixture = buildSavedReaderFixture(ANSWER_ID, queryLog);
+    rt = makeSandbox({ consumerFlag: true, annotations: [annotation], resolverOverride: spyResolver(resolverSeen), readerSemanticIndex: bad });
+    const out = resolveWith(rt, fixture);
+    assert.equal(out.resolved.length, 1, 'a broken bridge never breaks resolution'); assert.deepEqual(queryLog, ['[data-message-id]']);
+  }
+  /* The index-path rows and the compat rows are the same data. */
+  const { fixture: fx, meta } = buildIndexedFixture({ withAttribute: false });
+  let index = null; const viaIndexRt = makeSandbox({ consumerFlag: true, annotations: [annotation], withSemanticIndexModule: true, resolverOverride: spyResolver(resolverSeen), readerSemanticIndex: (root) => (root === fx.frame ? index : null) });
+  index = buildSemanticIndex(viaIndexRt, fx, { meta });
+  assert.deepEqual(plain(resolveWith(viaIndexRt, fx).resolved), plain(compat.resolved), '14: index-path rows equal compat-path rows');
+});
+
+check('S4C: an index miss (no sourceRef match) falls back to the compatibility attribute (9)', () => {
+  const resolverSeen = []; const queryLog = [];
+  const fixture = buildSavedReaderFixture(ANSWER_ID, queryLog);
+  const meta = new Map([[fixture.turn, { role: 'assistant', turnNo: 2, messageId: 'some-other-message', turnId: 't-2' }]]);
+  let index = null; const rt = makeSandbox({ consumerFlag: true, annotations: [attributedHighlightFixture()], withSemanticIndexModule: true, resolverOverride: spyResolver(resolverSeen), readerSemanticIndex: (root) => (root === fixture.frame ? index : null) });
+  index = buildSemanticIndex(rt, fixture, { meta }); queryLog.length = 0;
+  assert.equal(index.messages()[0].sourceRef.messageId, 'some-other-message');
+  const out = resolveWith(rt, fixture);
+  assert.equal(out.resolved.length, 1, '9: compat resolves'); assert.deepEqual(queryLog, ['[data-message-id]']); assert.equal(resolverSeen[0].msgEl, fixture.msgEl);
+  assert.deepEqual(plain(out.diagnostics.messageRootLookup), { primary: 'semantic-index', fallback: 'data-message-id', semanticIndexAvailable: true, bySemanticIndex: 0, byCompatibilityAttribute: 1 });
+  /* A matched record whose target is unusable (not an element / outside the root) also falls back. */
+  for (const target of [null, { nodeType: 3 }, makeElement(fixture.owner, 'div', { 'data-message-id': ANSWER_ID })]) {
+    const broken = fakeSemanticIndex(fixture.frame, [{ projectionKey: 'message:path:0', kind: 'message', sourceRef: { messageId: ANSWER_ID }, target }]);
+    queryLog.length = 0; const seen = [];
+    const rt2 = makeSandbox({ consumerFlag: true, annotations: [attributedHighlightFixture()], resolverOverride: spyResolver(seen), readerSemanticIndex: broken });
+    const out2 = resolveWith(rt2, fixture);
+    assert.equal(out2.resolved.length, 1); assert.deepEqual(queryLog, ['[data-message-id]'], 'unusable index target -> compat'); assert.equal(seen[0].msgEl, fixture.msgEl, 'the resolver still receives the in-root element');
+  }
+});
+
+check('S4C: a stale / foreign Semantic Index is never used for another Renderer root (10)', () => {
+  const resolverSeen = [];
+  const queryLogA = []; const queryLogB = [];
+  const { fixture: A, meta: metaA } = buildIndexedFixture({ withAttribute: true, queryLog: queryLogA });
+  const { fixture: B, meta: metaB } = buildIndexedFixture({ withAttribute: false, queryLog: queryLogB });
+  let indexB = null;
+  /* The bridge (wrongly) hands out B's index for root A. */
+  const rt = makeSandbox({ consumerFlag: true, annotations: [attributedHighlightFixture()], withSemanticIndexModule: true, resolverOverride: spyResolver(resolverSeen), readerSemanticIndex: () => indexB });
+  indexB = buildSemanticIndex(rt, B, { meta: metaB }); queryLogA.length = 0; queryLogB.length = 0;
+  assert.equal(indexB.getConversation().target, B.frame); assert.equal(indexB.messages()[0].target, B.msgEl);
+  const out = resolveWith(rt, A);
+  assert.equal(out.resolved.length, 1, 'A still resolves - through its own compatibility attribute'); assert.deepEqual(queryLogA, ['[data-message-id]']); assert.deepEqual(queryLogB, []);
+  assert.equal(resolverSeen[0].msgEl, A.msgEl, '10: B\'s message element is never handed out for root A'); assert.notEqual(resolverSeen[0].msgEl, B.msgEl);
+  assert.deepEqual(plain(out.diagnostics.messageRootLookup), { primary: 'semantic-index', fallback: 'data-message-id', semanticIndexAvailable: false, bySemanticIndex: 0, byCompatibilityAttribute: 1 }, 'a foreign index counts as unavailable');
+  /* Explicit foreign index option: same rejection; the (correct) bridge is consulted next. */
+  let indexA = null; const rt2 = makeSandbox({ consumerFlag: true, annotations: [attributedHighlightFixture()], withSemanticIndexModule: true, resolverOverride: spyResolver(resolverSeen), readerSemanticIndex: (root) => (root === A.frame ? indexA : null) });
+  indexA = buildSemanticIndex(rt2, A, { meta: metaA }); const indexB2 = buildSemanticIndex(rt2, B, { meta: metaB }); queryLogA.length = 0;
+  const out2 = resolveWith(rt2, A, { semanticIndex: indexB2 });
+  assert.equal(out2.resolved.length, 1); assert.deepEqual(queryLogA, [], 'the foreign explicit index is skipped and the bound current index resolves'); assert.equal(resolverSeen[resolverSeen.length - 1].msgEl, A.msgEl); assert.equal(rt2.accessorCalls.length, 1);
+  /* Foreign root without any compat attribute: nothing resolves, and B's element is never used. */
+  const rt3 = makeSandbox({ consumerFlag: true, annotations: [attributedHighlightFixture()], withSemanticIndexModule: true, resolverOverride: spyResolver(resolverSeen), readerSemanticIndex: () => indexB });
+  const { fixture: C } = buildIndexedFixture({ withAttribute: false });
+  const out3 = resolveWith(rt3, C);
+  assert.equal(out3.unresolved[0].reason, 'message-root-missing');
+});
+
+check('S4C: when neither the index nor the attribute resolves, message-root-missing is preserved (11)', () => {
+  const resolverSeen = [];
+  const { fixture, meta } = buildIndexedFixture({ withAttribute: true });
+  fixture.msgEl.setAttribute('data-message-id', 'different-answer');
+  meta.set(fixture.turn, { role: 'assistant', turnNo: 2, messageId: 'different-answer', turnId: 't-2' });
+  let index = null; const rt = makeSandbox({ consumerFlag: true, annotations: [attributedHighlightFixture()], withSemanticIndexModule: true, resolverOverride: spyResolver(resolverSeen), readerSemanticIndex: (root) => (root === fixture.frame ? index : null) });
+  index = buildSemanticIndex(rt, fixture, { meta });
+  const out = resolveWith(rt, fixture);
+  assert.equal(out.resolved.length, 0); assert.equal(out.unresolved.length, 1); assert.equal(out.unresolved[0].reason, 'message-root-missing'); assert.equal(out.unresolved[0].status, 'orphaned'); assert.deepEqual(resolverSeen, []);
+  assert.deepEqual(Object.keys(out.unresolved[0]), ACCEPTED_ROW_KEYS, '14: unresolved row schema unchanged'); assertSerializable(out);
+});
+
+check('S4C: duplicate source-message ids keep deterministic first-match semantics on both paths (12)', () => {
+  const owner = makeOwner(); const queryLog = [];
+  const mkMsg = (label) => makeElement(owner, 'div', { class: 'cgMsg cgMsg--assistant', 'data-message-author-role': 'assistant', 'data-message-id': ANSWER_ID }, [
+    makeElement(owner, 'div', { class: 'cgMsgBody' }, [makeText(owner, 'alpha '), makeElement(owner, 'span', {}, [makeText(owner, 'some selected ')]), makeElement(owner, 'strong', {}, [makeText(owner, 'text')]), makeText(owner, ` omega ${label}`)]),
+  ]);
+  const msg1 = mkMsg('one'); const msg2 = mkMsg('two');
+  const turn1 = makeElement(owner, 'section', { class: 'cgTurn cgTurn--assistant', 'data-turn': 'assistant' }, [msg1]);
+  const turn2 = makeElement(owner, 'section', { class: 'cgTurn cgTurn--assistant', 'data-turn': 'assistant' }, [msg2]);
+  const scroll = makeElement(owner, 'div', { class: 'cgScroll wbReaderScroll wbRichRoot', 'data-testid': 'conversation-turns' }, [turn1, turn2], queryLog);
+  const frame = makeElement(owner, 'div', { class: 'cgFrame', 'data-chat-id': CHAT_ID }, [scroll], queryLog);
+  owner.root = frame;
+  const fixture = { owner, frame, scroll, msgEl: msg1, queryLog };
+  const meta = new Map([[turn1, { role: 'assistant', turnNo: 1, messageId: ANSWER_ID, turnId: 'dup' }], [turn2, { role: 'assistant', turnNo: 2, messageId: ANSWER_ID, turnId: 'dup' }]]);
+  const seenIndex = []; const seenCompat = [];
+  let index = null; const viaIndex = makeSandbox({ consumerFlag: true, annotations: [attributedHighlightFixture()], withSemanticIndexModule: true, resolverOverride: spyResolver(seenIndex), readerSemanticIndex: (root) => (root === frame ? index : null) });
+  index = buildSemanticIndex(viaIndex, fixture, { meta }); queryLog.length = 0;
+  assert.deepEqual(plain(index.messages().map((m) => m.projectionKey)), ['message:source:' + ANSWER_ID, 'message:source:' + ANSWER_ID + ':ordinal:1'], 'the index keeps both records, collision-safe');
+  assert.equal(resolveWith(viaIndex, fixture).resolved.length, 1); assert.equal(seenIndex[0].msgEl, msg1, '12: first index record in projection order'); assert.deepEqual(queryLog, []);
+  const viaCompat = makeSandbox({ consumerFlag: true, annotations: [attributedHighlightFixture()], resolverOverride: spyResolver(seenCompat) });
+  assert.equal(resolveWith(viaCompat, fixture).resolved.length, 1); assert.equal(seenCompat[0].msgEl, msg1, '12: first matching DOM message - identical choice');
+});
+
+check('S4C: flags, read-only behavior and the anchor-resolution contract are unchanged with the index path (15/17/18)', () => {
+  const { fixture, meta } = buildIndexedFixture({ withAttribute: false });
+  let index = null;
+  /* Disabled consumer: the bridge is never consulted. */
+  let rt = makeSandbox({ consumerFlag: false, annotations: [attributedHighlightFixture()], withSemanticIndexModule: true, readerSemanticIndex: (root) => (root === fixture.frame ? index : null) });
+  index = buildSemanticIndex(rt, fixture, { meta });
+  assert.equal(resolveWith(rt, fixture).diagnostics.reason, 'disabled'); assert.equal(rt.accessorCalls.length, 0, 'disabled -> no bridge read');
+  /* Resolver-disabled and resolver-orphaned outcomes keep their reasons through the index path. */
+  rt = makeSandbox({ consumerFlag: true, resolverFlag: false, annotations: [attributedHighlightFixture()], withSemanticIndexModule: true, readerSemanticIndex: (root) => (root === fixture.frame ? index : null) });
+  index = buildSemanticIndex(rt, fixture, { meta });
+  let out = resolveWith(rt, fixture); assert.equal(out.unresolved[0].reason, 'resolver-disabled', 'the message root resolved through the index; the resolver gate is unchanged');
+  rt = makeSandbox({ consumerFlag: true, resolverFlag: true, annotations: [attributedHighlightFixture()], withSemanticIndexModule: true, readerSemanticIndex: (root) => (root === fixture.frame ? index : null) });
+  index = buildSemanticIndex(rt, fixture, { meta });
+  const before = markupSnapshot(fixture.frame);
+  out = resolveWith(rt, fixture, { consumer: 's4c' });
+  assert.equal(out.resolved.length, 1, 'the REAL anchor resolver anchors on the indexed element'); assert.equal(out.resolved[0].text, EXACT); assert.equal(out.resolved[0].reason, 'textQuote-exact'); assert.equal(out.resolved[0].diagnostics.xpathDeferred, true);
+  assert.equal(markupSnapshot(fixture.frame), before, '17: no node or attribute introduced'); assert.equal(fixture.owner.evaluateCalls, 0, 'XPath still deferred'); assert.deepEqual(storageWrites(rt.storageCalls), []); assert.deepEqual(rt.writeCalls, []); assert.deepEqual(rt.hookCalls, []);
+  assert.equal(fixture.frame.querySelectorAll('[data-message-id]').length, 0, 'still no attribute');
+  const diag = rt.sandbox.H2O.Studio.readerNotes.highlightResolutionConsumer.diagnose();
+  assert.deepEqual(plain(diag.messageRootAuthority), { primary: 'semantic-index', fallback: 'data-message-id' }); assert.equal(diag.noRender, true); assert.equal(diag.returnsLiveRange, false);
+  assert.deepEqual(Object.keys(rt.sandbox.H2O.Studio.readerNotes.highlightResolutionConsumer).sort(), ['__installed', 'diagnose', 'flagKey', 'isEnabled', 'readonly', 'resolveForItem', 'selfCheck', 'version'].sort(), 'public surface unchanged');
+  assert.equal('decorationContribution' in rt.sandbox.H2O.Studio.Renderer, false, '18: no DecorationContribution involved');
 });
 
 check('evidence doc records A2a.4.2 scope and exclusions', () => {

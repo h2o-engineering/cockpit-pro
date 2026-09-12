@@ -4,6 +4,14 @@
  * annotations to the A2a DOM resolver. This module returns serializable
  * resolution rows only. It never renders, persists, or returns live Range
  * objects.
+ *
+ * M03 P4 S4C T8 (slice A): the message-root lookup for source.answerId now
+ * resolves through the Renderer's read-only Semantic Index first (message
+ * record sourceRef.messageId -> indexed message target), obtained from an
+ * explicit options.semanticIndex or the current Reader render bridge
+ * (H2O.Studio.getReaderSemanticIndex(root)). The provider-compatible
+ * [data-message-id] scan stays as the fallback bridge; annotation eligibility,
+ * anchor resolution, rows, flags and serialization are unchanged.
  */
 (function (global) {
   'use strict';
@@ -19,6 +27,10 @@
   var VERSION = 1;
   var SCHEMA_VERSION = 1;
   var FLAG_KEY = 'studio.readerNotes.highlightResolutionConsumer.enabled';
+  var SEMANTIC_INDEX_SCHEMA = 'h2o.renderer.semantic-index';
+  var MESSAGE_ROOT_AUTHORITY_SEMANTIC = 'semantic-index';
+  var MESSAGE_ROOT_AUTHORITY_COMPAT = 'data-message-id';
+  var ANCESTRY_HOPS_MAX = 64;
   var errors = [];
   var ERR_MAX = 20;
   var lastDiagnostics = null;
@@ -112,6 +124,7 @@
       skippedCount: 0,
       skipped: [],
       upstream: details && details.upstream ? cloneValue(details.upstream) : {},
+      messageRootLookup: emptyMessageRootLookup(false),
       errors: errors.slice(),
     };
     if (details && details.error) diagnostics.error = String(details.error);
@@ -146,8 +159,21 @@
         skippedCount: 0,
         skipped: [],
         upstream: upstream,
+        messageRootLookup: emptyMessageRootLookup(false),
         errors: errors.slice(),
       },
+    };
+  }
+
+  /* Additive diagnostics only: which authority produced each message root.
+   * Rows keep their accepted shape; nothing about the outcome semantics moves. */
+  function emptyMessageRootLookup(semanticIndexAvailable) {
+    return {
+      primary: MESSAGE_ROOT_AUTHORITY_SEMANTIC,
+      fallback: MESSAGE_ROOT_AUTHORITY_COMPAT,
+      semanticIndexAvailable: semanticIndexAvailable === true,
+      bySemanticIndex: 0,
+      byCompatibilityAttribute: 0,
     };
   }
 
@@ -230,7 +256,84 @@
     };
   }
 
-  function findMessageRoot(root, answerId) {
+  /* ---- S4C slice A: message-root authority ------------------------------
+   * Primary: the Renderer's read-only Semantic Index for THIS root. It is
+   * accepted only when its conversation projection targets the requested root,
+   * so a stale or foreign render's index is never consulted. Fallback: the
+   * pre-existing provider-compatible [data-message-id] scan, unchanged. */
+
+  function isSemanticIndex(candidate) {
+    return !!candidate && typeof candidate === 'object'
+      && candidate.schema === SEMANTIC_INDEX_SCHEMA
+      && typeof candidate.getConversation === 'function'
+      && typeof candidate.messages === 'function';
+  }
+
+  function semanticIndexDescribesRoot(index, root) {
+    try {
+      var conversation = index.getConversation();
+      return !!conversation && conversation.target === root;
+    } catch (e) {
+      recordError('semanticIndex.getConversation', e);
+      return false;
+    }
+  }
+
+  function readerSemanticIndexFor(root) {
+    var studio = H2O && H2O.Studio;
+    if (!studio || typeof studio.getReaderSemanticIndex !== 'function') return null;
+    try {
+      var index = studio.getReaderSemanticIndex(root);
+      return isSemanticIndex(index) ? index : null;
+    } catch (e) {
+      recordError('getReaderSemanticIndex', e);
+      return null;
+    }
+  }
+
+  function semanticIndexFor(root, options) {
+    var explicit = isPlainObject(options) ? options.semanticIndex : null;
+    if (isSemanticIndex(explicit) && semanticIndexDescribesRoot(explicit, root)) return explicit;
+    var current = readerSemanticIndexFor(root);
+    if (current && semanticIndexDescribesRoot(current, root)) return current;
+    return null;
+  }
+
+  function isDescendantOf(node, root) {
+    var current = node;
+    for (var hops = 0; current && hops < ANCESTRY_HOPS_MAX; hops += 1) {
+      if (current === root) return true;
+      current = current.parentNode || null;
+    }
+    return false;
+  }
+
+  /* answerId is a SOURCE identifier: it is matched against the message
+   * record's sourceRef.messageId only (never projectionKey, renderKey,
+   * ownerRef or text). The first match in index message order keeps the old
+   * first-matching-DOM-message behavior for malformed duplicate ids. */
+  function findMessageRootBySemanticIndex(index, root, answerId) {
+    var records;
+    try {
+      records = index.messages();
+    } catch (e) {
+      recordError('semanticIndex.messages', e);
+      return null;
+    }
+    if (!records || typeof records.length !== 'number') return null;
+    for (var i = 0; i < records.length; i += 1) {
+      var record = records[i];
+      var sourceRef = record && record.sourceRef;
+      if (!record || !sourceRef || sourceRef.messageId !== answerId) continue;
+      if (record.kind !== 'message') return null;
+      var target = record.target;
+      if (!target || target.nodeType !== 1 || !isDescendantOf(target, root)) return null;
+      return target;
+    }
+    return null;
+  }
+
+  function findMessageRootByCompatibilityAttribute(root, answerId) {
     if (!root || typeof root.querySelectorAll !== 'function' || !isNonEmptyString(answerId)) return null;
     var nodes;
     try {
@@ -243,6 +346,20 @@
       if (el && typeof el.getAttribute === 'function' && el.getAttribute('data-message-id') === answerId) return el;
     }
     return null;
+  }
+
+  function findMessageRoot(root, answerId, semanticIndex, lookup) {
+    if (!isNonEmptyString(answerId)) return null;
+    if (semanticIndex) {
+      var indexed = findMessageRootBySemanticIndex(semanticIndex, root, answerId);
+      if (indexed) {
+        if (lookup) lookup.bySemanticIndex += 1;
+        return indexed;
+      }
+    }
+    var compat = findMessageRootByCompatibilityAttribute(root, answerId);
+    if (compat && lookup) lookup.byCompatibilityAttribute += 1;
+    return compat;
   }
 
   function resolverFailureReason(resolverResult) {
@@ -288,6 +405,13 @@
       return out;
     }
 
+    /* S4C: one Semantic Index decision per invocation - explicit option first,
+     * then the current Reader render's index, both only when they describe
+     * this root. Null keeps the compatibility scan as the sole authority. */
+    var semanticIndex = semanticIndexFor(root, options);
+    out.diagnostics.messageRootLookup = emptyMessageRootLookup(!!semanticIndex);
+    var lookup = out.diagnostics.messageRootLookup;
+
     for (var i = 0; i < annotations.length; i += 1) {
       var annotation = annotations[i];
       out.diagnostics.considered += 1;
@@ -299,7 +423,7 @@
       }
 
       var answerId = answerIdFor(annotation);
-      var msgEl = findMessageRoot(root, answerId);
+      var msgEl = findMessageRoot(root, answerId, semanticIndex, lookup);
       if (!msgEl) {
         out.unresolved.push(unresolvedRow(annotation, 'orphaned', 'message-root-missing'));
         continue;
@@ -377,6 +501,7 @@
       returnsLiveRange: false,
       xpath: 'deferred',
       noRender: true,
+      messageRootAuthority: { primary: MESSAGE_ROOT_AUTHORITY_SEMANTIC, fallback: MESSAGE_ROOT_AUTHORITY_COMPAT },
       annotationsAvailable: base.annotationsAvailable,
       resolverAvailable: base.resolverAvailable,
       upstream: cloneValue(base.upstream) || {},
