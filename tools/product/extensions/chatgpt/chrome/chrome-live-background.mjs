@@ -3470,6 +3470,56 @@ async function resolveFolderBindingsBridge(chatIds, nsDisk = DEFAULT_NS_DISK) {
   }
 }
 
+/* ---- P02 T02: STRICT relationship source for Sync publication ----
+ * Reads the page-world H2O.folders authority through the canonical
+ * page/content bridge in strict mode. No merge, no cache read or write, no
+ * imported/archive-derived catalog, no fallback: every failure (no ChatGPT
+ * tab, bridge timeout, authority missing) is the typed
+ * relationship-source-unavailable error. The results are tagged
+ * { source: "H2O.folders", strict: true } and the Sync enumerator refuses
+ * anything not carrying that tag. */
+const P02_RELATIONSHIP_SOURCE_UNAVAILABLE = "relationship-source-unavailable";
+
+function p02RelationshipSourceError(error) {
+  const text = String(error && (error.message || error) || "");
+  const typed = new Error(text.includes(P02_RELATIONSHIP_SOURCE_UNAVAILABLE)
+    ? text.slice(text.indexOf(P02_RELATIONSHIP_SOURCE_UNAVAILABLE)).split("\\n")[0]
+    : P02_RELATIONSHIP_SOURCE_UNAVAILABLE + ":" + (text || "bridge-failed"));
+  typed.code = P02_RELATIONSHIP_SOURCE_UNAVAILABLE;
+  return typed;
+}
+
+function p02StrictEnvelope(result, listKey) {
+  const valid = result && typeof result === "object" &&
+    result.strict === true && result.source === "H2O.folders" &&
+    (listKey === "folders" ? Array.isArray(result.folders)
+      : (result.bindings && typeof result.bindings === "object" && !Array.isArray(result.bindings)));
+  if (!valid) throw p02RelationshipSourceError(new Error(P02_RELATIONSHIP_SOURCE_UNAVAILABLE + ":not-strict"));
+  return result;
+}
+
+async function getFoldersListStrict(nsDisk = DEFAULT_NS_DISK) {
+  let result;
+  try {
+    result = await queryFolderBridge("getFoldersList", { strict: true }, nsDisk);
+  } catch (error) {
+    throw p02RelationshipSourceError(error);
+  }
+  return p02StrictEnvelope(result, "folders");
+}
+
+async function resolveFolderBindingsStrict(chatIds, nsDisk = DEFAULT_NS_DISK) {
+  const ids = uniqStringList(chatIds).map((id) => normalizeChatId(id)).filter(Boolean);
+  if (!ids.length) return { source: "H2O.folders", strict: true, bindings: {} };
+  let result;
+  try {
+    result = await queryFolderBridge("resolveFolderBindings", { chatIds: ids, strict: true }, nsDisk);
+  } catch (error) {
+    throw p02RelationshipSourceError(error);
+  }
+  return p02StrictEnvelope(result, "bindings");
+}
+
 async function setFolderBindingBridge(chatId, folderId, nsDisk = DEFAULT_NS_DISK) {
   const id = normalizeChatId(chatId);
   if (!id) throw new Error("missing chatId");
@@ -14027,6 +14077,11 @@ if (ARCHIVE_WORKBENCH_ENABLED &&
           },
           importFullBundle: ({ bundle, mode = "merge" } = {}) =>
             importFullBundle(bundle, mode),
+        }),
+        /* P02 T02: strict page-world relationship source (read-only). */
+        relationshipAuthority: Object.freeze({
+          listFolders: () => getFoldersListStrict(),
+          resolveBindings: (chatIds) => resolveFolderBindingsStrict(chatIds),
         }),
       });
     __h2oBackgroundSyncRuntime.install();

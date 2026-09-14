@@ -5,6 +5,17 @@
  * publisher/driver, durable local-publication-ledger and Z4 writer transport.
  * It is the sole place where Chrome receives a writable repository adapter.
  * Importing this module starts nothing and acquires no filesystem authority.
+ *
+ * T02 (P02 folder relationship synchronization). The owner publishes three
+ * families through the SAME machinery: the saved-chat family from the accepted
+ * chat enumerator/adapter, and studio.folder.v1 / studio.chat-folder-binding.v1
+ * from the strict page-world relationship source when a `relationshipAuthority`
+ * is composed. Multiple eligible local objects are no longer an ambiguous
+ * fatal state: one attempt publishes exactly one deterministically ordered
+ * candidate, and the next attempt takes the next due one. The order is a
+ * reproducibility device only - it is not authority and never resolves a
+ * conflict. First publications of every family stay trusted-human-manual;
+ * automatic wakes advance only chains this writer already committed.
  */
 import { P02_GENERATION_STATE, P02_WRITER_GENERATION }
   from '../../core/sync-writer-generation-v2.mjs';
@@ -16,13 +27,19 @@ import { produceChatRevisionV2, P02_CHAT_DOMAIN_V2 }
   from './sync-revision-domain-chat-v2.mjs';
 import { createChromeReadOnlyObjectEnumerator }
   from './sync-object-enumerator-v2.mjs';
+import { P02_RELATIONSHIP_DOMAIN_V2, produceRelationshipRevisionV2 }
+  from './sync-revision-domain-relationship-v2.mjs';
+import { createChromeRelationshipObjectEnumerator }
+  from './sync-relationship-enumerator-chrome-v2.mjs';
+import { readChromeDomainProtocolState }
+  from './sync-p02-domain-protocol-state-chrome-v2.mjs';
 import {
   buildWriterHeadsSnapshot,
   createLocalWriterTransportPrimitives
 } from './sync-writer-transport-v2.mjs';
 import { reconstructWriterHeadsSnapshot }
   from './sync-reader-transport-v2.mjs';
-import { P02_SYNC_CONTRACT_V2, writerKeyHex } from './sync-contract-v2.mjs';
+import { P02_SYNC_CONTRACT_V2, objectKeyHex, writerKeyHex } from './sync-contract-v2.mjs';
 import { createChromeFsaWriteTransport, P02_FSA_WRITE_V2 }
   from './sync-fsa-write-transport-v2.mjs';
 
@@ -31,12 +48,39 @@ export const P02_CHROME_PUBLICATION_V2 = Object.freeze({
   RESULT_SCHEMA: 'h2o.studio.syncChromePublicationResult.p02.v1',
   LOCK_NAME: 'h2o:studio:sync:p02-chrome-publication:v1',
   FIRST_PUBLICATION: 'trusted-human-manual-only',
-  AUTOMATIC_PUBLICATION: 'auto-mode-descendants-only'
+  AUTOMATIC_PUBLICATION: 'auto-mode-descendants-only',
+  /* T02: one deterministic candidate per attempt. Families are ordered so a
+   * referent (folder) precedes its referrers (chat, then binding); within a
+   * family by objectId, then objectKey. Reproducibility only - never authority. */
+  CANDIDATE_SEQUENCING: 'deterministic-one-object-per-attempt',
+  CANDIDATE_FAMILY_ORDER: Object.freeze([
+    P02_RELATIONSHIP_DOMAIN_V2.FOLDER.OBJECT_DOMAIN,
+    P02_CHAT_DOMAIN_V2.OBJECT_DOMAIN,
+    P02_RELATIONSHIP_DOMAIN_V2.BINDING.OBJECT_DOMAIN
+  ]),
+  RELATIONSHIP_SOURCE: 'strict-page-world-h2o-folders',
+  NON_CHAT_RECEIVE: 'disabled-until-domain-qualified-idb-state'
 });
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const clean = (value) => String(value == null ? '' : value).trim();
 const fail = (code) => { const error = new Error(code); error.code = code; throw error; };
+const REGISTERED_DOMAINS = Object.freeze([
+  P02_CHAT_DOMAIN_V2.OBJECT_DOMAIN,
+  P02_RELATIONSHIP_DOMAIN_V2.FOLDER.OBJECT_DOMAIN,
+  P02_RELATIONSHIP_DOMAIN_V2.BINDING.OBJECT_DOMAIN
+]);
+const familyRank = (objectDomain) => {
+  const rank = P02_CHROME_PUBLICATION_V2.CANDIDATE_FAMILY_ORDER.indexOf(objectDomain);
+  return rank < 0 ? P02_CHROME_PUBLICATION_V2.CANDIDATE_FAMILY_ORDER.length : rank;
+};
+export function compareCandidateDescriptors(left, right) {
+  return familyRank(left.objectDomain) - familyRank(right.objectDomain) ||
+    left.objectDomain.localeCompare(right.objectDomain) ||
+    left.objectId.localeCompare(right.objectId) ||
+    left.objectKey.localeCompare(right.objectKey);
+}
+const isChatDomain = (objectDomain) => objectDomain === P02_CHAT_DOMAIN_V2.OBJECT_DOMAIN;
 
 function asContractHead(head, writerSyncPeerId) {
   return {
@@ -73,6 +117,10 @@ export function createChromeP02PublicationOwner({
   projection,
   syncStore,
   observeFormat,
+  /* T02: the strict page-world relationship source ({ listFolders,
+   * resolveBindings }). Absent => the owner publishes the chat family only,
+   * exactly as before; it never substitutes a mirror, cache or fallback. */
+  relationshipAuthority = null,
   lockManager = globalThis.navigator?.locks,
   cryptoImplementation = globalThis.crypto,
   clock = () => new Date().toISOString(),
@@ -80,6 +128,11 @@ export function createChromeP02PublicationOwner({
 } = {}) {
   for (const port of [loadContainerHandle, configProvider, observeFormat]) {
     if (typeof port !== 'function') fail('p02-chrome-publication-dependency-invalid');
+  }
+  if (relationshipAuthority !== null &&
+      (typeof relationshipAuthority?.listFolders !== 'function' ||
+        typeof relationshipAuthority?.resolveBindings !== 'function')) {
+    fail('p02-chrome-publication-dependency-invalid');
   }
   if (!identityProvider || typeof identityProvider.whenSyncReady !== 'function' ||
       !writerGenerationGate || typeof writerGenerationGate.p01MayMutate !== 'function' ||
@@ -147,6 +200,17 @@ export function createChromeP02PublicationOwner({
     });
   }
 
+  function relationshipEnumeratorFor(writer) {
+    if (relationshipAuthority === null) return null;
+    return createChromeRelationshipObjectEnumerator({
+      relationshipAuthority,
+      archiveAuthority,
+      syncStore,
+      configuredSyncPeerIds: [writer.syncPeerId],
+      cryptoImplementation
+    });
+  }
+
   async function descriptorSnapshot(writer, manual) {
     const enumerator = createChromeReadOnlyObjectEnumerator({
       archiveAuthority,
@@ -158,8 +222,18 @@ export function createChromeP02PublicationOwner({
       cryptoImplementation
     });
     const listed = await enumerator.enumerate();
+    /* T02: relationship families are enumerated beside the chat family from
+     * the strict source. A relationship source failure yields zero
+     * relationship descriptors and a typed status; it never touches the chat
+     * enumeration above, so one relationship source issue cannot invalidate
+     * a single chat object. */
+    const relationshipEnumerator = relationshipEnumeratorFor(writer);
+    const relationship = relationshipEnumerator === null
+      ? null
+      : await relationshipEnumerator.enumerate();
+    const descriptors = [...listed.descriptors, ...(relationship?.descriptors ?? [])];
     const eligible = [];
-    for (const descriptor of listed.descriptors) {
+    for (const descriptor of descriptors) {
       const verdict = classifyObjectState(descriptor);
       if (verdict.classification !== 'local-ahead' || descriptor.publishable !== true) continue;
       /* First publication is manual. Automatic wakes may advance only a chain
@@ -167,10 +241,38 @@ export function createChromeP02PublicationOwner({
       if (!manual && !descriptor.protocolState?.lastPublished) continue;
       eligible.push(descriptor);
     }
-    eligible.sort((left, right) =>
-      left.objectId.localeCompare(right.objectId) ||
-      left.objectKey.localeCompare(right.objectKey));
-    return Object.freeze({ listed, eligible: Object.freeze(eligible) });
+    eligible.sort(compareCandidateDescriptors);
+    return Object.freeze({
+      listed,
+      relationship,
+      descriptors: Object.freeze(descriptors),
+      eligible: Object.freeze(eligible)
+    });
+  }
+
+  /* The pending ledger row stores objectId and objectKey; the family is
+   * recovered by re-deriving the key over the registered domains, so a
+   * relationship intent is never resumed as a chat revision (or vice versa). */
+  async function domainForPending(objectId, objectKey) {
+    for (const objectDomain of REGISTERED_DOMAINS) {
+      if (await objectKeyHex(objectDomain, objectId, cryptoImplementation) === objectKey) {
+        return objectDomain;
+      }
+    }
+    return null;
+  }
+
+  function candidateSummary(snapshot, selected) {
+    return {
+      eligibleCount: snapshot.eligible.length,
+      selectedObjectDomain: selected?.objectDomain ?? null,
+      selectedObjectId: selected?.objectId ?? null,
+      deferredCandidates: snapshot.eligible
+        .filter((item) => item !== selected)
+        .map((item) => ({ objectDomain: item.objectDomain, objectId: item.objectId })),
+      relationshipSource: snapshot.relationship?.source ?? null,
+      relationshipIneligible: snapshot.relationship?.ineligible ?? null
+    };
   }
 
   async function execute(manual) {
@@ -188,14 +290,13 @@ export function createChromeP02PublicationOwner({
     }
     if (recoveryObjects.length === 0 && snapshot.eligible.length === 0) {
       return fixed('no-eligible-local-change', {
-        manual, eligibleCount: 0, repositoryGeneration: null
+        manual, eligibleCount: 0, repositoryGeneration: null,
+        ...candidateSummary(snapshot, null)
       });
     }
-    if (recoveryObjects.length === 0 && snapshot.eligible.length !== 1) {
-      return fixed('ambiguous-local-candidates', {
-        manual, eligibleCount: snapshot.eligible.length, repositoryGeneration: null
-      });
-    }
+    /* T02: several eligible local objects are ordinary. The first candidate in
+     * the deterministic order is published by this attempt; the rest are
+     * reported as deferred and are taken by later attempts, one at a time. */
     const containerHandle = await loadContainerHandle();
     const fsa = createChromeFsaWriteTransport({ containerHandle, cryptoImplementation });
     /* Format authority precedes every repository mutation, including the
@@ -207,7 +308,7 @@ export function createChromeP02PublicationOwner({
     const preflightGate = preflight?.gate ?? preflight;
     if (preflightGate?.mayWrite !== true) {
       return fixed(clean(preflightGate?.reason) || 'format-authority-invalid', {
-        manual, eligibleCount: 1, repositoryGeneration: null
+        manual, eligibleCount: snapshot.eligible.length, repositoryGeneration: null
       });
     }
     /* This bounded initialization is within the same cross-context lock as the
@@ -314,9 +415,15 @@ export function createChromeP02PublicationOwner({
           manual, eligibleCount: 0, reusedMint: request.revisionId
         });
       }
+      const pendingDomain = await domainForPending(request.objectId, request.objectKey);
+      if (pendingDomain === null) {
+        return fixed('pending-publication-invalid', {
+          manual, eligibleCount: 0, reusedMint: request.revisionId
+        });
+      }
       const batch = await transport.publishBatch({
         revisions: [{
-          objectDomain: P02_CHAT_DOMAIN_V2.OBJECT_DOMAIN,
+          objectDomain: pendingDomain,
           objectId: request.objectId,
           objectKey: request.objectKey,
           revisionBlobSha256: request.revisionBlobSha256Hex,
@@ -345,10 +452,11 @@ export function createChromeP02PublicationOwner({
       return recoverPendingPublication(recoveryObjects[0]);
     }
     const selected = snapshot.eligible[0];
+    const relationshipEnumerator = relationshipEnumeratorFor(writer);
     const descriptorFor = async (scope) => {
       const current = await descriptorSnapshot(writer, manual);
-      return current.listed.descriptors.find((item) =>
-        item.objectId === scope.objectId && item.syncPeerId === writer.syncPeerId) ?? null;
+      return current.descriptors.find((item) =>
+        item.objectKey === scope.objectKey && item.syncPeerId === writer.syncPeerId) ?? null;
     };
 
     async function pointerProof(pending) {
@@ -372,7 +480,22 @@ export function createChromeP02PublicationOwner({
       onTrace: trace,
       readWriterState: () =>
         transport.readWriterState({ writerSyncPeerId: writer.syncPeerId }),
-      readCanonicalProjection: async ({ objectId }) => {
+      readCanonicalProjection: async ({ objectDomain, objectId }) => {
+        if (!isChatDomain(objectDomain)) {
+          /* Relationship families: a fresh strict-source projection, or null
+           * when the object is no longer eligible. Source failure throws a
+           * typed code, which the steady core reports as blocked(transport). */
+          if (relationshipEnumerator === null) fail('p02-chrome-publication-relationship-source-not-composed');
+          const value = await relationshipEnumerator.projectObject({ objectDomain, objectId });
+          return value ? {
+            revisionId: value.revisionId,
+            revisionBlobSha256: value.revisionBlobSha256Hex,
+            payloadSha256: value.payloadSha256Hex,
+            objectKey: value.objectKeyHex,
+            sourceUpdatedAtIso: value.sourceUpdatedAtIso,
+            payload: value.payload
+          } : null;
+        }
         const value = await projection.projectCurrent(objectId);
         return value ? {
           revisionId: value.revisionId,
@@ -385,6 +508,31 @@ export function createChromeP02PublicationOwner({
       },
       readProtocolState: async (scope) => {
         const descriptor = await descriptorFor(scope);
+        if (!isChatDomain(scope.objectDomain)) {
+          /* Relationship families read protocol state through the T01
+           * domain-qualified derivation: ledger by objectKey, never the
+           * objectId-keyed apply store, so a binding never inherits the chat
+           * object's applied anchor or pending Apply. */
+          const [pending, domainState] = await Promise.all([
+            syncStore.resolveLocalPublicationPending(scope.objectKey),
+            readChromeDomainProtocolState({
+              objectDomain: scope.objectDomain, objectId: scope.objectId,
+              syncStore, cryptoImplementation
+            })
+          ]);
+          const request = pending?.pending?.request ?? null;
+          return {
+            ...(descriptor?.protocolState ?? domainState.protocolState),
+            convergedDirection: domainState.identity.direction,
+            publishedPayloadSha256: domainState.identity.publishedPayloadSha256,
+            appliedPayloadSha256: null,
+            intendedRevisionId: request?.revisionId ?? null,
+            intendedRevisionBlobSha256: request?.revisionBlobSha256Hex ?? null,
+            intendedPayloadSha256: request?.payloadSha256Hex ?? null,
+            pendingOperation: request ? 'publish' : null,
+            pointerProof: request ? await pointerProof(pending) : {}
+          };
+        }
         const [pending, convergence, applySnapshot] = await Promise.all([
           syncStore.resolveLocalPublicationPending(scope.objectKey),
           syncStore.readLocalPublicationConvergence(scope.objectKey),
@@ -442,6 +590,30 @@ export function createChromeP02PublicationOwner({
       },
       mintRevisionId: () => mintP02RevisionId(cryptoImplementation),
       produceRevision: async ({ objectDomain, objectId, objectKey, p02Parent, revisionId }) => {
+        if (!isChatDomain(objectDomain)) {
+          /* Relationship families: the domain adapter validates the canonical
+           * payload strictly and hands it to the generic core. The chat
+           * adapter is never invoked for a relationship object. */
+          if (relationshipEnumerator === null) fail('p02-chrome-publication-relationship-source-not-composed');
+          const projected = await relationshipEnumerator.projectObject({ objectDomain, objectId });
+          if (!projected) fail('p02-chrome-publication-canonical-unavailable');
+          const produced = await produceRelationshipRevisionV2({
+            objectDomain,
+            canonicalObject: { objectId, revisionId, payload: projected.payload },
+            writerSyncPeerId: writer.syncPeerId,
+            p02Parent: p02Parent ?? null,
+            cryptoImplementation
+          });
+          return {
+            ...produced,
+            sourceUpdatedAtIso: projected.sourceUpdatedAtIso,
+            revisionInput: {
+              objectDomain, objectId, objectKey,
+              revisionBlobSha256: produced.revisionBlobSha256,
+              bytes: produced.canonicalBytes
+            }
+          };
+        }
         const projected = await projection.projectCurrent(objectId);
         if (!projected) fail('p02-chrome-publication-canonical-unavailable');
         const produced = await produceChatRevisionV2({
@@ -584,8 +756,7 @@ export function createChromeP02PublicationOwner({
           : clean(result?.reason) || clean(report?.status) || 'publication-failed';
     return fixed(outcome, {
       manual,
-      eligibleCount: 1,
-      selectedObjectId: selected.objectId,
+      ...candidateSummary(snapshot, selected),
       localWriterSyncPeerId: writer.syncPeerId,
       localWriterKey: writer.writerKey,
       mintedRevisionId: result?.revisionId ?? null,
@@ -618,6 +789,15 @@ export function createChromeP02PublicationOwner({
     schema: P02_CHROME_PUBLICATION_V2.SCHEMA,
     publishManual: () => run({ manual: true }),
     publishAutomaticDescendant: () => run({ manual: false }),
-    diagnose: () => Object.freeze({ active: active !== null, webdavReachable: false })
+    diagnose: () => Object.freeze({
+      active: active !== null,
+      webdavReachable: false,
+      candidateSequencing: P02_CHROME_PUBLICATION_V2.CANDIDATE_SEQUENCING,
+      candidateFamilyOrder: P02_CHROME_PUBLICATION_V2.CANDIDATE_FAMILY_ORDER,
+      relationshipSource: relationshipAuthority === null
+        ? 'not-composed'
+        : P02_CHROME_PUBLICATION_V2.RELATIONSHIP_SOURCE,
+      nonChatReceive: P02_CHROME_PUBLICATION_V2.NON_CHAT_RECEIVE
+    })
   });
 }

@@ -1,4 +1,9 @@
-// @version 1.0.0
+// @version 1.1.0
+// P02 T02: the existing read operations (getFoldersList, resolveFolderBindings)
+// gain a STRICT mode (payload.strict === true) that reads the page-world
+// H2O.folders authority only and fails closed with a typed
+// relationship-source-unavailable error instead of any localStorage fallback.
+// Non-strict callers keep the exact prior behaviour.
 export function makeChromeLiveFolderBridgePageJs() {
   return `"use strict";
 (() => {
@@ -105,6 +110,70 @@ export function makeChromeLiveFolderBridgePageJs() {
       if (api && Array.isArray(api.folders)) return normalizeFolderList(api.folders);
     } catch {}
     return normalizeFolderList(tryLoadFoldersFallback());
+  }
+
+  /* ---- P02 T02 strict reads: page-world H2O.folders authority only ---- */
+  const STRICT_SOURCE = "H2O.folders";
+  const STRICT_UNAVAILABLE = "relationship-source-unavailable";
+
+  function strictUnavailable(detail) {
+    const error = new Error(STRICT_UNAVAILABLE + ":" + String(detail || "h2o-folders-unavailable"));
+    error.code = STRICT_UNAVAILABLE;
+    return error;
+  }
+
+  function strictFoldersApi() {
+    const api = foldersApi();
+    if (!api) throw strictUnavailable("h2o-folders-api-missing");
+    return api;
+  }
+
+  // Verbatim authority fields the P02 projection needs; nothing is invented,
+  // coerced or merged. Colour is deliberately not carried (deferred).
+  function strictFolderRecord(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const out = {
+      id: raw.id !== undefined ? raw.id : raw.folderId,
+      name: raw.name !== undefined ? raw.name : raw.title,
+    };
+    for (const key of ["kind", "projectRef", "createdAt", "updatedAt", "parentId", "parent_id", "sourceKind", "system", "virtual", "view"]) {
+      if (Object.prototype.hasOwnProperty.call(raw, key)) out[key] = raw[key];
+    }
+    return out;
+  }
+
+  function getFoldersListStrict() {
+    const api = strictFoldersApi();
+    if (typeof api.list !== "function") throw strictUnavailable("h2o-folders-list-missing");
+    let raw;
+    try {
+      raw = api.list();
+    } catch (error) {
+      throw strictUnavailable("h2o-folders-list-threw");
+    }
+    if (!Array.isArray(raw)) throw strictUnavailable("h2o-folders-list-invalid");
+    return { source: STRICT_SOURCE, strict: true, folders: raw.map(strictFolderRecord) };
+  }
+
+  function resolveFolderBindingsStrict(chatIds) {
+    const api = strictFoldersApi();
+    if (typeof api.getBinding !== "function") throw strictUnavailable("h2o-folders-get-binding-missing");
+    const bindings = {};
+    const ids = Array.isArray(chatIds) ? chatIds : [];
+    for (const chatId of ids) {
+      const cid = normalizeChatId(chatId);
+      if (!cid) continue;
+      try {
+        const res = api.getBinding(cid);
+        bindings[cid] = {
+          folderId: String(res && (res.folderId || "") || "").trim(),
+          folderName: String(res && (res.folderName || "") || "").trim(),
+        };
+      } catch (error) {
+        bindings[cid] = { error: "relationship-source-record-threw" };
+      }
+    }
+    return { source: STRICT_SOURCE, strict: true, bindings };
   }
 
   function setFolderIconColor(folderIdRaw, colorRaw) {
@@ -271,8 +340,11 @@ export function makeChromeLiveFolderBridgePageJs() {
     const nsDisk = normalizeNsDisk(req.nsDisk);
     try {
       let result = null;
+      const strict = payload.strict === true;
       if (op === "getFoldersList") {
-        result = getFoldersList();
+        result = strict ? getFoldersListStrict() : getFoldersList();
+      } else if (op === "resolveFolderBindings" && strict) {
+        result = resolveFolderBindingsStrict(payload.chatIds);
       } else if (op === "resolveFolderBindings") {
         const out = {};
         const ids = Array.isArray(payload.chatIds) ? payload.chatIds : [];

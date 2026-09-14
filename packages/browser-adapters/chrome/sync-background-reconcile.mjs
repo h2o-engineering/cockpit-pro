@@ -106,6 +106,13 @@ export const P02_BACKGROUND_COMPOSITION = Object.freeze({
   publicationOwner: 'chrome-p02-publication-owner',
   firstPublication: 'trusted-human-manual-only',
   automaticPublication: 'auto-mode-descendants-only',
+  /* P02 T02: relationship families publish through the same owner from the
+   * strict page-world source; Chrome receive/apply of non-chat families stays
+   * disabled until domain-qualified IDB state lands (T05). */
+  relationshipFamilies: Object.freeze(['studio.folder.v1', 'studio.chat-folder-binding.v1']),
+  relationshipSource: 'strict-page-world-h2o-folders',
+  candidateSequencing: 'deterministic-one-object-per-attempt',
+  nonChatReceive: 'disabled-until-domain-qualified-idb-state',
   webdavReachable: false
 });
 
@@ -469,6 +476,14 @@ export function createChromeBackgroundSyncRuntime({
   indexedDBFactory = globalThis.indexedDB,
   cryptoImplementation = globalThis.crypto,
   archiveAuthority,
+  /*
+   * P02 T02. The strict page-world relationship source
+   * ({ listFolders, resolveBindings }) supplied by the service worker's
+   * folder-bridge helpers in STRICT mode. Optional: absent, the publication
+   * owner publishes the chat family only, exactly as before. It is never
+   * defaulted to a mirror, cache or fallback here.
+   */
+  relationshipAuthority = null,
   findActiveStudioContexts,
   reconcileCore = globalThis.H2OSyncLinearReconcileCore,
   lockManager = globalThis.navigator?.locks,
@@ -497,6 +512,11 @@ export function createChromeBackgroundSyncRuntime({
       typeof manualReceiveAuthority !== 'function' ||
       typeof manualApplyAuthority !== 'function' ||
       !reconcileCore || typeof reconcileCore.reconcileOneObject !== 'function') {
+    throw codeError('background-sync-runtime-unavailable');
+  }
+  if (relationshipAuthority !== null &&
+      (typeof relationshipAuthority?.listFolders !== 'function' ||
+        typeof relationshipAuthority?.resolveBindings !== 'function')) {
     throw codeError('background-sync-runtime-unavailable');
   }
 
@@ -567,6 +587,7 @@ export function createChromeBackgroundSyncRuntime({
     archiveAuthority,
     projection,
     syncStore,
+    relationshipAuthority,
     lockManager,
     cryptoImplementation,
     /* Both branches build through the one canonical constructor below. The
@@ -1482,7 +1503,8 @@ export function createChromeBackgroundSyncRuntime({
       p02: P02_BACKGROUND_COMPOSITION,
       p02GateState: p02Runtime.gateDecision()?.state ?? 'not-yet-read',
       p02Active: false,
-      p02WriterDiscovery: lastWriterDiscovery
+      p02WriterDiscovery: lastWriterDiscovery,
+      p02Publication: p02Publication.diagnose()
     });
   }
 
