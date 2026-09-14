@@ -119,6 +119,12 @@ pub struct F16FolderBindingsTriggerProofResult {
     pub settlement_identity_write_passed: bool,
     pub legacy_fallback_identity_bind_passed: bool,
     pub legacy_fallback_identity_unbind_passed: bool,
+    /* P02 T01 successor assertions (writer-authority contract, AC04). */
+    pub p02_relationship_apply_identity_bind_passed: bool,
+    pub p02_relationship_apply_identity_move_passed: bool,
+    pub p02_relationship_apply_identity_unbind_passed: bool,
+    pub p02_relationship_apply_lookalike_identity_blocked: bool,
+    pub p02_relationship_apply_identity_cleared_blocked: bool,
     pub trigger_guarded: bool,
     pub trigger_default_enabled: bool,
     pub blockers: Vec<String>,
@@ -295,6 +301,11 @@ async fn execute_control_sql(conn: &mut SqliteConnection, sql: &str, code: &str)
         .map_err(|e| format!("{code}:{e}"))
 }
 
+/* F16.4.c infrastructure. The allowlist is the v23 SUCCESSOR allowlist (P02
+ * T01, writer-authority contract §8): f15.execute-settlement-writer,
+ * f16.folder-legacy-fallback and p02.relationship-apply. The last one is
+ * admitted by the trigger only; it is NOT an identity that
+ * f15_authorized_sqlite_execute will ever install - see validate_identity. */
 async fn install_folder_bindings_trigger_infrastructure(
     conn: &mut SqliteConnection,
 ) -> Result<(), String> {
@@ -319,7 +330,8 @@ async fn install_folder_bindings_trigger_infrastructure(
           SELECT CASE
             WHEN COALESCE(h2o_writer_identity(), '') NOT IN (
               'f15.execute-settlement-writer',
-              'f16.folder-legacy-fallback'
+              'f16.folder-legacy-fallback',
+              'p02.relationship-apply'
             )
             THEN RAISE(ABORT, 'f16-folder-bindings-write-protected:insert')
           END;
@@ -333,7 +345,8 @@ async fn install_folder_bindings_trigger_infrastructure(
           SELECT CASE
             WHEN COALESCE(h2o_writer_identity(), '') NOT IN (
               'f15.execute-settlement-writer',
-              'f16.folder-legacy-fallback'
+              'f16.folder-legacy-fallback',
+              'p02.relationship-apply'
             )
             THEN RAISE(ABORT, 'f16-folder-bindings-write-protected:update')
           END;
@@ -347,7 +360,8 @@ async fn install_folder_bindings_trigger_infrastructure(
           SELECT CASE
             WHEN COALESCE(h2o_writer_identity(), '') NOT IN (
               'f15.execute-settlement-writer',
-              'f16.folder-legacy-fallback'
+              'f16.folder-legacy-fallback',
+              'p02.relationship-apply'
             )
             THEN RAISE(ABORT, 'f16-folder-bindings-write-protected:delete')
           END;
@@ -734,7 +748,28 @@ pub async fn f16_prove_folder_bindings_trigger_protection() -> Result<F16FolderB
     let legacy_fallback_identity_unbind_passed =
         folder_binding_delete(&mut conn, "proof-fallback").await;
 
+    /* P02 T01: the fixed-statement relationship identity is admitted for the
+     * exact binding operations the command performs (bind, move, Unfile), a
+     * look-alike identity is not, and clearing the identity closes the door
+     * again. This proves the trigger allowlist, not the command itself. */
+    install_writer_identity_function(
+        &mut conn,
+        crate::p02_relationship_apply::P02_RELATIONSHIP_APPLY_IDENTITY,
+    )
+    .await?;
+    let p02_relationship_apply_identity_bind_passed =
+        folder_binding_insert(&mut conn, "proof-p02", "folder-p02-a").await;
+    let p02_relationship_apply_identity_move_passed =
+        folder_binding_update(&mut conn, "proof-p02", "folder-p02-b").await;
+    let p02_relationship_apply_identity_unbind_passed =
+        folder_binding_delete(&mut conn, "proof-p02").await;
+    install_writer_identity_function(&mut conn, "p02.relationship-apply-lookalike").await?;
+    let p02_relationship_apply_lookalike_identity_blocked =
+        !folder_binding_insert(&mut conn, "proof-p02-lookalike", "folder-p02-c").await;
+
     install_writer_identity_function(&mut conn, "").await?;
+    let p02_relationship_apply_identity_cleared_blocked =
+        !folder_binding_insert(&mut conn, "proof-p02-cleared", "folder-p02-d").await;
 
     if !trigger_mode_off_legacy_write_passed {
         blockers.push("folder-bindings-trigger-proof-default-off-blocked-legacy".to_string());
@@ -757,6 +792,21 @@ pub async fn f16_prove_folder_bindings_trigger_protection() -> Result<F16FolderB
     if !legacy_fallback_identity_unbind_passed {
         blockers.push("folder-bindings-trigger-proof-fallback-unbind-blocked".to_string());
     }
+    if !p02_relationship_apply_identity_bind_passed {
+        blockers.push("folder-bindings-trigger-proof-p02-relationship-apply-bind-blocked".to_string());
+    }
+    if !p02_relationship_apply_identity_move_passed {
+        blockers.push("folder-bindings-trigger-proof-p02-relationship-apply-move-blocked".to_string());
+    }
+    if !p02_relationship_apply_identity_unbind_passed {
+        blockers.push("folder-bindings-trigger-proof-p02-relationship-apply-unbind-blocked".to_string());
+    }
+    if !p02_relationship_apply_lookalike_identity_blocked {
+        blockers.push("folder-bindings-trigger-proof-p02-relationship-apply-lookalike-passed".to_string());
+    }
+    if !p02_relationship_apply_identity_cleared_blocked {
+        blockers.push("folder-bindings-trigger-proof-p02-relationship-apply-cleared-passed".to_string());
+    }
     if blockers.is_empty() {
         warnings.push("folder-bindings-trigger-proof-in-memory-only".to_string());
     }
@@ -770,6 +820,11 @@ pub async fn f16_prove_folder_bindings_trigger_protection() -> Result<F16FolderB
         settlement_identity_write_passed,
         legacy_fallback_identity_bind_passed,
         legacy_fallback_identity_unbind_passed,
+        p02_relationship_apply_identity_bind_passed,
+        p02_relationship_apply_identity_move_passed,
+        p02_relationship_apply_identity_unbind_passed,
+        p02_relationship_apply_lookalike_identity_blocked,
+        p02_relationship_apply_identity_cleared_blocked,
         trigger_guarded: true,
         trigger_default_enabled: false,
         blockers,
@@ -851,5 +906,75 @@ mod tests {
             validate_identity(&emergency).unwrap().as_deref(),
             Some("f15-emergency-repair-used")
         );
+    }
+
+    /// P02 T01 writer-authority contract §1: generic caller-supplied SQL under
+    /// p02.relationship-apply is refused with the generic typed error, and no
+    /// flag or token changes that. The identity lives only inside the
+    /// fixed-statement command (p02_relationship_apply.rs).
+    #[test]
+    fn writer_identity_rejects_p02_relationship_apply_generically() {
+        let identity = crate::p02_relationship_apply::P02_RELATIONSHIP_APPLY_IDENTITY;
+        assert_eq!(identity, "p02.relationship-apply");
+
+        let mut generic = payload(identity);
+        generic.statements = vec![F15AuthorizedSqlStatement {
+            query: "INSERT INTO folder_bindings (chat_id, folder_id, assigned_at) VALUES (?, ?, ?)"
+                .to_string(),
+            values: vec![
+                serde_json::json!("chat-a"),
+                serde_json::json!("f_a"),
+                serde_json::json!(1),
+            ],
+        }];
+        assert_eq!(
+            validate_identity(&generic).unwrap_err(),
+            "sqlite-writer-identity-not-allowed"
+        );
+
+        let mut everything_enabled = payload(identity);
+        everything_enabled.statements = vec![F15AuthorizedSqlStatement {
+            query: "DELETE FROM folders WHERE id = ?".to_string(),
+            values: vec![serde_json::json!("f_a")],
+        }];
+        everything_enabled.bulk_migration_enabled = true;
+        everything_enabled.folder_legacy_fallback_enabled = true;
+        everything_enabled.debug_bypass_token = Some(DEBUG_BYPASS_TOKEN.to_string());
+        everything_enabled.emergency_repair_token = Some(EMERGENCY_REPAIR_TOKEN.to_string());
+        everything_enabled.reason = Some("p02 relationship apply".to_string());
+        assert_eq!(
+            validate_identity(&everything_enabled).unwrap_err(),
+            "sqlite-writer-identity-not-allowed"
+        );
+
+        /* Whitespace/case look-alikes are not the identity either. */
+        for lookalike in [" p02.relationship-apply", "P02.RELATIONSHIP-APPLY", "p02.relationship-apply\n"] {
+            assert_eq!(
+                validate_identity(&payload(lookalike)).unwrap_err(),
+                "sqlite-writer-identity-not-allowed",
+                "{lookalike:?}"
+            );
+        }
+    }
+
+    /// The F16 proof command carries the P02 successor assertions.
+    #[test]
+    fn folder_bindings_trigger_proof_admits_p02_relationship_apply_only_by_identity() {
+        let result = tauri::async_runtime::block_on(f16_prove_folder_bindings_trigger_protection())
+            .expect("folder bindings trigger proof should run");
+        assert!(result.ok, "proof blockers: {:?}", result.blockers);
+        assert!(result.trigger_mode_off_legacy_write_passed);
+        assert!(result.unauthorized_insert_blocked);
+        assert!(result.unauthorized_update_blocked);
+        assert!(result.unauthorized_delete_blocked);
+        assert!(result.settlement_identity_write_passed);
+        assert!(result.legacy_fallback_identity_bind_passed);
+        assert!(result.legacy_fallback_identity_unbind_passed);
+        assert!(result.p02_relationship_apply_identity_bind_passed);
+        assert!(result.p02_relationship_apply_identity_move_passed);
+        assert!(result.p02_relationship_apply_identity_unbind_passed);
+        assert!(result.p02_relationship_apply_lookalike_identity_blocked);
+        assert!(result.p02_relationship_apply_identity_cleared_blocked);
+        assert!(!result.trigger_default_enabled);
     }
 }

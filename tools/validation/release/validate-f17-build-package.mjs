@@ -39,7 +39,9 @@ const SOURCE_SAFE_CONTRACT = Object.freeze({
   publicationValidationComplete: false,
   stageE3Required: true
 });
-const EXPECTED_STUDIO_MIGRATION_MAX = 22;
+/* P02 folder relationship synchronization T01: migration v23 (domain-qualified
+ * sync_object_state + F16 successor allowlist) raises the ceiling 22 -> 23. */
+const EXPECTED_STUDIO_MIGRATION_MAX = 23;
 let sourceSafeRealBuilderExecutions = 0;
 let sourceSafeValidatedFileCount = 0;
 

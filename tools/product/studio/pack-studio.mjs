@@ -65,6 +65,10 @@ export const P02_CHROME_ADAPTER_SOURCE_FILES = Object.freeze([
   "sync-p01-mutation-admission-chrome.mjs",
   // O1-T14: Chrome v2 Apply, beside the accepted v1 engine.
   "sync-revision-apply-v2.mjs",
+  // P02 folder relationship synchronization T01: publication-side
+  // domain-qualified protocol-state derivation for the new families. Loads
+  // ../../core/sync-relationship-domains-v2.mjs from the packed surfaces tree.
+  "sync-p02-domain-protocol-state-chrome-v2.mjs",
 ]);
 export const P02_CORE_SOURCE_FILES = Object.freeze([
   // O1-T05: the amended anchor contract. sync-branch-evidence-v2.mjs and
@@ -108,6 +112,10 @@ export const P02_CORE_SOURCE_FILES = Object.freeze([
   "sync-object-projection.mjs",
   "sync-first-publication-candidates-v2.mjs",
   "sync-first-publication-composition-v2.mjs",
+  // P02 folder relationship synchronization T01: studio.folder.v1 and
+  // studio.chat-folder-binding.v1 registration plus strict payload validators,
+  // imported by the Chrome domain-qualified protocol-state adapter.
+  "sync-relationship-domains-v2.mjs",
 ]);
 
 export const ITEM9_BROWSER_ADAPTER_OUT_FILES = Object.freeze([

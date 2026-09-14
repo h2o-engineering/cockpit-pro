@@ -22,8 +22,13 @@ export const P02_DESKTOP_READ_QUERIES = Object.freeze({
     is_deleted AS canonical_deleted
   FROM chats
   ORDER BY id`,
+  /* v23: sync_object_state is keyed by (sync_peer_id, object_domain,
+   * object_id). This enumerator describes the saved-chat family, so the
+   * protocol read is bound to the chat domain; a chat-folder-binding row that
+   * shares an objectId string is never enumerated as chat state. */
   PROTOCOL: `SELECT
     sync_peer_id,
+    object_domain,
     object_id,
     last_published_revision_id,
     last_published_revision_blob_sha256,
@@ -38,6 +43,7 @@ export const P02_DESKTOP_READ_QUERIES = Object.freeze({
     last_applied_payload_sha256,
     last_converged_direction
   FROM sync_object_state
+  WHERE object_domain = ?
   ORDER BY sync_peer_id, object_id`,
   OBSERVATIONS: `SELECT
     object_id,
@@ -206,7 +212,7 @@ export function createDesktopReadOnlyObjectEnumerator({
   async function enumerate() {
     const [contentRows, protocolRows, observationRows] = await Promise.all([
       sql.select(P02_DESKTOP_READ_QUERIES.CONTENT, []),
-      sql.select(P02_DESKTOP_READ_QUERIES.PROTOCOL, []),
+      sql.select(P02_DESKTOP_READ_QUERIES.PROTOCOL, [CHAT_OBJECT_DOMAIN]),
       sql.select(P02_DESKTOP_READ_QUERIES.OBSERVATIONS, [])
     ]);
     const content = asRows(contentRows, 'p02-desktop-content-read-invalid');
@@ -233,7 +239,10 @@ export function createDesktopReadOnlyObjectEnumerator({
       const objectId = clean(row?.object_id);
       if (!peers.includes(syncPeerId)) continue;
       const key = `${syncPeerId}\u0000${objectId}`;
-      if (!strictIdentifier(objectId) || protocolByScope.has(key)) {
+      /* A row that is not chat-domain can only reach here if the bound query
+       * was bypassed; it is a read-integrity failure, never silently chat. */
+      if (!strictIdentifier(objectId) || protocolByScope.has(key) ||
+          clean(row?.object_domain) !== CHAT_OBJECT_DOMAIN) {
         throw new TypeError('p02-desktop-protocol-read-invalid');
       }
       protocolByScope.set(key, row);

@@ -33,6 +33,277 @@ pub(crate) const FORMAT_VERSION_V2: u64 = 2;
 pub(crate) const PROTOCOL_VERSION_V2: u64 = 2;
 pub(crate) const LAYOUT_EPOCH_V2: u64 = 1;
 
+/*
+ * P02 folder-relationship families (Mission p02-folder-relationship-
+ * synchronization, T01). Two ADDITIVE object domains beside the saved-chat
+ * family; the envelope, heads layout, repository format, protocol/format
+ * versions, layout epoch and writer generation are unchanged. Mirrors
+ * packages/core/sync-relationship-domains-v2.mjs exactly, including the typed
+ * refusal codes, so the shared contract vectors prove both engines.
+ *
+ * Validation is strict and never normalizes: a payload that is not already in
+ * canonical form is refused, because a receiving surface that repaired a value
+ * would fabricate a revision. Colour is deferred
+ * (COLOR_ADMISSION=DEFERRED_PENDING_SHARED_COLOR_VOCABULARY) and is rejected
+ * like any other unknown key.
+ */
+pub(crate) const CHAT_OBJECT_DOMAIN_V1: &str = "studio.chat.saved-state.v1";
+pub(crate) const FOLDER_OBJECT_DOMAIN_V1: &str = "studio.folder.v1";
+pub(crate) const FOLDER_PAYLOAD_SCHEMA_V1: &str = "h2o.studio.folderCatalogState.v1";
+pub(crate) const CHAT_FOLDER_BINDING_OBJECT_DOMAIN_V1: &str = "studio.chat-folder-binding.v1";
+pub(crate) const CHAT_FOLDER_BINDING_PAYLOAD_SCHEMA_V1: &str = "h2o.studio.chatFolderBinding.v1";
+pub(crate) const FOLDER_ID_MAX_LENGTH: usize = 160;
+pub(crate) const FOLDER_NAME_MAX_CODE_POINTS: usize = 200;
+
+pub(crate) const REL_ERR_DOMAIN_UNREGISTERED: &str = "p02-rel-domain-unregistered";
+pub(crate) const REL_ERR_FOLDER_PAYLOAD_SHAPE_INVALID: &str = "p02-rel-folder-payload-shape-invalid";
+pub(crate) const REL_ERR_FOLDER_PAYLOAD_KEY_REJECTED: &str = "p02-rel-folder-payload-key-rejected";
+pub(crate) const REL_ERR_FOLDER_SCHEMA_MISMATCH: &str = "p02-rel-folder-schema-mismatch";
+pub(crate) const REL_ERR_FOLDER_ID_INVALID: &str = "p02-rel-folder-id-invalid";
+pub(crate) const REL_ERR_FOLDER_ID_OBJECT_ID_MISMATCH: &str = "p02-rel-folder-id-object-id-mismatch";
+pub(crate) const REL_ERR_FOLDER_NAME_INVALID: &str = "p02-rel-folder-name-invalid";
+pub(crate) const REL_ERR_FOLDER_CREATED_AT_INVALID: &str = "p02-rel-folder-created-at-invalid";
+pub(crate) const REL_ERR_BINDING_PAYLOAD_SHAPE_INVALID: &str = "p02-rel-binding-payload-shape-invalid";
+pub(crate) const REL_ERR_BINDING_PAYLOAD_KEY_REJECTED: &str = "p02-rel-binding-payload-key-rejected";
+pub(crate) const REL_ERR_BINDING_SCHEMA_MISMATCH: &str = "p02-rel-binding-schema-mismatch";
+pub(crate) const REL_ERR_BINDING_CHAT_ID_INVALID: &str = "p02-rel-binding-chat-id-invalid";
+pub(crate) const REL_ERR_BINDING_CHAT_ID_OBJECT_ID_MISMATCH: &str = "p02-rel-binding-chat-id-object-id-mismatch";
+pub(crate) const REL_ERR_BINDING_FOLDER_ID_INVALID: &str = "p02-rel-binding-folder-id-invalid";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FolderCatalogStatePayloadV1 {
+    pub(crate) folder_id: String,
+    pub(crate) name: String,
+    pub(crate) created_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ChatFolderBindingPayloadV1 {
+    pub(crate) chat_id: String,
+    /// `None` is the Unfile LIVE state - not deletion, not a tombstone.
+    pub(crate) folder_id: Option<String>,
+}
+
+/// A typed relationship-payload refusal: the stable code plus, for key
+/// refusals, the offending key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RelationshipPayloadError {
+    pub(crate) code: &'static str,
+    pub(crate) key: Option<String>,
+}
+
+impl RelationshipPayloadError {
+    fn code(code: &'static str) -> Self {
+        Self { code, key: None }
+    }
+
+    fn key(code: &'static str, key: &str) -> Self {
+        Self {
+            code,
+            key: Some(key.to_string()),
+        }
+    }
+}
+
+/// Folder identity grammar `^[A-Za-z0-9_.:-]{1,160}$`.
+pub(crate) fn is_folder_object_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= FOLDER_ID_MAX_LENGTH
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-'))
+}
+
+/// The chat family's objectId rule (strict identifier), restated for the
+/// binding family: 1..512 characters, trimmed, no C0 control and no DEL.
+pub(crate) fn is_chat_object_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_ID_LENGTH_V2
+        && value.trim() == value
+        && !value
+            .chars()
+            .any(|ch| ch.is_ascii_control() || ch == '\u{7f}')
+}
+
+/// Canonical name form for PROJECTORS: Unicode whitespace runs collapse to one
+/// space, then trim. Validators require this form verbatim.
+pub(crate) fn canonical_folder_name(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut in_whitespace = false;
+    for ch in value.chars() {
+        if ch.is_whitespace() {
+            in_whitespace = true;
+        } else {
+            if in_whitespace && !output.is_empty() {
+                output.push(' ');
+            }
+            in_whitespace = false;
+            output.push(ch);
+        }
+    }
+    output
+}
+
+pub(crate) fn is_canonical_folder_name(value: &str) -> bool {
+    !value.is_empty()
+        && !value.chars().any(char::is_control)
+        && canonical_folder_name(value) == value
+        && value.chars().count() <= FOLDER_NAME_MAX_CODE_POINTS
+}
+
+/// ISO-8601 UTC milliseconds that is also a real calendar instant.
+pub(crate) fn is_utc_millisecond_timestamp(value: &str) -> bool {
+    if !timestamp(value) {
+        return false;
+    }
+    let digits = |range: std::ops::Range<usize>| value[range].parse::<u32>().ok();
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+        digits(0..4),
+        digits(5..7),
+        digits(8..10),
+        digits(11..13),
+        digits(14..16),
+        digits(17..19),
+    ) else {
+        return false;
+    };
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=days_in_month).contains(&day) && hour < 24 && minute < 60 && second < 60
+}
+
+fn require_exact_keys<'a>(
+    payload: &'a Value,
+    required: &[&str],
+    optional: &[&str],
+    shape_code: &'static str,
+    key_code: &'static str,
+) -> Result<&'a serde_json::Map<String, Value>, RelationshipPayloadError> {
+    let object = payload
+        .as_object()
+        .ok_or_else(|| RelationshipPayloadError::code(shape_code))?;
+    for key in object.keys() {
+        if !required.contains(&key.as_str()) && !optional.contains(&key.as_str()) {
+            return Err(RelationshipPayloadError::key(key_code, key));
+        }
+    }
+    for key in required {
+        if !object.contains_key(*key) {
+            return Err(RelationshipPayloadError::key(shape_code, key));
+        }
+    }
+    Ok(object)
+}
+
+pub(crate) fn validate_folder_catalog_state_payload(
+    payload: &Value,
+    object_id: &str,
+) -> Result<FolderCatalogStatePayloadV1, RelationshipPayloadError> {
+    let object = require_exact_keys(
+        payload,
+        &["schema", "folderId", "name"],
+        &["createdAt"],
+        REL_ERR_FOLDER_PAYLOAD_SHAPE_INVALID,
+        REL_ERR_FOLDER_PAYLOAD_KEY_REJECTED,
+    )?;
+    if object.get("schema").and_then(Value::as_str) != Some(FOLDER_PAYLOAD_SCHEMA_V1) {
+        return Err(RelationshipPayloadError::code(REL_ERR_FOLDER_SCHEMA_MISMATCH));
+    }
+    let folder_id = object
+        .get("folderId")
+        .and_then(Value::as_str)
+        .filter(|value| is_folder_object_id(value))
+        .ok_or_else(|| RelationshipPayloadError::code(REL_ERR_FOLDER_ID_INVALID))?;
+    if folder_id != object_id {
+        return Err(RelationshipPayloadError::code(
+            REL_ERR_FOLDER_ID_OBJECT_ID_MISMATCH,
+        ));
+    }
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|value| is_canonical_folder_name(value))
+        .ok_or_else(|| RelationshipPayloadError::code(REL_ERR_FOLDER_NAME_INVALID))?;
+    let created_at = match object.get("createdAt") {
+        None => None,
+        Some(Value::String(value)) if is_utc_millisecond_timestamp(value.as_str()) => Some(value.clone()),
+        Some(_) => {
+            return Err(RelationshipPayloadError::code(
+                REL_ERR_FOLDER_CREATED_AT_INVALID,
+            ))
+        }
+    };
+    Ok(FolderCatalogStatePayloadV1 {
+        folder_id: folder_id.to_string(),
+        name: name.to_string(),
+        created_at,
+    })
+}
+
+pub(crate) fn validate_chat_folder_binding_payload(
+    payload: &Value,
+    object_id: &str,
+) -> Result<ChatFolderBindingPayloadV1, RelationshipPayloadError> {
+    let object = require_exact_keys(
+        payload,
+        &["schema", "chatId", "folderId"],
+        &[],
+        REL_ERR_BINDING_PAYLOAD_SHAPE_INVALID,
+        REL_ERR_BINDING_PAYLOAD_KEY_REJECTED,
+    )?;
+    if object.get("schema").and_then(Value::as_str) != Some(CHAT_FOLDER_BINDING_PAYLOAD_SCHEMA_V1) {
+        return Err(RelationshipPayloadError::code(REL_ERR_BINDING_SCHEMA_MISMATCH));
+    }
+    let chat_id = object
+        .get("chatId")
+        .and_then(Value::as_str)
+        .filter(|value| is_chat_object_id(value))
+        .ok_or_else(|| RelationshipPayloadError::code(REL_ERR_BINDING_CHAT_ID_INVALID))?;
+    if chat_id != object_id {
+        return Err(RelationshipPayloadError::code(
+            REL_ERR_BINDING_CHAT_ID_OBJECT_ID_MISMATCH,
+        ));
+    }
+    let folder_id = match object.get("folderId") {
+        Some(Value::Null) => None,
+        Some(Value::String(value)) if is_folder_object_id(value.as_str()) => Some(value.clone()),
+        _ => {
+            return Err(RelationshipPayloadError::code(
+                REL_ERR_BINDING_FOLDER_ID_INVALID,
+            ))
+        }
+    };
+    Ok(ChatFolderBindingPayloadV1 {
+        chat_id: chat_id.to_string(),
+        folder_id,
+    })
+}
+
+/// Dispatch on a registered relationship domain. The chat family is NOT a
+/// relationship family and is refused here; its payload contract lives in the
+/// saved-chat intake path and is unchanged.
+pub(crate) fn validate_relationship_payload(
+    object_domain: &str,
+    payload: &Value,
+    object_id: &str,
+) -> Result<(), RelationshipPayloadError> {
+    match object_domain {
+        FOLDER_OBJECT_DOMAIN_V1 => {
+            validate_folder_catalog_state_payload(payload, object_id).map(|_| ())
+        }
+        CHAT_FOLDER_BINDING_OBJECT_DOMAIN_V1 => {
+            validate_chat_folder_binding_payload(payload, object_id).map(|_| ())
+        }
+        _ => Err(RelationshipPayloadError::code(REL_ERR_DOMAIN_UNREGISTERED)),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ContractErrorV2 {
     SchemaInvalid,
@@ -754,5 +1025,151 @@ mod tests {
             writer_key_hex_v2("writer-a"),
             object_key_hex_v2("studio.chat.saved-state.v1", "writer-a")
         );
+    }
+
+    fn relationship_vectors() -> Value {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "../../../../tools/validation/sync/fixtures/p02-relationship-contract-vectors.json",
+        );
+        serde_json::from_slice(&fs::read(path).expect("read shared P02 relationship vectors"))
+            .expect("parse shared P02 relationship vectors")
+    }
+
+    fn observed(result: Result<(), RelationshipPayloadError>) -> String {
+        match result {
+            Ok(()) => "ok".to_string(),
+            Err(error) => match error.key {
+                Some(key) if error.code.ends_with("-key-rejected") => format!("{}:{key}", error.code),
+                _ => error.code.to_string(),
+            },
+        }
+    }
+
+    fn expected(vector: &Value) -> String {
+        let code = vector["expected"].as_str().unwrap_or("ok");
+        match vector["rejectedKey"].as_str() {
+            Some(key) => format!("{code}:{key}"),
+            None => code.to_string(),
+        }
+    }
+
+    #[test]
+    fn relationship_domain_constants_pin_the_ratified_registration() {
+        let vectors = relationship_vectors();
+        assert_eq!(vectors["contract"]["chatObjectDomainUnchanged"], CHAT_OBJECT_DOMAIN_V1);
+        assert_eq!(vectors["contract"]["folderObjectDomain"], FOLDER_OBJECT_DOMAIN_V1);
+        assert_eq!(vectors["contract"]["folderPayloadSchema"], FOLDER_PAYLOAD_SCHEMA_V1);
+        assert_eq!(
+            vectors["contract"]["bindingObjectDomain"],
+            CHAT_FOLDER_BINDING_OBJECT_DOMAIN_V1
+        );
+        assert_eq!(
+            vectors["contract"]["bindingPayloadSchema"],
+            CHAT_FOLDER_BINDING_PAYLOAD_SCHEMA_V1
+        );
+        assert_eq!(
+            vectors["contract"]["folderNameMaxCodePoints"],
+            FOLDER_NAME_MAX_CODE_POINTS as u64
+        );
+        /* The chat objectKey derivation is byte-identical to the frozen Z1
+         * vector, and the same objectId string separates by domain. */
+        let separation = &vectors["objectKeySeparation"];
+        let shared = separation["objectId"].as_str().unwrap();
+        assert_eq!(object_key_hex_v2(CHAT_OBJECT_DOMAIN_V1, shared), separation["chat"]);
+        assert_eq!(
+            object_key_hex_v2(CHAT_FOLDER_BINDING_OBJECT_DOMAIN_V1, shared),
+            separation["binding"]
+        );
+        assert_eq!(object_key_hex_v2(FOLDER_OBJECT_DOMAIN_V1, shared), separation["folder"]);
+        assert_ne!(separation["chat"], separation["binding"]);
+        assert_ne!(separation["chat"], separation["folder"]);
+        assert_ne!(separation["binding"], separation["folder"]);
+        assert_eq!(
+            object_key_hex_v2(CHAT_OBJECT_DOMAIN_V1, separation["z1ChatObjectId"].as_str().unwrap()),
+            separation["z1ChatObjectKey"]
+        );
+        assert_eq!(
+            crate::sync_object_document::object_key_hex(shared),
+            separation["chat"].as_str().unwrap(),
+            "the v1 chat objectKey helper still derives the chat domain"
+        );
+    }
+
+    #[test]
+    fn folder_contract_vectors_match_shared_expectations() {
+        let vectors = relationship_vectors();
+        for vector in vectors["folder"]["positive"].as_array().unwrap() {
+            let id = vector["id"].as_str().unwrap();
+            let object_id = vector["objectId"].as_str().unwrap();
+            let result = validate_folder_catalog_state_payload(&vector["payload"], object_id)
+                .unwrap_or_else(|error| panic!("folder positive {id}: {}", error.code));
+            assert_eq!(result.folder_id, object_id, "folder positive {id}");
+            assert_eq!(
+                result.created_at.is_some(),
+                vector["payload"].get("createdAt").is_some(),
+                "folder positive {id}"
+            );
+        }
+        for vector in vectors["folder"]["negative"].as_array().unwrap() {
+            let id = vector["id"].as_str().unwrap();
+            let object_id = vector["objectId"].as_str().unwrap();
+            let result = validate_folder_catalog_state_payload(&vector["payload"], object_id)
+                .map(|_| ());
+            assert_eq!(observed(result), expected(vector), "folder negative {id}");
+        }
+    }
+
+    #[test]
+    fn binding_contract_vectors_match_shared_expectations() {
+        let vectors = relationship_vectors();
+        for vector in vectors["binding"]["positive"].as_array().unwrap() {
+            let id = vector["id"].as_str().unwrap();
+            let object_id = vector["objectId"].as_str().unwrap();
+            let result = validate_chat_folder_binding_payload(&vector["payload"], object_id)
+                .unwrap_or_else(|error| panic!("binding positive {id}: {}", error.code));
+            assert_eq!(result.chat_id, object_id, "binding positive {id}");
+            assert_eq!(
+                result.folder_id.is_none(),
+                vector["payload"]["folderId"].is_null(),
+                "binding positive {id}"
+            );
+        }
+        for vector in vectors["binding"]["negative"].as_array().unwrap() {
+            let id = vector["id"].as_str().unwrap();
+            let object_id = vector["objectId"].as_str().unwrap();
+            let result = validate_chat_folder_binding_payload(&vector["payload"], object_id)
+                .map(|_| ());
+            assert_eq!(observed(result), expected(vector), "binding negative {id}");
+        }
+    }
+
+    #[test]
+    fn relationship_dispatch_refuses_unregistered_and_chat_domains() {
+        let payload = serde_json::json!({
+            "schema": CHAT_FOLDER_BINDING_PAYLOAD_SCHEMA_V1,
+            "chatId": "chat-a",
+            "folderId": null
+        });
+        assert!(validate_relationship_payload(
+            CHAT_FOLDER_BINDING_OBJECT_DOMAIN_V1,
+            &payload,
+            "chat-a"
+        )
+        .is_ok());
+        assert_eq!(
+            validate_relationship_payload(CHAT_OBJECT_DOMAIN_V1, &payload, "chat-a")
+                .unwrap_err()
+                .code,
+            REL_ERR_DOMAIN_UNREGISTERED
+        );
+        assert_eq!(
+            validate_relationship_payload("studio.other.v1", &payload, "chat-a")
+                .unwrap_err()
+                .code,
+            REL_ERR_DOMAIN_UNREGISTERED
+        );
+        assert_eq!(canonical_folder_name("  Study \t  Notes\n"), "Study Notes");
+        assert!(is_canonical_folder_name("Study Notes"));
+        assert!(!is_canonical_folder_name("Study  Notes"));
     }
 }

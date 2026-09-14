@@ -424,7 +424,9 @@ const ask = (memo, over = {}) => memo.decide({
     path.join(root, 'apps/studio/desktop/src-tauri/src/lib.rs'), 'utf8'
   );
   const versions = [...lib.matchAll(/version:\s*(\d+),/g)].map((m) => Number(m[1]));
-  equal(Math.max(...versions), 22, 'D11-1 the migration ladder still tops out at v22');
+  /* v23 (P02 folder relationship synchronization T01) is the current ceiling;
+   * the Y-2 memo still added no migration of its own. */
+  equal(Math.max(...versions), 23, 'D11-1 the migration ladder tops out at the current v23 ceiling');
   equal(P02_DESKTOP_TIP_MEMO.TABLE, 'kv_store',
     'D11-2 Y-2 rides in the generic kv_store created by migration v1');
   check(lib.includes('CREATE TABLE IF NOT EXISTS kv_store'),

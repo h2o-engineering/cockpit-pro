@@ -14,6 +14,13 @@ const WARNINGS_VERDICT = 'MIGRATION ROLLBACK WARNINGS';
 const BLOCKED = 'MIGRATION ROLLBACK BLOCKED';
 const ROOT = process.cwd();
 
+/* The current Studio migration ceiling. v13 installed the guarded
+ * folder_bindings protection; v23 (P02 folder relationship synchronization
+ * T01) rebuilt sync_object_state domain-qualified and recreated the v13
+ * triggers with the successor allowlist. Ordering and fixture classification
+ * are pinned to this ceiling, not to v13. */
+const EXPECTED_STUDIO_MIGRATION_MAX = 23;
+
 const FLAGS = new Set(process.argv.slice(2));
 const JSON_OUTPUT = FLAGS.has('--json');
 const RUN_CARGO = FLAGS.has('--cargo');
@@ -125,7 +132,7 @@ function extractStudioMigrations(libText) {
 
 function checkMigrationOrdering() {
   const migrations = extractStudioMigrations(read(FILES.lib));
-  const expected = Array.from({ length: 13 }, (_, index) => index + 1);
+  const expected = Array.from({ length: EXPECTED_STUDIO_MIGRATION_MAX }, (_, index) => index + 1);
   const sorted = [...migrations.versions].sort((a, b) => a - b);
   const duplicates = sorted.filter((version, index) => sorted.indexOf(version) !== index);
   const missing = expected.filter((version) => !sorted.includes(version));
@@ -161,7 +168,8 @@ function checkV13GuardDdl() {
     'f16_protect_folder_bindings_delete',
     'WHEN (SELECT COALESCE(enabled, 0) FROM f16_folder_bindings_trigger_guard WHERE id = 1) = 1',
     'f15.execute-settlement-writer',
-    'f16.folder-legacy-fallback'
+    'f16.folder-legacy-fallback',
+    'p02.relationship-apply'
   ];
   const requiredWriterNeedles = [
     'UPDATE f16_folder_bindings_trigger_guard',
@@ -311,10 +319,10 @@ function classifyFixture(fixture) {
   if (typeof fixture.userVersion !== 'number') {
     return { classification: 'unknown/future', needsBackupBeforeMigration: true };
   }
-  if (fixture.userVersion < 13) {
+  if (fixture.userVersion < EXPECTED_STUDIO_MIGRATION_MAX) {
     return { classification: 'old', needsBackupBeforeMigration: true };
   }
-  if (fixture.userVersion === 13) {
+  if (fixture.userVersion === EXPECTED_STUDIO_MIGRATION_MAX) {
     return { classification: 'current', needsBackupBeforeMigration: false };
   }
   return { classification: 'unknown/future', needsBackupBeforeMigration: true };
@@ -326,7 +334,9 @@ function checkOldDbFixtures() {
     { id: 'v1-only-db', kind: 'sqlite', userVersion: 1, expected: 'old', expectedBackup: true },
     { id: 'v3-folder-era-db', kind: 'sqlite', userVersion: 3, expected: 'old', expectedBackup: true },
     { id: 'v12-pre-folder-trigger-db', kind: 'sqlite', userVersion: 12, expected: 'old', expectedBackup: true },
-    { id: 'v13-current-db', kind: 'sqlite', userVersion: 13, expected: 'current', expectedBackup: false },
+    { id: 'v13-folder-trigger-db', kind: 'sqlite', userVersion: 13, expected: 'old', expectedBackup: true },
+    { id: 'v22-pre-domain-qualified-db', kind: 'sqlite', userVersion: 22, expected: 'old', expectedBackup: true },
+    { id: 'v23-current-db', kind: 'sqlite', userVersion: 23, expected: 'current', expectedBackup: false },
     { id: 'unknown-future-db', kind: 'sqlite', userVersion: 99, expected: 'unknown/future', expectedBackup: true }
   ];
   const results = fixtures.map((fixture) => {
@@ -359,6 +369,7 @@ function checkV13RollbackContract() {
     activeBlocksUnauthorized: ddl.guardedNotUnconditional,
     settlementIdentityAllowed: read(FILES.lib).includes('f15.execute-settlement-writer'),
     legacyFallbackIdentityAllowed: read(FILES.lib).includes('f16.folder-legacy-fallback'),
+    p02RelationshipApplyIdentityAllowed: read(FILES.lib).includes('p02.relationship-apply'),
     disableRestoresLegacy: read(FILES.writerIdentity).includes('sqlite-folder-bindings-trigger-installed-disabled')
   };
   const ok = Object.values(proof).every(Boolean);

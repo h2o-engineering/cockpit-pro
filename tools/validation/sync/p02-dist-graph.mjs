@@ -54,6 +54,7 @@ export const P02_PACKED_LAYOUT = Object.freeze({
     'packages/core/sync-repository-root-v2.mjs',
     'packages/core/sync-first-publication-candidates-v2.mjs',
     'packages/core/sync-first-publication-composition-v2.mjs',
+    'packages/core/sync-relationship-domains-v2.mjs',
   ]),
   'browser-adapters/chrome': Object.freeze([
     'packages/browser-adapters/chrome/sync-contract-v2.mjs',
@@ -66,6 +67,7 @@ export const P02_PACKED_LAYOUT = Object.freeze({
     'packages/browser-adapters/chrome/sync-p02-tip-memo-chrome-v2.mjs',
     'packages/browser-adapters/chrome/sync-writer-generation-chrome-v2.mjs',
     'packages/browser-adapters/chrome/sync-revision-apply-v2.mjs',
+    'packages/browser-adapters/chrome/sync-p02-domain-protocol-state-chrome-v2.mjs',
   ]),
 });
 

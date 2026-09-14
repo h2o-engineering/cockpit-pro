@@ -202,7 +202,9 @@ const store = (mode, value = null) => ({
   equal((await remounted.requirePermitted()).permitted, false,
     'D8 the record survives a restart - a fresh gate over the same store still refuses');
   const versions = [...lib.matchAll(/version:\s*(\d+),/g)].map((m) => Number(m[1]));
-  equal(Math.max(...versions), 22, 'D9 with NO migration added - the ladder still tops at v22');
+  /* v23 (P02 folder relationship synchronization T01) is the current ceiling;
+   * the generation record still added no migration of its own. */
+  equal(Math.max(...versions), 23, 'D9 with NO migration added - the ladder tops at the current v23 ceiling');
   /* Scoped to the ladder itself. The whole-file form also matched an unrelated
    * command NAME elsewhere in lib.rs, which says nothing about migrations - the
    * claim being pinned is that no migration creates a generation table. */

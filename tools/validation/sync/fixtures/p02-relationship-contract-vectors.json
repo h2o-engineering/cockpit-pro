@@ -1,0 +1,898 @@
+{
+  "schema": "h2o.studio.syncRelationshipContractVectors.p02.v1",
+  "mission": "p02-folder-relationship-synchronization",
+  "task": "T01",
+  "contract": {
+    "objectKeyDomainSeparator": "objectDomain + 0x00 + objectId",
+    "chatObjectDomainUnchanged": "studio.chat.saved-state.v1",
+    "folderObjectDomain": "studio.folder.v1",
+    "folderPayloadSchema": "h2o.studio.folderCatalogState.v1",
+    "folderIdGrammar": "^[A-Za-z0-9_.:-]{1,160}$",
+    "folderNameMaxCodePoints": 200,
+    "bindingObjectDomain": "studio.chat-folder-binding.v1",
+    "bindingPayloadSchema": "h2o.studio.chatFolderBinding.v1",
+    "colorAdmission": "DEFERRED_PENDING_SHARED_COLOR_VOCABULARY"
+  },
+  "objectKeySeparation": {
+    "objectId": "p02-rel-shared-object-id",
+    "chat": "873c4cf808f3c44b45a4a1a079d588430a6efd8dbdad0bb17ccd98c91c85609b",
+    "binding": "0eb916d494435ec1cb08a2dd6cf0aa7b4a366707531dda6c94ead3e94fe339b0",
+    "folder": "098a4834f4f480c5d4b4ee4f7dad80bb924c70b878d58df87470aa2d351c0019",
+    "z1ChatObjectId": "p02-z1-object-a",
+    "z1ChatObjectKey": "cc282d10ed0a56aa1f45fa401ae8bcc13d03a770828d7438078b7d04612ba4a9"
+  },
+  "folder": {
+    "positive": [
+      {
+        "id": "folder-minimal-f-id",
+        "objectId": "f_abc123def456",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123def456",
+          "name": "Study"
+        }
+      },
+      {
+        "id": "folder-with-created-at",
+        "objectId": "fold_chrome_0f3a9c1d",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "fold_chrome_0f3a9c1d",
+          "name": "Study",
+          "createdAt": "2026-09-14T10:15:30.123Z"
+        }
+      },
+      {
+        "id": "folder-uuid-style-id",
+        "objectId": "fold_3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "fold_3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+          "name": "Code Review Notes"
+        }
+      },
+      {
+        "id": "folder-name-unicode",
+        "objectId": "f_unicode1",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_unicode1",
+          "name": "Étude — 学习 📚"
+        }
+      },
+      {
+        "id": "folder-id-allowed-punctuation",
+        "objectId": "f_a.b:c-d_e",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_a.b:c-d_e",
+          "name": "x"
+        }
+      },
+      {
+        "id": "folder-id-max-160",
+        "objectId": "f_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "name": "Max id"
+        }
+      },
+      {
+        "id": "folder-name-200-code-points",
+        "objectId": "f_long_name",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_long_name",
+          "name": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+        }
+      },
+      {
+        "id": "folder-name-single-internal-spaces",
+        "objectId": "f_spaces",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_spaces",
+          "name": "A B C"
+        }
+      }
+    ],
+    "negative": [
+      {
+        "id": "folder-id-object-id-mismatch",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_other",
+          "name": "Study"
+        },
+        "expected": "p02-rel-folder-id-object-id-mismatch"
+      },
+      {
+        "id": "folder-id-bad-grammar-space",
+        "objectId": "f abc",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f abc",
+          "name": "Study"
+        },
+        "expected": "p02-rel-folder-id-invalid"
+      },
+      {
+        "id": "folder-id-bad-grammar-slash",
+        "objectId": "f/abc",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f/abc",
+          "name": "Study"
+        },
+        "expected": "p02-rel-folder-id-invalid"
+      },
+      {
+        "id": "folder-id-bad-grammar-unicode",
+        "objectId": "f_ä",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_ä",
+          "name": "Study"
+        },
+        "expected": "p02-rel-folder-id-invalid"
+      },
+      {
+        "id": "folder-id-over-160",
+        "objectId": "f_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "name": "Study"
+        },
+        "expected": "p02-rel-folder-id-invalid"
+      },
+      {
+        "id": "folder-id-empty",
+        "objectId": "",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "",
+          "name": "Study"
+        },
+        "expected": "p02-rel-folder-id-invalid"
+      },
+      {
+        "id": "folder-id-not-string",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": 42,
+          "name": "Study"
+        },
+        "expected": "p02-rel-folder-id-invalid"
+      },
+      {
+        "id": "folder-name-empty",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": ""
+        },
+        "expected": "p02-rel-folder-name-invalid"
+      },
+      {
+        "id": "folder-name-whitespace-only",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "   "
+        },
+        "expected": "p02-rel-folder-name-invalid"
+      },
+      {
+        "id": "folder-name-untrimmed-leading",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": " Study"
+        },
+        "expected": "p02-rel-folder-name-invalid"
+      },
+      {
+        "id": "folder-name-untrimmed-trailing",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study "
+        },
+        "expected": "p02-rel-folder-name-invalid"
+      },
+      {
+        "id": "folder-name-uncollapsed-whitespace",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study  Notes"
+        },
+        "expected": "p02-rel-folder-name-invalid"
+      },
+      {
+        "id": "folder-name-tab-whitespace",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study\tNotes"
+        },
+        "expected": "p02-rel-folder-name-invalid"
+      },
+      {
+        "id": "folder-name-control-char",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Stu\u0001dy"
+        },
+        "expected": "p02-rel-folder-name-invalid"
+      },
+      {
+        "id": "folder-name-201-code-points",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+        },
+        "expected": "p02-rel-folder-name-invalid"
+      },
+      {
+        "id": "folder-name-not-string",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": 42
+        },
+        "expected": "p02-rel-folder-name-invalid"
+      },
+      {
+        "id": "folder-created-at-null",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "createdAt": null
+        },
+        "expected": "p02-rel-folder-created-at-invalid"
+      },
+      {
+        "id": "folder-created-at-no-millis",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "createdAt": "2026-09-14T10:15:30Z"
+        },
+        "expected": "p02-rel-folder-created-at-invalid"
+      },
+      {
+        "id": "folder-created-at-invalid-calendar",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "createdAt": "2026-13-45T10:15:30.123Z"
+        },
+        "expected": "p02-rel-folder-created-at-invalid"
+      },
+      {
+        "id": "folder-created-at-offset-not-utc",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "createdAt": "2026-09-14T10:15:30.123+02:00"
+        },
+        "expected": "p02-rel-folder-created-at-invalid"
+      },
+      {
+        "id": "folder-created-at-number",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "createdAt": 1757844930123
+        },
+        "expected": "p02-rel-folder-created-at-invalid"
+      },
+      {
+        "id": "folder-color-present",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "color": "#ff0000"
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "color"
+      },
+      {
+        "id": "folder-icon-color-present",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "iconColor": "red"
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "iconColor"
+      },
+      {
+        "id": "folder-updated-at-present",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "updatedAt": "2026-09-14T10:15:30.123Z"
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "updatedAt"
+      },
+      {
+        "id": "folder-origin-present",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "origin": "chrome"
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "origin"
+      },
+      {
+        "id": "folder-kind-present",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "kind": "local"
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "kind"
+      },
+      {
+        "id": "folder-project-ref-present",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "projectRef": "g-p-123"
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "projectRef"
+      },
+      {
+        "id": "folder-parent-id-camel-present",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "parentId": "f_root"
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "parentId"
+      },
+      {
+        "id": "folder-parent-id-snake-present",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "parent_id": "f_root"
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "parent_id"
+      },
+      {
+        "id": "folder-sort-order-camel-present",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "sortOrder": 3
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "sortOrder"
+      },
+      {
+        "id": "folder-sort-order-snake-present",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "sort_order": 3
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "sort_order"
+      },
+      {
+        "id": "folder-source-present",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "source": "user"
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "source"
+      },
+      {
+        "id": "folder-meta-present",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "meta": {}
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "meta"
+      },
+      {
+        "id": "folder-meta-json-present",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "meta_json": "{}"
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "meta_json"
+      },
+      {
+        "id": "folder-labels-present",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "labels": []
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "labels"
+      },
+      {
+        "id": "folder-tags-present",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "tags": []
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "tags"
+      },
+      {
+        "id": "folder-categories-present",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "categories": []
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "categories"
+      },
+      {
+        "id": "folder-projects-present",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "projects": []
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "projects"
+      },
+      {
+        "id": "folder-assets-present",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "assets": []
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "assets"
+      },
+      {
+        "id": "folder-arbitrary-unknown-key",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Study",
+          "x-unknown": 1
+        },
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "x-unknown"
+      },
+      {
+        "id": "folder-schema-mismatch",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v2",
+          "folderId": "f_abc123",
+          "name": "Study"
+        },
+        "expected": "p02-rel-folder-schema-mismatch"
+      },
+      {
+        "id": "folder-schema-chat-payload-schema",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.fullBundle.v2",
+          "folderId": "f_abc123",
+          "name": "Study"
+        },
+        "expected": "p02-rel-folder-schema-mismatch"
+      },
+      {
+        "id": "folder-missing-name",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123"
+        },
+        "expected": "p02-rel-folder-payload-shape-invalid"
+      },
+      {
+        "id": "folder-missing-folder-id",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "name": "Study"
+        },
+        "expected": "p02-rel-folder-payload-shape-invalid"
+      },
+      {
+        "id": "folder-missing-schema",
+        "objectId": "f_abc123",
+        "payload": {
+          "folderId": "f_abc123",
+          "name": "Study"
+        },
+        "expected": "p02-rel-folder-payload-shape-invalid"
+      },
+      {
+        "id": "folder-payload-array",
+        "objectId": "f_abc123",
+        "payload": [],
+        "expected": "p02-rel-folder-payload-shape-invalid"
+      },
+      {
+        "id": "folder-payload-null",
+        "objectId": "f_abc123",
+        "payload": null,
+        "expected": "p02-rel-folder-payload-shape-invalid"
+      }
+    ]
+  },
+  "binding": {
+    "positive": [
+      {
+        "id": "binding-bound",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc",
+          "folderId": "f_abc123"
+        }
+      },
+      {
+        "id": "binding-unfiled-null",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc",
+          "folderId": null
+        }
+      },
+      {
+        "id": "binding-chat-id-uuid-like",
+        "objectId": "68b1c0d2-1234-4000-a1b2-0123456789ab",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "68b1c0d2-1234-4000-a1b2-0123456789ab",
+          "folderId": "f_abc123"
+        }
+      },
+      {
+        "id": "binding-folder-id-uuid-style",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc",
+          "folderId": "fold_3f2504e0-4f89-41d3-9a0c-0305e82c3301"
+        }
+      },
+      {
+        "id": "binding-folder-id-chrome-style",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc",
+          "folderId": "fold_chrome_0f3a9c1d"
+        }
+      },
+      {
+        "id": "binding-folder-id-max-160",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc",
+          "folderId": "f_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    ],
+    "negative": [
+      {
+        "id": "binding-missing-folder-id-key",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc"
+        },
+        "expected": "p02-rel-binding-payload-shape-invalid"
+      },
+      {
+        "id": "binding-folder-id-invalid-grammar",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc",
+          "folderId": "f abc"
+        },
+        "expected": "p02-rel-binding-folder-id-invalid"
+      },
+      {
+        "id": "binding-folder-id-over-160",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc",
+          "folderId": "f_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "expected": "p02-rel-binding-folder-id-invalid"
+      },
+      {
+        "id": "binding-folder-id-empty-string",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc",
+          "folderId": ""
+        },
+        "expected": "p02-rel-binding-folder-id-invalid"
+      },
+      {
+        "id": "binding-folder-id-number",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc",
+          "folderId": 5
+        },
+        "expected": "p02-rel-binding-folder-id-invalid"
+      },
+      {
+        "id": "binding-folder-id-false",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc",
+          "folderId": false
+        },
+        "expected": "p02-rel-binding-folder-id-invalid"
+      },
+      {
+        "id": "binding-chat-id-object-id-mismatch",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-other",
+          "folderId": "f_abc123"
+        },
+        "expected": "p02-rel-binding-chat-id-object-id-mismatch"
+      },
+      {
+        "id": "binding-chat-id-control-char",
+        "objectId": "chat-\u0001abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-\u0001abc",
+          "folderId": "f_abc123"
+        },
+        "expected": "p02-rel-binding-chat-id-invalid"
+      },
+      {
+        "id": "binding-chat-id-untrimmed",
+        "objectId": " chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": " chat-abc",
+          "folderId": "f_abc123"
+        },
+        "expected": "p02-rel-binding-chat-id-invalid"
+      },
+      {
+        "id": "binding-chat-id-empty",
+        "objectId": "",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "",
+          "folderId": "f_abc123"
+        },
+        "expected": "p02-rel-binding-chat-id-invalid"
+      },
+      {
+        "id": "binding-chat-id-not-string",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": 7,
+          "folderId": "f_abc123"
+        },
+        "expected": "p02-rel-binding-chat-id-invalid"
+      },
+      {
+        "id": "binding-bound-at-present",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc",
+          "folderId": "f_abc123",
+          "boundAt": "2026-09-14T10:15:30.123Z"
+        },
+        "expected": "p02-rel-binding-payload-key-rejected",
+        "rejectedKey": "boundAt"
+      },
+      {
+        "id": "binding-folder-name-present",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc",
+          "folderId": "f_abc123",
+          "folderName": "Study"
+        },
+        "expected": "p02-rel-binding-payload-key-rejected",
+        "rejectedKey": "folderName"
+      },
+      {
+        "id": "binding-href-present",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc",
+          "folderId": "f_abc123",
+          "href": "https://chatgpt.com/c/abc"
+        },
+        "expected": "p02-rel-binding-payload-key-rejected",
+        "rejectedKey": "href"
+      },
+      {
+        "id": "binding-updated-at-present",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc",
+          "folderId": "f_abc123",
+          "updatedAt": "2026-09-14T10:15:30.123Z"
+        },
+        "expected": "p02-rel-binding-payload-key-rejected",
+        "rejectedKey": "updatedAt"
+      },
+      {
+        "id": "binding-created-at-present",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc",
+          "folderId": "f_abc123",
+          "createdAt": "2026-09-14T10:15:30.123Z"
+        },
+        "expected": "p02-rel-binding-payload-key-rejected",
+        "rejectedKey": "createdAt"
+      },
+      {
+        "id": "binding-organization-present",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc",
+          "folderId": "f_abc123",
+          "organization": {}
+        },
+        "expected": "p02-rel-binding-payload-key-rejected",
+        "rejectedKey": "organization"
+      },
+      {
+        "id": "binding-arbitrary-unknown-key",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc",
+          "folderId": "f_abc123",
+          "x-unknown": true
+        },
+        "expected": "p02-rel-binding-payload-key-rejected",
+        "rejectedKey": "x-unknown"
+      },
+      {
+        "id": "binding-schema-mismatch",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v2",
+          "chatId": "chat-abc",
+          "folderId": "f_abc123"
+        },
+        "expected": "p02-rel-binding-schema-mismatch"
+      },
+      {
+        "id": "binding-missing-chat-id",
+        "objectId": "chat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "folderId": "f_abc123"
+        },
+        "expected": "p02-rel-binding-payload-shape-invalid"
+      },
+      {
+        "id": "binding-missing-schema",
+        "objectId": "chat-abc",
+        "payload": {
+          "chatId": "chat-abc",
+          "folderId": "f_abc123"
+        },
+        "expected": "p02-rel-binding-payload-shape-invalid"
+      },
+      {
+        "id": "binding-payload-array",
+        "objectId": "chat-abc",
+        "payload": [],
+        "expected": "p02-rel-binding-payload-shape-invalid"
+      },
+      {
+        "id": "binding-payload-null",
+        "objectId": "chat-abc",
+        "payload": null,
+        "expected": "p02-rel-binding-payload-shape-invalid"
+      }
+    ]
+  }
+}

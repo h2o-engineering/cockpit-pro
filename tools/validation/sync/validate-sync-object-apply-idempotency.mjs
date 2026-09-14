@@ -47,7 +47,7 @@ function installSchema(db) {
       text TEXT NOT NULL DEFAULT '', meta_json TEXT NOT NULL DEFAULT '{}', PRIMARY KEY(snapshot_id, turn_idx)
     );
     CREATE TABLE sync_object_state (
-      sync_peer_id TEXT NOT NULL, object_id TEXT NOT NULL,
+      sync_peer_id TEXT NOT NULL, object_domain TEXT NOT NULL CHECK (object_domain <> ''), object_id TEXT NOT NULL,
       last_published_revision_id TEXT, last_published_revision_blob_sha256 TEXT,
       last_applied_revision_id TEXT, last_applied_revision_blob_sha256 TEXT,
       remote_head_strong_etag TEXT, remote_head_revision_blob_sha256 TEXT,
@@ -59,7 +59,7 @@ function installSchema(db) {
       last_published_payload_sha256 TEXT, last_applied_payload_sha256 TEXT,
       last_converged_direction TEXT,
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-      PRIMARY KEY(sync_peer_id, object_id)
+      PRIMARY KEY(sync_peer_id, object_domain, object_id)
     );
     CREATE TABLE sync_inbound_revision_observations (
       key TEXT PRIMARY KEY, schema TEXT NOT NULL, peer_object_key TEXT NOT NULL,
@@ -427,7 +427,7 @@ try {
   extraProfiles.push(advancedProfile);
   await advancedProfile.stores.chats.init(); await advancedProfile.stores.snapshots.init();
   await seedSnapshot(advancedProfile, 'local-advanced', 'Advanced local answer', 1784629200000);
-  advancedProfile.db.prepare('INSERT INTO sync_object_state (sync_peer_id, object_id, last_applied_revision_id, last_applied_revision_blob_sha256, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)').run(advancedProfile.syncPeerId, 'synthetic-chat-1', 'remote-old', 'f'.repeat(64), new Date().toISOString(), new Date().toISOString());
+  advancedProfile.db.prepare('INSERT INTO sync_object_state (sync_peer_id, object_domain, object_id, last_applied_revision_id, last_applied_revision_blob_sha256, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(advancedProfile.syncPeerId, 'studio.chat.saved-state.v1', 'synthetic-chat-1', 'remote-old', 'f'.repeat(64), new Date().toISOString(), new Date().toISOString());
   let advancedImporterCalls = 0;
   wire(advancedProfile, conflictRemote, async () => { advancedImporterCalls += 1; return { ok: true }; });
   const advancedBlocked = await advancedProfile.sandbox.H2O.Desktop.SyncObjectRuntime.pullObject('synthetic-chat-1');

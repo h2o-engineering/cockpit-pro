@@ -895,9 +895,12 @@ async fn derive_baseline<'a>(
     let tombstones: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sync_tombstones WHERE record_kind = 'chat' AND record_id = ? AND (restored_at IS NULL OR restored_at = '')"
     ).bind(object_id).fetch_one(&mut **tx).await.map_err(|_| BASELINE_UNAVAILABLE)?;
+    /* v23: the saved-chat baseline reads only chat-domain rows. A
+     * chat-folder-binding row shares this objectId string and must never
+     * enter the chat lineage. */
     let sab_rows: Vec<Option<String>> = sqlx::query_scalar(
-        "SELECT DISTINCT last_applied_revision_id FROM sync_object_state WHERE object_id = ? AND last_applied_revision_id IS NOT NULL"
-    ).bind(object_id).fetch_all(&mut **tx).await.map_err(|_| BASELINE_UNAVAILABLE)?;
+        "SELECT DISTINCT last_applied_revision_id FROM sync_object_state WHERE object_domain = ? AND object_id = ? AND last_applied_revision_id IS NOT NULL"
+    ).bind(crate::sync_contract_v2::CHAT_OBJECT_DOMAIN_V1).bind(object_id).fetch_all(&mut **tx).await.map_err(|_| BASELINE_UNAVAILABLE)?;
     if sab_rows.len() > 1 {
         return Err(BASELINE_UNAVAILABLE);
     }
@@ -1349,7 +1352,7 @@ mod tests {
         for sql in [
             "CREATE TABLE chats (id TEXT PRIMARY KEY, last_snapshot_id TEXT, is_deleted INTEGER NOT NULL DEFAULT 0)",
             "CREATE TABLE sync_tombstones (record_kind TEXT, record_id TEXT, restored_at TEXT)",
-            "CREATE TABLE sync_object_state (sync_peer_id TEXT, object_id TEXT, last_applied_revision_id TEXT)",
+            "CREATE TABLE sync_object_state (sync_peer_id TEXT, object_domain TEXT NOT NULL, object_id TEXT, last_applied_revision_id TEXT)",
         ] { sqlx::query(sql).execute(&mut conn).await.unwrap(); }
         for migration in crate::studio_migrations()
             .into_iter()
@@ -2236,7 +2239,14 @@ mod tests {
                 .await
                 .unwrap();
             set_lmr(&mut drift, "chat-e", Some("d2")).await;
-            sqlx::query("INSERT INTO sync_object_state VALUES ('peer', 'chat-e', 'd1')")
+            sqlx::query("INSERT INTO sync_object_state (sync_peer_id, object_domain, object_id, last_applied_revision_id) VALUES ('peer', 'studio.chat.saved-state.v1', 'chat-e', 'd1')")
+                .execute(&mut drift)
+                .await
+                .unwrap();
+            /* v23 collision regression: a binding-domain row for the SAME
+             * objectId with a different applied revision must not disturb
+             * the chat baseline. */
+            sqlx::query("INSERT INTO sync_object_state (sync_peer_id, object_domain, object_id, last_applied_revision_id) VALUES ('peer', 'studio.chat-folder-binding.v1', 'chat-e', 'binding-r9')")
                 .execute(&mut drift)
                 .await
                 .unwrap();

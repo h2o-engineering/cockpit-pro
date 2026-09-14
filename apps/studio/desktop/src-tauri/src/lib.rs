@@ -93,6 +93,10 @@ pub mod p02_publication_authority;
  * steady window until the T19 standdown ceremony has run. */
 pub mod p02_steady_authority;
 pub mod p02_writer_storage;
+// P02 folder relationship synchronization, T01: the ONE fixed-statement
+// relationship command (Host Integration lease, one module, one mod
+// declaration, one logical command). No plugin, no capability change.
+pub mod p02_relationship_apply;
 // Governed Desktop maintenance suppression: ephemeral, launch-environment
 // authority that removes P01 automatic mutation capability for one process
 // without touching persisted Sync configuration.
@@ -1745,7 +1749,190 @@ fn studio_migrations() -> Vec<Migration> {
                 ALTER TABLE sync_object_state ADD COLUMN last_converged_direction TEXT;
             "#,
             kind: MigrationKind::Up,
-        },    ]
+        },
+        // v23 — P02 folder relationship synchronization, T01 (Mission
+        // p02-folder-relationship-synchronization; Build & Delivery lease
+        // RELATIONSHIP_BUILD_DELIVERY_LEASE_APPROVED, 2026-09-14).
+        //
+        // sync_object_state was keyed by (sync_peer_id, object_id), which
+        // collides once a second object family shares an objectId string: the
+        // saved-chat object (studio.chat.saved-state.v1, objectId = chatId) and
+        // the chat-folder-binding object (studio.chat-folder-binding.v1,
+        // objectId = the same chatId). The key becomes
+        // (sync_peer_id, object_domain, object_id).
+        //
+        // Table rebuild (SQLite ALTER TABLE "other kinds of table alteration"
+        // procedure): create the successor table, copy every row, drop the
+        // old table, rename. Every pre-v23 column is copied by name in the
+        // pre-v23 order, so all published/applied anchors, pending operation
+        // and phase, owner triple, intended identity, convergence watermark,
+        // consumed revision, conflict/error state, payload identities,
+        // converged direction and timestamps are preserved exactly. Existing
+        // rows are backfilled to studio.chat.saved-state.v1 - the only family
+        // that could ever have written them. object_domain carries NO DEFAULT
+        // so a domain-unaware write can never silently become chat state.
+        // object_key stays derived (SHA-256(objectDomain || 0x00 || objectId))
+        // and is not persisted here.
+        //
+        // The plugin applies each migration inside one transaction and records
+        // it in _sqlx_migrations, so the rebuild is atomic and never re-run.
+        //
+        // F16 successor allowlist: the three folder_bindings protection
+        // triggers are recreated (DROP/CREATE, the v15/v16 successor pattern;
+        // the v13 text is not rewritten) to admit exactly
+        // f15.execute-settlement-writer, f16.folder-legacy-fallback and the
+        // new fixed-statement identity p02.relationship-apply. The guard row,
+        // its default-off state and the RAISE(ABORT) model are unchanged.
+        Migration {
+            version: 23,
+            description: "domain-qualify sync object state and admit p02 relationship apply",
+            sql: r#"
+                CREATE TABLE sync_object_state_v23 (
+                  sync_peer_id                         TEXT NOT NULL,
+                  object_domain                        TEXT NOT NULL CHECK (object_domain <> ''),
+                  object_id                            TEXT NOT NULL,
+                  last_published_revision_id            TEXT,
+                  last_published_revision_blob_sha256   TEXT,
+                  last_applied_revision_id              TEXT,
+                  last_applied_revision_blob_sha256     TEXT,
+                  remote_head_strong_etag               TEXT,
+                  remote_head_revision_blob_sha256      TEXT,
+                  pending_operation                     TEXT,
+                  operation_phase                       TEXT,
+                  operation_token                       TEXT,
+                  owner_boot_id                         TEXT,
+                  owner_context_id                      TEXT,
+                  owner_token                           TEXT,
+                  intended_object_key                   TEXT,
+                  intended_revision_id                  TEXT,
+                  intended_payload_sha256               TEXT,
+                  intended_revision_blob_sha256         TEXT,
+                  convergence_watermark_sha256          TEXT,
+                  consumed_revision_blob_sha256         TEXT,
+                  last_conflict_class                   TEXT,
+                  last_error_code                       TEXT,
+                  created_at                            TEXT NOT NULL,
+                  updated_at                            TEXT NOT NULL,
+                  last_published_payload_sha256         TEXT,
+                  last_applied_payload_sha256           TEXT,
+                  last_converged_direction              TEXT,
+                  PRIMARY KEY (sync_peer_id, object_domain, object_id)
+                );
+
+                INSERT INTO sync_object_state_v23 (
+                  sync_peer_id,
+                  object_domain,
+                  object_id,
+                  last_published_revision_id,
+                  last_published_revision_blob_sha256,
+                  last_applied_revision_id,
+                  last_applied_revision_blob_sha256,
+                  remote_head_strong_etag,
+                  remote_head_revision_blob_sha256,
+                  pending_operation,
+                  operation_phase,
+                  operation_token,
+                  owner_boot_id,
+                  owner_context_id,
+                  owner_token,
+                  intended_object_key,
+                  intended_revision_id,
+                  intended_payload_sha256,
+                  intended_revision_blob_sha256,
+                  convergence_watermark_sha256,
+                  consumed_revision_blob_sha256,
+                  last_conflict_class,
+                  last_error_code,
+                  created_at,
+                  updated_at,
+                  last_published_payload_sha256,
+                  last_applied_payload_sha256,
+                  last_converged_direction
+                )
+                SELECT
+                  sync_peer_id,
+                  'studio.chat.saved-state.v1',
+                  object_id,
+                  last_published_revision_id,
+                  last_published_revision_blob_sha256,
+                  last_applied_revision_id,
+                  last_applied_revision_blob_sha256,
+                  remote_head_strong_etag,
+                  remote_head_revision_blob_sha256,
+                  pending_operation,
+                  operation_phase,
+                  operation_token,
+                  owner_boot_id,
+                  owner_context_id,
+                  owner_token,
+                  intended_object_key,
+                  intended_revision_id,
+                  intended_payload_sha256,
+                  intended_revision_blob_sha256,
+                  convergence_watermark_sha256,
+                  consumed_revision_blob_sha256,
+                  last_conflict_class,
+                  last_error_code,
+                  created_at,
+                  updated_at,
+                  last_published_payload_sha256,
+                  last_applied_payload_sha256,
+                  last_converged_direction
+                FROM sync_object_state;
+
+                DROP TABLE sync_object_state;
+
+                ALTER TABLE sync_object_state_v23 RENAME TO sync_object_state;
+
+                DROP TRIGGER IF EXISTS f16_protect_folder_bindings_insert;
+                DROP TRIGGER IF EXISTS f16_protect_folder_bindings_update;
+                DROP TRIGGER IF EXISTS f16_protect_folder_bindings_delete;
+
+                CREATE TRIGGER f16_protect_folder_bindings_insert
+                BEFORE INSERT ON folder_bindings
+                WHEN (SELECT COALESCE(enabled, 0) FROM f16_folder_bindings_trigger_guard WHERE id = 1) = 1
+                BEGIN
+                  SELECT CASE
+                    WHEN COALESCE(h2o_writer_identity(), '') NOT IN (
+                      'f15.execute-settlement-writer',
+                      'f16.folder-legacy-fallback',
+                      'p02.relationship-apply'
+                    )
+                    THEN RAISE(ABORT, 'f16-folder-bindings-write-protected:insert')
+                  END;
+                END;
+
+                CREATE TRIGGER f16_protect_folder_bindings_update
+                BEFORE UPDATE ON folder_bindings
+                WHEN (SELECT COALESCE(enabled, 0) FROM f16_folder_bindings_trigger_guard WHERE id = 1) = 1
+                BEGIN
+                  SELECT CASE
+                    WHEN COALESCE(h2o_writer_identity(), '') NOT IN (
+                      'f15.execute-settlement-writer',
+                      'f16.folder-legacy-fallback',
+                      'p02.relationship-apply'
+                    )
+                    THEN RAISE(ABORT, 'f16-folder-bindings-write-protected:update')
+                  END;
+                END;
+
+                CREATE TRIGGER f16_protect_folder_bindings_delete
+                BEFORE DELETE ON folder_bindings
+                WHEN (SELECT COALESCE(enabled, 0) FROM f16_folder_bindings_trigger_guard WHERE id = 1) = 1
+                BEGIN
+                  SELECT CASE
+                    WHEN COALESCE(h2o_writer_identity(), '') NOT IN (
+                      'f15.execute-settlement-writer',
+                      'f16.folder-legacy-fallback',
+                      'p02.relationship-apply'
+                    )
+                    THEN RAISE(ABORT, 'f16-folder-bindings-write-protected:delete')
+                  END;
+                END;
+            "#,
+            kind: MigrationKind::Up,
+        },
+    ]
 }
 
 async fn f5g4_setup_proof_schema(conn: &mut SqliteConnection) -> Result<(), String> {
@@ -2939,6 +3126,7 @@ macro_rules! h2o_studio_invoke_handler {
             p02_writer_storage::h2o_p02_storage_promote_temporary,
             p02_publication_authority::h2o_p02_publication_begin,
             p02_publication_authority::h2o_p02_publication_finish,
+            p02_relationship_apply::h2o_p02_relationship_apply,
             local_publication_intake::h2o_local_publication_receive,
             local_publication_intake::h2o_local_publication_read_branches,
             ingest_conflict_candidates,
@@ -3031,6 +3219,7 @@ macro_rules! h2o_studio_invoke_handler {
             p02_writer_storage::h2o_p02_storage_promote_temporary,
             p02_publication_authority::h2o_p02_publication_begin,
             p02_publication_authority::h2o_p02_publication_finish,
+            p02_relationship_apply::h2o_p02_relationship_apply,
             local_publication_intake::h2o_local_publication_receive,
             local_publication_intake::h2o_local_publication_read_branches,
             ingest_conflict_candidates,

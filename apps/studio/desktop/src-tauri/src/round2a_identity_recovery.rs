@@ -28,6 +28,8 @@ const EXPECTED_SQLITE_FINGERPRINT: &str =
 const EXPECTED_PRESERVED_FINGERPRINT: &str =
     "8dbfc23940d2cb4bb4892e05183e8b4daa7db6e9f44500307941c2cb813a5b91";
 const OBJECT_ID: &str = round2a_fixture_authoring::CHAT_ID;
+/* v23: every sync_object_state read in this module resolves the CHAT object. */
+const CHAT_OBJECT_DOMAIN: &str = crate::sync_contract_v2::CHAT_OBJECT_DOMAIN_V1;
 const REVISION_1_ID: &str = round2a_fixture_authoring::REVISION_1_ID;
 
 #[derive(Clone, Debug)]
@@ -274,9 +276,10 @@ async fn state_row_is_exact(
     let row = sqlx::query(
         "SELECT pending_operation, operation_phase, intended_revision_id, \
          last_error_code, last_conflict_class FROM sync_object_state \
-         WHERE sync_peer_id = ? AND object_id = ? LIMIT 2",
+         WHERE sync_peer_id = ? AND object_domain = ? AND object_id = ? LIMIT 2",
     )
     .bind(peer_id)
+    .bind(CHAT_OBJECT_DOMAIN)
     .bind(OBJECT_ID)
     .fetch_all(&mut **tx)
     .await
@@ -331,17 +334,23 @@ async fn exact_recovery_evidence(
     if candidate.fingerprint != expectations.preserved_fingerprint {
         return Ok(false);
     }
-    let object_state_count =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sync_object_state WHERE object_id = ?")
-            .bind(OBJECT_ID)
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(|_| RecoveryFailure::TransactionFailed)?;
+    let object_state_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM sync_object_state WHERE object_domain = ? AND object_id = ?",
+    )
+    .bind(CHAT_OBJECT_DOMAIN)
+    .bind(OBJECT_ID)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|_| RecoveryFailure::TransactionFailed)?;
+    /* "Unrelated" is every OTHER object, in any domain: a pending
+     * chat-folder-binding row for this same objectId is unrelated too. */
     let unrelated_candidate_pending = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM sync_object_state \
-         WHERE sync_peer_id = ? AND pending_operation IS NOT NULL AND object_id <> ?",
+         WHERE sync_peer_id = ? AND pending_operation IS NOT NULL \
+         AND NOT (object_domain = ? AND object_id = ?)",
     )
     .bind(&candidate.sync_peer_id)
+    .bind(CHAT_OBJECT_DOMAIN)
     .bind(OBJECT_ID)
     .fetch_one(&mut **tx)
     .await
@@ -355,8 +364,9 @@ async fn exact_recovery_evidence(
             } else {
                 let row = sqlx::query_scalar::<_, String>(
                     "SELECT sync_peer_id FROM sync_object_state \
-                     WHERE object_id = ? AND sync_peer_id <> ? LIMIT 2",
+                     WHERE object_domain = ? AND object_id = ? AND sync_peer_id <> ? LIMIT 2",
                 )
+                .bind(CHAT_OBJECT_DOMAIN)
                 .bind(OBJECT_ID)
                 .bind(&candidate.sync_peer_id)
                 .fetch_all(&mut **tx)
@@ -2017,10 +2027,10 @@ mod tests {
         for sql in [
             "CREATE TABLE kv_store (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT 0)",
             "CREATE TABLE sync_object_state (
-              sync_peer_id TEXT NOT NULL, object_id TEXT NOT NULL,
+              sync_peer_id TEXT NOT NULL, object_domain TEXT NOT NULL, object_id TEXT NOT NULL,
               pending_operation TEXT, operation_phase TEXT, intended_revision_id TEXT,
               last_error_code TEXT, last_conflict_class TEXT,
-              PRIMARY KEY (sync_peer_id, object_id)
+              PRIMARY KEY (sync_peer_id, object_domain, object_id)
             )",
             "CREATE TABLE chats (
               id TEXT PRIMARY KEY, source_id TEXT UNIQUE, title TEXT NOT NULL DEFAULT '',
@@ -2064,22 +2074,37 @@ mod tests {
             .await
             .expect("identity seed");
         sqlx::query(
-            "INSERT INTO sync_object_state VALUES (?, ?, NULL, NULL, NULL, 'round2a-get-status-invalid', NULL)",
+            "INSERT INTO sync_object_state VALUES (?, ?, ?, NULL, NULL, NULL, 'round2a-get-status-invalid', NULL)",
         )
         .bind(&sqlite.sync_peer_id)
+        .bind(CHAT_OBJECT_DOMAIN)
         .bind(OBJECT_ID)
         .execute(&mut conn)
         .await
         .expect("historical row");
         sqlx::query(
-            "INSERT INTO sync_object_state VALUES (?, ?, 'publish', 'transport', ?, 'round2a-layout-propfind-failed', 'round2a-layout-propfind-failed')",
+            "INSERT INTO sync_object_state VALUES (?, ?, ?, 'publish', 'transport', ?, 'round2a-layout-propfind-failed', 'round2a-layout-propfind-failed')",
         )
         .bind(&candidate.sync_peer_id)
+        .bind(CHAT_OBJECT_DOMAIN)
         .bind(OBJECT_ID)
         .bind(REVISION_1_ID)
         .execute(&mut conn)
         .await
         .expect("preserved row");
+        /* v23 collision regression: an idle chat-folder-binding row for the
+         * SAME objectId under both peers. Every recovery proof below must keep
+         * selecting exactly the chat rows. */
+        for peer in [&sqlite.sync_peer_id, &candidate.sync_peer_id] {
+            sqlx::query(
+                "INSERT INTO sync_object_state VALUES (?, 'studio.chat-folder-binding.v1', ?, NULL, NULL, 'binding-r9', NULL, NULL)",
+            )
+            .bind(peer)
+            .bind(OBJECT_ID)
+            .execute(&mut conn)
+            .await
+            .expect("binding row");
+        }
         sqlx::query(
             "INSERT INTO chats (
               id, title, created_at, updated_at, last_message_at, message_count,
@@ -2250,9 +2275,9 @@ mod tests {
             .expect("orphan reconciliation database");
         for sql in [
             "CREATE TABLE kv_store (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT 0)",
-            "CREATE TABLE sync_object_state (sync_peer_id TEXT NOT NULL, object_id TEXT NOT NULL, \
+            "CREATE TABLE sync_object_state (sync_peer_id TEXT NOT NULL, object_domain TEXT NOT NULL, object_id TEXT NOT NULL, \
              pending_operation TEXT, operation_phase TEXT, intended_revision_id TEXT, \
-             last_error_code TEXT, last_conflict_class TEXT, PRIMARY KEY (sync_peer_id, object_id))",
+             last_error_code TEXT, last_conflict_class TEXT, PRIMARY KEY (sync_peer_id, object_domain, object_id))",
             "CREATE TABLE sync_peer_watermarks (observing_peer_id TEXT, source_peer_id TEXT)",
             "CREATE TABLE sync_conflicts (local_peer_id TEXT, remote_peer_id TEXT, decided_by_sync_peer_id TEXT)",
             "CREATE TABLE sync_maintenance_log (requested_by_sync_peer_id TEXT)",
@@ -2283,9 +2308,10 @@ mod tests {
             for index in 0..*count {
                 if table == "sync_object_state" {
                     sqlx::query(
-                        "INSERT INTO sync_object_state (sync_peer_id, object_id) VALUES (?, ?)",
+                        "INSERT INTO sync_object_state (sync_peer_id, object_domain, object_id) VALUES (?, ?, ?)",
                     )
                     .bind(&peer)
+                    .bind(CHAT_OBJECT_DOMAIN)
                     .bind(format!("object-{index}"))
                     .execute(&mut conn)
                     .await

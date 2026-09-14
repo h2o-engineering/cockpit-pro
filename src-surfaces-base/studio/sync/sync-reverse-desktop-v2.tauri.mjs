@@ -281,14 +281,18 @@ export function createDesktopP02ReverseRuntime({
     sql, clock, peerObjectKeyFor
   });
 
-  async function protocolState(objectId) {
+  /* v23: sync_object_state is keyed by (sync_peer_id, object_domain,
+   * object_id). This composition receives the saved-chat family, so the
+   * protocol row defaults to the chat domain and a chat-folder-binding row
+   * that shares the objectId string is never read as chat anchors. */
+  async function protocolState(objectId, objectDomain = P02_DESKTOP_REVERSE_V2.CHAT_OBJECT_DOMAIN) {
     const rows = await sql.select(
       'SELECT last_published_revision_id, last_published_revision_blob_sha256, '
       + 'last_published_payload_sha256, last_applied_revision_id, '
       + 'last_applied_revision_blob_sha256, last_applied_payload_sha256, '
       + 'last_converged_direction FROM sync_object_state '
-      + 'WHERE sync_peer_id = ? AND object_id = ? LIMIT 1',
-      [await localPeerId(), objectId]);
+      + 'WHERE sync_peer_id = ? AND object_domain = ? AND object_id = ? LIMIT 1',
+      [await localPeerId(), objectDomain, objectId]);
     const row = Array.isArray(rows) ? rows[0] : null;
     if (!row) return {};
     return {
