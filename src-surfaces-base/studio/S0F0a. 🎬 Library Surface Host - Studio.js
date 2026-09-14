@@ -3,10 +3,10 @@
 // @name               S0F0a. 🎬 Library Surface Host - Studio
 // @namespace          H2O.Premium.CGX.library_surface_host.studio
 // @author             HumamDev
-// @version            1.0.0
+// @version            1.1.0
 // @revision           001
-// @build              260511-000001
-// @description        Studio surface declaration for the Library subsystem. Registers Studio implementations of ui-shell, page-host, native-sidebar, route, and chat-list services on Library Core BEFORE any feature owner boots. This is the single seam where Studio differs from native.
+// @build              260915-010001
+// @description        Studio surface declaration for the Library subsystem. Registers Studio implementations of ui-shell, page-host, native-sidebar, route, chat-list, and the STAB-P0 T02B Shell-owned Folder/sidebar contribution seam on Library Core BEFORE feature owners boot. This is the single seam where Studio differs from native.
 // @match              https://chatgpt.com/*
 // @run-at             document-idle
 // @grant              none
@@ -22,6 +22,7 @@
 
   const H2O = (W.H2O = W.H2O || {});
   H2O.Library = H2O.Library || {};
+  H2O.Studio = H2O.Studio || {};
 
   const HOST_KEY = 'LibrarySurfaceHost';
   const host = (H2O.Library[HOST_KEY] = H2O.Library[HOST_KEY] || {});
@@ -241,6 +242,128 @@
 
     surface() { return 'studio'; },
   };
+
+  // ── Service: Folder/sidebar contribution seam (STAB-P0 T02B) ─────────────
+  // Shell owns the structural slot and the one durable destructive host lifecycle.
+  // Library contributes Folder row/action intent through this bounded single slot.
+  // This service never writes #folderList and never becomes Folder business authority.
+  const FOLDER_SIDEBAR_CONTRIBUTION_CONTRACT = 'h2o.studio.folder-sidebar-contribution.v1';
+  const LIBRARY_FOLDER_COMMAND_CONTRACT = 'h2o.library.folder-commands.v1';
+  const SHELL_OWNER = 'L-STUDIO-APPLICATION-SHELL';
+  const LIBRARY_FOLDER_OWNER = 'L-COCKPIT-LIBRARY';
+  const SHELL_DESTRUCTIVE_HOST_SYMBOL = 'studio.js::renderFolderSidebar';
+  let currentFolderContribution = null;
+
+  function getLibraryFolderCommandAuthority() {
+    try {
+      const commands = H2O.Library?.FolderCommands || null;
+      if (!commands || commands.contract !== LIBRARY_FOLDER_COMMAND_CONTRACT) return null;
+      if (commands.owner !== LIBRARY_FOLDER_OWNER) return null;
+      if (typeof commands.execute !== 'function') return null;
+      return commands;
+    } catch {
+      return null;
+    }
+  }
+
+  function normalizeFolderContribution(input = {}) {
+    const source = input && typeof input === 'object' ? input : {};
+    const rows = Array.isArray(source.rows) ? source.rows.slice() : [];
+    const actions = Array.isArray(source.actions)
+      ? source.actions.map((entry) => {
+          const action = entry && typeof entry === 'object' ? entry : {};
+          return Object.freeze({
+            command: String(action.command || '').trim(),
+            input: action.input && typeof action.input === 'object' ? { ...action.input } : {},
+          });
+        }).filter((action) => action.command)
+      : [];
+
+    return Object.freeze({
+      contract: FOLDER_SIDEBAR_CONTRIBUTION_CONTRACT,
+      sourceOwner: LIBRARY_FOLDER_OWNER,
+      rows: Object.freeze(rows),
+      actions: Object.freeze(actions),
+    });
+  }
+
+  const folderSidebarContributionService = Object.freeze({
+    contract: FOLDER_SIDEBAR_CONTRIBUTION_CONTRACT,
+    version: '1.0.0',
+    owner: SHELL_OWNER,
+    contributor: LIBRARY_FOLDER_OWNER,
+    libraryCommandContract: LIBRARY_FOLDER_COMMAND_CONTRACT,
+    slot: Object.freeze({
+      selector: SEL.folderHost,
+      structuralOwner: SHELL_OWNER,
+      destructiveHostLifecycleOwner: SHELL_OWNER,
+      destructiveHostLifecycleSymbol: SHELL_DESTRUCTIVE_HOST_SYMBOL,
+    }),
+    invariants: Object.freeze([
+      'ONE_SHELL_DESTRUCTIVE_FOLDER_HOST_LIFECYCLE',
+      'LIBRARY_ROWS_ARE_CONTRIBUTIONS_NOT_HOST_WRITERS',
+      'LIBRARY_ACTIONS_USE_LIBRARY_FOLDER_COMMAND_AUTHORITY',
+      'NO_FOLDER_BUSINESS_AUTHORITY_IN_SHELL',
+      'T03_SECONDARY_WRITER_RETIREMENT_NOT_EXECUTED',
+      'NO_GENERIC_PLUGIN_FRAMEWORK',
+    ]),
+
+    setContribution(input = {}) {
+      const commands = getLibraryFolderCommandAuthority();
+      if (!commands) {
+        return {
+          ok: false,
+          status: 'library-folder-command-contract-unavailable',
+          requiredContract: LIBRARY_FOLDER_COMMAND_CONTRACT,
+          requiredOwner: LIBRARY_FOLDER_OWNER,
+        };
+      }
+      currentFolderContribution = normalizeFolderContribution(input);
+      step('folder-sidebar-contribution.set', `${currentFolderContribution.rows.length}:${currentFolderContribution.actions.length}`);
+      return {
+        ok: true,
+        status: 'accepted',
+        contract: FOLDER_SIDEBAR_CONTRIBUTION_CONTRACT,
+        contribution: currentFolderContribution,
+      };
+    },
+
+    getContribution() {
+      return currentFolderContribution;
+    },
+
+    getCommandAuthority() {
+      return getLibraryFolderCommandAuthority();
+    },
+
+    getSlot() {
+      return {
+        selector: SEL.folderHost,
+        structuralOwner: SHELL_OWNER,
+        destructiveHostLifecycleOwner: SHELL_OWNER,
+        destructiveHostLifecycleSymbol: SHELL_DESTRUCTIVE_HOST_SYMBOL,
+      };
+    },
+
+    diagnose() {
+      return {
+        contract: FOLDER_SIDEBAR_CONTRIBUTION_CONTRACT,
+        owner: SHELL_OWNER,
+        contributor: LIBRARY_FOLDER_OWNER,
+        libraryCommandContract: LIBRARY_FOLDER_COMMAND_CONTRACT,
+        commandAuthorityReady: !!getLibraryFolderCommandAuthority(),
+        hostPresent: !!nativeSidebarService.getFolderHost(),
+        hasContribution: !!currentFolderContribution,
+        destructiveWritesPerformedByService: false,
+        destructiveHostLifecycleOwner: SHELL_OWNER,
+        destructiveHostLifecycleSymbol: SHELL_DESTRUCTIVE_HOST_SYMBOL,
+      };
+    },
+
+    surface() { return 'studio'; },
+  });
+
+  H2O.Studio.FolderSidebarContribution = folderSidebarContributionService;
 
   // ── Service: route (Studio hash router) ────────────────────────────────────
   // studio.js owns the canonical route parsing; we mirror its parser so Library
@@ -487,12 +610,13 @@
   // itself may not exist yet (S0F1a loads after us); we publish the service set
   // on H2O.Library so S0F1a picks them up at boot.
   const studioSurfaceServices = {
-    'ui-shell':       uiShellService,
-    'page-host':      pageHostService,
-    'native-sidebar': nativeSidebarService,
-    'route':          routeService,
-    'chat-list':      chatListService,
-    'command-bar':    commandBarService,
+    'ui-shell':                   uiShellService,
+    'page-host':                  pageHostService,
+    'native-sidebar':             nativeSidebarService,
+    'folder-sidebar-contribution': folderSidebarContributionService,
+    'route':                      routeService,
+    'chat-list':                  chatListService,
+    'command-bar':                commandBarService,
   };
 
   host.surfaceName = 'studio';
@@ -500,6 +624,7 @@
   host.uiShellService = uiShellService;
   host.pageHostService = pageHostService;
   host.nativeSidebarService = nativeSidebarService;
+  host.folderSidebarContributionService = folderSidebarContributionService;
   host.routeService = routeService;
   host.chatListService = chatListService;
   host.commandBarService = commandBarService;
@@ -543,6 +668,7 @@
       services: Object.keys(studioSurfaceServices),
       sidebarRoot: !!nativeSidebarService.getRoot(),
       folderHost: !!nativeSidebarService.getFolderHost(),
+      folderSidebarContribution: folderSidebarContributionService.diagnose(),
       categoryHost: !!nativeSidebarService.getCategoryHost(),
       chatListHost: !!nativeSidebarService.getChatListHost(),
       pageHostStage: !!pageHostService.getRoot(),
