@@ -537,8 +537,11 @@ const MINT_D = 'p02-dddddddddddddddddddddddddddddddd';
     path.join(root, 'apps/studio/desktop/src-tauri/src/lib.rs'), 'utf8'
   );
   const versions = [...source.matchAll(/version:\s*(\d+),/g)].map((m) => Number(m[1]));
-  equal(Math.max(...versions), 22,
-    'M1 the migration ladder still tops out at v22 - T10 added none');
+  /* The ladder ceiling is v23 since P02 folder relationship synchronization
+   * T01 (domain-qualified sync_object_state rebuild). T10 itself added no
+   * migration: the pin follows the current ceiling, not this task. */
+  equal(Math.max(...versions), 23,
+    'M1 the migration ladder tops out at the current v23 ceiling - T10 added none');
   check(source.includes('sync_branch_evidence_state'),
     'M2 and the evidence table is still the one v21 created');
 }

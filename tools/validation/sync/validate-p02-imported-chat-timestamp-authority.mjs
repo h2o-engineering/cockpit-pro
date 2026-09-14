@@ -89,7 +89,7 @@ function installSchema(db) {
       text TEXT NOT NULL DEFAULT '', meta_json TEXT NOT NULL DEFAULT '{}', PRIMARY KEY(snapshot_id, turn_idx)
     );
     CREATE TABLE sync_object_state (
-      sync_peer_id TEXT NOT NULL, object_id TEXT NOT NULL,
+      sync_peer_id TEXT NOT NULL, object_domain TEXT NOT NULL CHECK (object_domain <> ''), object_id TEXT NOT NULL,
       last_published_revision_id TEXT, last_published_revision_blob_sha256 TEXT,
       last_applied_revision_id TEXT, last_applied_revision_blob_sha256 TEXT,
       remote_head_strong_etag TEXT, remote_head_revision_blob_sha256 TEXT,
@@ -101,7 +101,7 @@ function installSchema(db) {
       last_published_payload_sha256 TEXT, last_applied_payload_sha256 TEXT,
       last_converged_direction TEXT,
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-      PRIMARY KEY(sync_peer_id, object_id)
+      PRIMARY KEY(sync_peer_id, object_domain, object_id)
     );
     CREATE TABLE sync_inbound_revision_observations (
       key TEXT PRIMARY KEY, schema TEXT NOT NULL, peer_object_key TEXT NOT NULL,
@@ -492,8 +492,8 @@ try {
     await p.stores.snapshots.create({ snapshotId: SNAPSHOT_ID, chatId: OBJECT_ID, title: body.meta.title, capturedAt: CREATED_AT_MS, updatedAt: CREATED_AT_MS, messageCount: 2, meta: {},
       turns: body.meta.richTurns.map((rich, i) => ({ turnIdx: rich.turnIdx, role: rich.role, text: body.messages[i].text, outerHtml: rich.outerHTML, meta: rich.meta })) });
     const now = new Date().toISOString();
-    p.db.prepare('INSERT INTO sync_object_state (sync_peer_id, object_id, last_applied_revision_id, last_applied_revision_blob_sha256, last_applied_payload_sha256, last_converged_direction, convergence_watermark_sha256, consumed_revision_blob_sha256, remote_head_strong_etag, remote_head_revision_blob_sha256, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
-      .run(p.syncPeerId, OBJECT_ID, REVISION_ID, a.revisionBlobSha, a.payloadSha, 'applied', a.revisionBlobSha, a.revisionBlobSha, `p02-admission:revision:${a.revisionBlobSha}`, a.revisionBlobSha, now, now);
+    p.db.prepare('INSERT INTO sync_object_state (sync_peer_id, object_domain, object_id, last_applied_revision_id, last_applied_revision_blob_sha256, last_applied_payload_sha256, last_converged_direction, convergence_watermark_sha256, consumed_revision_blob_sha256, remote_head_strong_etag, remote_head_revision_blob_sha256, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(p.syncPeerId, 'studio.chat.saved-state.v1', OBJECT_ID, REVISION_ID, a.revisionBlobSha, a.payloadSha, 'applied', a.revisionBlobSha, a.revisionBlobSha, `p02-admission:revision:${a.revisionBlobSha}`, a.revisionBlobSha, now, now);
     const seed = JSON.stringify(p.db.prepare('SELECT * FROM chats WHERE id = ?').get(OBJECT_ID));
     const counting2 = countingImporter(p);
     wire(p, 'studio-desktop:captured:boot-1', { p02LocalSource: a.source, importBundle: counting2.wrapped });

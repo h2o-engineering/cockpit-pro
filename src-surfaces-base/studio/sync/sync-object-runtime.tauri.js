@@ -16,6 +16,11 @@
   if (H2O.Desktop.SyncObjectRuntime) return;
 
   var DB_URL = 'sqlite:studio-v1.db';
+  /* v23: sync_object_state is keyed by (sync_peer_id, object_domain,
+   * object_id). This runtime is the saved-chat runtime, so every statement
+   * below names the chat domain explicitly; a chat-folder-binding row that
+   * shares the same objectId string is never read or written here. */
+  var OBJECT_DOMAIN = 'studio.chat.saved-state.v1';
   var MAX_REVISION_BYTES = 5 * 1024 * 1024;
   var active = new Set();
   var testDependencies = null;
@@ -133,9 +138,9 @@
     try {
       await sqlExecute(
         'UPDATE sync_object_state SET last_conflict_class = NULL, last_error_code = NULL, updated_at = ? ' +
-        'WHERE sync_peer_id = ? AND object_id = ? AND pending_operation IS NULL ' +
+        'WHERE sync_peer_id = ? AND object_domain = ? AND object_id = ? AND pending_operation IS NULL ' +
         'AND last_conflict_class = ? AND last_error_code = ?',
-        [nowIso(), syncPeerId, objectId, 'local-unexported-change', 'local-unexported-change']
+        [nowIso(), syncPeerId, OBJECT_DOMAIN, objectId, 'local-unexported-change', 'local-unexported-change']
       );
     } catch (_) {
       /* Opportunistic repair: failing to clear must never fail the read that
@@ -186,7 +191,7 @@
   }
 
   async function stateRow(syncPeerId, objectId) {
-    var rows = await sqlSelect('SELECT * FROM sync_object_state WHERE sync_peer_id = ? AND object_id = ?', [syncPeerId, objectId]);
+    var rows = await sqlSelect('SELECT * FROM sync_object_state WHERE sync_peer_id = ? AND object_domain = ? AND object_id = ?', [syncPeerId, OBJECT_DOMAIN, objectId]);
     return Array.isArray(rows) && rows[0] || null;
   }
 
@@ -350,17 +355,17 @@
     var operationToken = token();
     var now = nowIso();
     var result = await sqlExecute(
-      'INSERT INTO sync_object_state (sync_peer_id, object_id, pending_operation, operation_phase, operation_token, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ' +
-      'ON CONFLICT(sync_peer_id, object_id) DO UPDATE SET pending_operation = excluded.pending_operation, operation_phase = excluded.operation_phase, operation_token = excluded.operation_token, last_error_code = NULL, updated_at = excluded.updated_at ' +
+      'INSERT INTO sync_object_state (sync_peer_id, object_domain, object_id, pending_operation, operation_phase, operation_token, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ' +
+      'ON CONFLICT(sync_peer_id, object_domain, object_id) DO UPDATE SET pending_operation = excluded.pending_operation, operation_phase = excluded.operation_phase, operation_token = excluded.operation_token, last_error_code = NULL, updated_at = excluded.updated_at ' +
       'WHERE sync_object_state.pending_operation IS NULL',
-      [syncPeerId, objectId, operation, 'acquire', operationToken, now, now]
+      [syncPeerId, OBJECT_DOMAIN, objectId, operation, 'acquire', operationToken, now, now]
     );
     if (rowsAffected(result) > 0) return { key: key, token: operationToken, bootId: 'round2a-test-boot', contextId: contextId, resumed: false, row: await stateRow(syncPeerId, objectId), legacy: true };
     var pending = await stateRow(syncPeerId, objectId);
     if (!pending || clean(pending.pending_operation) !== operation || clean(pending.operation_phase) !== 'apply') fail('round2a-local-operation-busy');
     var adopted = await sqlExecute(
-      'UPDATE sync_object_state SET operation_token = ?, updated_at = ? WHERE sync_peer_id = ? AND object_id = ? AND operation_token = ? AND pending_operation = ? AND operation_phase = ?',
-      [operationToken, now, syncPeerId, objectId, pending.operation_token, operation, 'apply']
+      'UPDATE sync_object_state SET operation_token = ?, updated_at = ? WHERE sync_peer_id = ? AND object_domain = ? AND object_id = ? AND operation_token = ? AND pending_operation = ? AND operation_phase = ?',
+      [operationToken, now, syncPeerId, OBJECT_DOMAIN, objectId, pending.operation_token, operation, 'apply']
     );
     if (rowsAffected(adopted) !== 1) fail('round2a-local-operation-busy');
     return { key: key, token: operationToken, bootId: 'round2a-test-boot', contextId: contextId, resumed: true, row: await stateRow(syncPeerId, objectId), legacy: true };
@@ -375,18 +380,18 @@
       var ownerToken = token();
       var now = nowIso();
       var result = await sqlExecute(
-        'INSERT INTO sync_object_state (sync_peer_id, object_id, pending_operation, operation_phase, owner_boot_id, owner_context_id, owner_token, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
-        'ON CONFLICT(sync_peer_id, object_id) DO UPDATE SET pending_operation = excluded.pending_operation, operation_phase = excluded.operation_phase, owner_boot_id = excluded.owner_boot_id, owner_context_id = excluded.owner_context_id, owner_token = excluded.owner_token, last_error_code = NULL, updated_at = excluded.updated_at ' +
+        'INSERT INTO sync_object_state (sync_peer_id, object_domain, object_id, pending_operation, operation_phase, owner_boot_id, owner_context_id, owner_token, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+        'ON CONFLICT(sync_peer_id, object_domain, object_id) DO UPDATE SET pending_operation = excluded.pending_operation, operation_phase = excluded.operation_phase, owner_boot_id = excluded.owner_boot_id, owner_context_id = excluded.owner_context_id, owner_token = excluded.owner_token, last_error_code = NULL, updated_at = excluded.updated_at ' +
         'WHERE sync_object_state.pending_operation IS NULL',
-        [syncPeerId, objectId, operation, 'acquire', bootId, contextId, ownerToken, now, now]
+        [syncPeerId, OBJECT_DOMAIN, objectId, operation, 'acquire', bootId, contextId, ownerToken, now, now]
       );
       if (rowsAffected(result) > 0) return { key: key, token: ownerToken, bootId: bootId, contextId: contextId, resumed: false, row: await stateRow(syncPeerId, objectId), legacy: false };
       var pending = await stateRow(syncPeerId, objectId);
       if (!pending || clean(pending.pending_operation) !== operation) fail('round2a-local-operation-busy');
       if (clean(pending.owner_boot_id) === bootId) fail('round2a-local-operation-busy');
       var adopted = await sqlExecute(
-        'UPDATE sync_object_state SET owner_boot_id = ?, owner_context_id = ?, owner_token = ?, updated_at = ? WHERE sync_peer_id = ? AND object_id = ? AND owner_boot_id IS ? AND owner_context_id IS ? AND owner_token IS ? AND pending_operation = ? AND operation_phase IS ?',
-        [bootId, contextId, ownerToken, now, syncPeerId, objectId, pending.owner_boot_id, pending.owner_context_id, pending.owner_token, operation, pending.operation_phase]
+        'UPDATE sync_object_state SET owner_boot_id = ?, owner_context_id = ?, owner_token = ?, updated_at = ? WHERE sync_peer_id = ? AND object_domain = ? AND object_id = ? AND owner_boot_id IS ? AND owner_context_id IS ? AND owner_token IS ? AND pending_operation = ? AND operation_phase IS ?',
+        [bootId, contextId, ownerToken, now, syncPeerId, OBJECT_DOMAIN, objectId, pending.owner_boot_id, pending.owner_context_id, pending.owner_token, operation, pending.operation_phase]
       );
       if (rowsAffected(adopted) !== 1) fail('round2a-local-operation-busy');
       return { key: key, token: ownerToken, bootId: bootId, contextId: contextId, resumed: true, row: pending, legacy: false };
@@ -437,8 +442,8 @@
       ? [acquisition.token]
       : [acquisition.bootId, acquisition.contextId, acquisition.token];
     var result = await sqlExecute(
-      'UPDATE sync_object_state SET ' + assignments + ', updated_at = ? WHERE sync_peer_id = ? AND object_id = ? AND ' + predicate,
-      values.concat([nowIso(), syncPeerId, objectId]).concat(ownership)
+      'UPDATE sync_object_state SET ' + assignments + ', updated_at = ? WHERE sync_peer_id = ? AND object_domain = ? AND object_id = ? AND ' + predicate,
+      values.concat([nowIso(), syncPeerId, OBJECT_DOMAIN, objectId]).concat(ownership)
     );
     if (rowsAffected(result) !== 1) fail('round2a-local-operation-lost');
   }
@@ -1211,11 +1216,11 @@
       var payload = requiredPayloadIdentity(input.payloadSha256);
       var result = await sqlExecute(
         'UPDATE sync_object_state SET last_published_payload_sha256 = ?, last_converged_direction = ?, updated_at = ? ' +
-        'WHERE sync_peer_id = ? AND object_id = ? AND pending_operation IS NULL ' +
+        'WHERE sync_peer_id = ? AND object_domain = ? AND object_id = ? AND pending_operation IS NULL ' +
         'AND last_published_revision_id = ? AND last_published_revision_blob_sha256 = ? ' +
         'AND last_published_payload_sha256 IS NULL',
         [payload, P02_DIRECTION.PUBLISHED, nowIso(),
-          input.syncPeerId, input.objectId, input.revisionId, input.revisionBlobSha256]
+          input.syncPeerId, OBJECT_DOMAIN, input.objectId, input.revisionId, input.revisionBlobSha256]
       );
       return { healed: rowsAffected(result) === 1 };
     },
@@ -1275,6 +1280,7 @@
 
   H2O.Desktop.SyncObjectRuntime = Object.freeze({
     schema: 'h2o.studio.syncObjectRuntime.v1',
+    objectDomain: OBJECT_DOMAIN,
     publishObject: publishObject,
     publicationEvidence: publicationEvidence,
     pullObject: pullObject,

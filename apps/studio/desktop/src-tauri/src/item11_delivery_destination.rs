@@ -2310,9 +2310,12 @@ async fn resolve_external_apply_tip(
             _ => return Err(LOCAL_DELIVERY_PREPARATION_FAILED.to_string()),
         }
     };
+    /* v23: chat-domain rows only; a chat-folder-binding row shares this
+     * objectId string and is never a chat lineage anchor. */
     let state_rows = sqlx::query(
-        "SELECT DISTINCT last_applied_revision_id, last_applied_revision_blob_sha256 FROM sync_object_state WHERE object_id = ? AND last_applied_revision_id IS NOT NULL",
+        "SELECT DISTINCT last_applied_revision_id, last_applied_revision_blob_sha256 FROM sync_object_state WHERE object_domain = ? AND object_id = ? AND last_applied_revision_id IS NOT NULL",
     )
+    .bind(crate::sync_contract_v2::CHAT_OBJECT_DOMAIN_V1)
     .bind(object_id)
     .fetch_all(&pool)
     .await

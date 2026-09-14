@@ -77,7 +77,7 @@ function installSchema(db) {
       text TEXT NOT NULL DEFAULT '', meta_json TEXT NOT NULL DEFAULT '{}', PRIMARY KEY(snapshot_id, turn_idx)
     );
     CREATE TABLE sync_object_state (
-      sync_peer_id TEXT NOT NULL, object_id TEXT NOT NULL,
+      sync_peer_id TEXT NOT NULL, object_domain TEXT NOT NULL CHECK (object_domain <> ''), object_id TEXT NOT NULL,
       last_published_revision_id TEXT, last_published_revision_blob_sha256 TEXT,
       last_applied_revision_id TEXT, last_applied_revision_blob_sha256 TEXT,
       remote_head_strong_etag TEXT, remote_head_revision_blob_sha256 TEXT,
@@ -89,7 +89,7 @@ function installSchema(db) {
       last_published_payload_sha256 TEXT, last_applied_payload_sha256 TEXT,
       last_converged_direction TEXT,
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-      PRIMARY KEY(sync_peer_id, object_id)
+      PRIMARY KEY(sync_peer_id, object_domain, object_id)
     );
     CREATE TABLE sync_inbound_revision_observations (
       key TEXT PRIMARY KEY, schema TEXT NOT NULL, peer_object_key TEXT NOT NULL,
@@ -438,9 +438,9 @@ try {
      * and payload, direction applied */
     const now = new Date().toISOString();
     profile.db.prepare(
-      'UPDATE sync_object_state SET last_applied_revision_id = ?, last_applied_revision_blob_sha256 = ?, last_applied_payload_sha256 = ?, last_converged_direction = ?, convergence_watermark_sha256 = ?, consumed_revision_blob_sha256 = ?, remote_head_strong_etag = ?, remote_head_revision_blob_sha256 = ?, last_conflict_class = NULL, last_error_code = NULL, updated_at = ? WHERE sync_peer_id = ? AND object_id = ?'
+      'UPDATE sync_object_state SET last_applied_revision_id = ?, last_applied_revision_blob_sha256 = ?, last_applied_payload_sha256 = ?, last_converged_direction = ?, convergence_watermark_sha256 = ?, consumed_revision_blob_sha256 = ?, remote_head_strong_etag = ?, remote_head_revision_blob_sha256 = ?, last_conflict_class = NULL, last_error_code = NULL, updated_at = ? WHERE sync_peer_id = ? AND object_domain = ? AND object_id = ?'
     ).run(REVISION_ID, admitted.revisionBlobSha, admitted.payloadSha, 'applied', admitted.revisionBlobSha, admitted.revisionBlobSha,
-      `p02-admission:revision:${admitted.revisionBlobSha}`, admitted.revisionBlobSha, now, profile.syncPeerId, OBJECT_ID);
+      `p02-admission:revision:${admitted.revisionBlobSha}`, admitted.revisionBlobSha, now, profile.syncPeerId, 'studio.chat.saved-state.v1', OBJECT_ID);
     const anchorsBefore = JSON.stringify(anchors(profile));
     const canonicalBefore = canonicalRows(profile);
     wire(profile, 'studio-desktop:captured:boot-2', { p02LocalSource: admitted.source, importBundle: counting.wrapped });

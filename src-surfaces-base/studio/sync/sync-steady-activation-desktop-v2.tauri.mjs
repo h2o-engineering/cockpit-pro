@@ -83,7 +83,7 @@ export const P02_DESKTOP_STEADY = Object.freeze({
     last_applied_revision_blob_sha256, last_applied_payload_sha256,
     last_converged_direction, intended_revision_id,
     intended_revision_blob_sha256, intended_payload_sha256
-  FROM sync_object_state WHERE sync_peer_id = ? AND object_id = ? LIMIT 1`,
+  FROM sync_object_state WHERE sync_peer_id = ? AND object_domain = ? AND object_id = ? LIMIT 1`,
   /* A publication chain is walked backwards to answer descent. The bound is a
    * refusal, not a truncation: an unfinished walk reports incomplete evidence,
    * which the parent selector treats as "blocked", never as "no descent". */
@@ -231,8 +231,11 @@ export function createDesktopSteadyActivation({
     });
   }
 
-  async function protocolRow(syncPeerId, objectId) {
-    const rows = await select(P02_DESKTOP_STEADY.PROTOCOL_ROW, [syncPeerId, objectId]);
+  /* v23: the protocol row is resolved per (peer, domain, object). The steady
+   * composition is the saved-chat composition, so the domain defaults to the
+   * chat family; a caller that already knows its domain passes it. */
+  async function protocolRow(syncPeerId, objectId, objectDomain = CHAT_OBJECT_DOMAIN) {
+    const rows = await select(P02_DESKTOP_STEADY.PROTOCOL_ROW, [syncPeerId, objectDomain, objectId]);
     return (Array.isArray(rows) ? rows[0] : null) || {};
   }
 
@@ -327,7 +330,8 @@ export function createDesktopSteadyActivation({
 
       /* The protocol state in the DOMAIN's shape, not the table's. */
       readProtocolState: async (scope) => {
-        const row = await protocolRow(scope.writerSyncPeerId, scope.objectId);
+        const row = await protocolRow(scope.writerSyncPeerId, scope.objectId,
+          clean(scope.objectDomain) || CHAT_OBJECT_DOMAIN);
         const intended = {
           revisionId: clean(row.intended_revision_id),
           revisionBlobSha256: clean(row.intended_revision_blob_sha256)
