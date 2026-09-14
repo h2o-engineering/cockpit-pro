@@ -3,10 +3,10 @@
 // @name               S0F3a. 🎬 Folders - Studio
 // @namespace          H2O.Premium.CGX.folders.studio
 // @author             HumamDev
-// @version            1.0.0
+// @version            1.1.0
 // @revision           001
-// @build              260511-000009
-// @description        Studio Folders facade. Exposes H2O.folders.* with the surface-agnostic subset used by Library Workspace, Insights, and studio.js. Backed by the chat-list service (archive bridge) — no native sidebar inject, no history wrapping. Studio routes (#/library/folder/<id>) replace native query-flag routes.
+// @build              260915-000001
+// @description        Studio Folders facade plus the STAB-P0 T02A Library-owned logical Folder command contract. Read/catalog behavior remains surface-neutral; business intent enters H2O.Library.FolderCommands while Sync/Host mechanics stay behind existing adapters.
 // @match              https://chatgpt.com/*
 // @run-at             document-idle
 // @grant              none
@@ -19,6 +19,12 @@
 
   const W = window;
   const H2O = (W.H2O = W.H2O || {});
+  H2O.Library = H2O.Library || {};
+
+  const FOLDER_COMMAND_CONTRACT_ID = 'h2o.library.folder-commands.v1';
+  const FOLDER_COMMAND_VERSION = '1.0.0';
+  const FOLDER_COMMAND_OWNER = 'L-COCKPIT-LIBRARY';
+  const FOLDER_COMMAND_AUTHORITY = 'SINGLE_LOGICAL_FOLDER_BUSINESS_COMMAND_AUTHORITY';
 
   const diag = { t0: performance.now(), steps: [], errors: [], bufMax: 50, errMax: 15 };
   const step = (s, o = '') => {
@@ -44,6 +50,7 @@
   let cachedAt = 0;
   let lastFolderDiagnostics = [];
   let lastWrite = null;
+  let lastCommand = null;
   const TTL_MS = 30_000;
 
   function mergeNormalizedFolder(raw, normalized) {
@@ -127,6 +134,16 @@
     step('setBinding', `${lastWrite.status || ''}:${lastWrite.chatId || ''}:${lastWrite.folderId || ''}`);
   }
 
+  function recordCommand(command, result) {
+    lastCommand = {
+      command: String(command || ''),
+      status: String(result?.status || result?.reason || ''),
+      ok: result?.ok === true,
+      at: Date.now(),
+    };
+    step('folder-command', `${lastCommand.command}:${lastCommand.status}`);
+  }
+
   function emitFoldersChanged(detail) {
     try {
       W.dispatchEvent(new CustomEvent('evt:h2o:folders:changed', {
@@ -184,7 +201,10 @@
     return idx.query({ folderId: normalizeFolderId(folderId) });
   }
 
-  async function setBinding(chatId, folderId, opts = {}) {
+  // Existing surface binding adapter. It owns no Folder business semantics;
+  // the T02A command contract invokes it when binding intent needs the current
+  // MV3/Tauri workspace bridge and its compatibility behavior.
+  async function setBindingViaWorkspace(chatId, folderId, opts = {}) {
     const normalizedChat = normalizeBindingChatId(chatId);
     const normalizedFolder = validateFolderIdForWrite(folderId);
 
@@ -276,6 +296,262 @@
     }
   }
 
+  function folderActionAdapter() {
+    try {
+      const actions = H2O.Studio?.actions?.folders || null;
+      return actions && typeof actions === 'object' ? actions : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function commandResult(command, status, extra = {}) {
+    return {
+      ok: extra.ok === true,
+      contract: FOLDER_COMMAND_CONTRACT_ID,
+      contractVersion: FOLDER_COMMAND_VERSION,
+      owner: FOLDER_COMMAND_OWNER,
+      authority: FOLDER_COMMAND_AUTHORITY,
+      command: String(command || ''),
+      status: String(status || ''),
+      ...extra,
+    };
+  }
+
+  function normalizeAdapterResult(command, result) {
+    const src = result && typeof result === 'object' ? result : {};
+    const out = commandResult(command, String(src.status || (src.ok ? 'ok' : 'adapter-result')), {
+      ...src,
+      ok: src.ok === true,
+      adapterResult: src,
+    });
+    recordCommand(command, out);
+    return out;
+  }
+
+  async function invokeFolderAction(command, methods, args = []) {
+    const adapter = folderActionAdapter();
+    const candidates = Array.isArray(methods) ? methods : [methods];
+    const method = candidates.find((name) => typeof adapter?.[name] === 'function') || '';
+    if (!method) {
+      const out = commandResult(command, 'surface-adapter-unavailable', {
+        ok: false,
+        reason: `No current Folder surface adapter implements ${command}`,
+        adapterRole: 'SURFACE_ADAPTER_NOT_BUSINESS_AUTHORITY',
+      });
+      recordCommand(command, out);
+      return out;
+    }
+    try {
+      return normalizeAdapterResult(command, await adapter[method](...args));
+    } catch (e) {
+      err(`folder-command:${command}`, e);
+      const out = commandResult(command, 'surface-adapter-threw', {
+        ok: false,
+        reason: String(e?.message || e || 'surface adapter failed'),
+        adapterMethod: method,
+      });
+      recordCommand(command, out);
+      return out;
+    }
+  }
+
+  function boundaryOwnedMaintenance(command, owner, reason) {
+    const out = commandResult(command, 'boundary-owned', {
+      ok: false,
+      boundaryOwner: owner,
+      reason,
+      noBusinessAuthorityTransfer: true,
+    });
+    recordCommand(command, out);
+    return out;
+  }
+
+  async function executeFolderMaintenance(input = {}) {
+    const intent = String(input.intent || input.operation || '').trim().toLowerCase();
+    if (intent === 'delete-empty-folder') {
+      return executeFolderCommand('delete', { folderId: input.folderId || input.id });
+    }
+    if (intent === 'restore-folder') {
+      return executeFolderCommand('restore', input);
+    }
+    if (intent === 'unbind-orphan-chat' || intent === 'remove-orphan-binding') {
+      return executeFolderCommand('unbind', { chatId: input.chatId, options: input.options });
+    }
+    if (['mirror-refresh', 'mirror-reconcile', 'cross-surface-reconcile', 'cross-surface-converge'].includes(intent)) {
+      return boundaryOwnedMaintenance(
+        `maintenance:${intent}`,
+        'L-PLATFORM-SYNC',
+        'Propagation, mirror reconciliation, conflict handling, and convergence remain Platform Sync owned.'
+      );
+    }
+    if (['mv3-adapter', 'tauri-adapter', 'native-owner-bridge', 'environment-adapter'].includes(intent)) {
+      return boundaryOwnedMaintenance(
+        `maintenance:${intent}`,
+        'L-STUDIO-HOST-INTEGRATION',
+        'MV3/Tauri/native-owner/environment adaptation remains Host Integration owned.'
+      );
+    }
+    if (intent === 'saved-chat-durability') {
+      return boundaryOwnedMaintenance(
+        `maintenance:${intent}`,
+        'L-STORAGE-SAVED-CHATS',
+        'Saved Chats Storage is not activated for STAB-P0 under current evidence.'
+      );
+    }
+    if (intent === 'runtime-admission') {
+      return boundaryOwnedMaintenance(
+        `maintenance:${intent}`,
+        'L-RUNTIME-KERNEL-SCOPE-STU',
+        'Studio Runtime is not activated for STAB-P0 under current evidence.'
+      );
+    }
+    const out = commandResult(`maintenance:${intent || 'unknown'}`, 'unsupported-maintenance-intent', {
+      ok: false,
+      reason: 'Maintenance intent is not a Library-owned Folder business command in the T02A contract.',
+    });
+    recordCommand(out.command, out);
+    return out;
+  }
+
+  async function executeFolderCommand(command, input = {}) {
+    const normalized = String(command || '').trim().toLowerCase();
+    const payload = input && typeof input === 'object' ? input : {};
+
+    if (normalized === 'create') {
+      return invokeFolderAction('create', 'create', [payload]);
+    }
+    if (normalized === 'rename') {
+      return invokeFolderAction('rename', 'rename', [
+        normalizeFolderId(payload.folderId || payload.id),
+        String(payload.name || payload.newName || '').trim(),
+      ]);
+    }
+    if (normalized === 'update') {
+      const patch = payload.patch && typeof payload.patch === 'object' ? payload.patch : payload;
+      return invokeFolderAction('update', 'update', [normalizeFolderId(payload.folderId || payload.id), patch]);
+    }
+    if (normalized === 'color' || normalized === 'set-color') {
+      const color = String(payload.color || payload.iconColor || '').trim();
+      return invokeFolderAction('color', 'update', [
+        normalizeFolderId(payload.folderId || payload.id),
+        { color, iconColor: color },
+      ]);
+    }
+    if (normalized === 'delete' || normalized === 'remove') {
+      const folderId = normalizeFolderId(payload.folderId || payload.id);
+      const adapter = folderActionAdapter();
+      if (typeof adapter?.remove === 'function' || typeof adapter?.delete === 'function') {
+        return invokeFolderAction('delete', ['remove', 'delete'], [folderId]);
+      }
+      // Chrome's current safe delete effect is request-only. Treat it as a
+      // surface adapter for the same business intent without granting Chrome
+      // permanent-delete authority.
+      if (typeof adapter?.requestDelete === 'function') {
+        return invokeFolderAction('delete', 'requestDelete', [{ ...payload, folderId }]);
+      }
+      return invokeFolderAction('delete', ['remove', 'delete'], [folderId]);
+    }
+    if (normalized === 'restore') {
+      const target = payload.tombstoneId || payload.folderId || payload.id || payload.target || '';
+      return invokeFolderAction('restore', ['restore', 'restoreTombstonedFolder'], [target]);
+    }
+    if (normalized === 'bind') {
+      const chat = normalizeBindingChatId(payload.chatId || payload.chatIdOrHref || '');
+      const folder = validateFolderIdForWrite(payload.folderId || payload.id || '');
+      if (!chat.ok) return validationResult(chat.status, chat.chatId, folder.folderId);
+      if (!folder.ok || !folder.folderId) return validationResult(folder.ok ? 'folder-id-required' : folder.status, chat.chatId, folder.folderId);
+      const out = await setBindingViaWorkspace(chat.chatId, folder.folderId, payload.options || {});
+      const result = normalizeAdapterResult('bind', out);
+      result.chatId = chat.chatId;
+      result.folderId = String(out?.folderId || folder.folderId || '');
+      return result;
+    }
+    if (normalized === 'unbind') {
+      const chat = normalizeBindingChatId(payload.chatId || payload.chatIdOrHref || '');
+      if (!chat.ok) return validationResult(chat.status, chat.chatId, '');
+      const out = await setBindingViaWorkspace(chat.chatId, '', payload.options || {});
+      const result = normalizeAdapterResult('unbind', out);
+      result.chatId = chat.chatId;
+      result.folderId = '';
+      return result;
+    }
+    if (normalized === 'maintenance' || normalized === 'cleanup') {
+      return executeFolderMaintenance(payload);
+    }
+
+    const out = commandResult(normalized || 'unknown', 'unsupported-folder-command', {
+      ok: false,
+      reason: 'Unknown Folder business command.',
+    });
+    recordCommand(out.command, out);
+    return out;
+  }
+
+  const FolderCommands = Object.freeze({
+    contract: FOLDER_COMMAND_CONTRACT_ID,
+    version: FOLDER_COMMAND_VERSION,
+    owner: FOLDER_COMMAND_OWNER,
+    authority: FOLDER_COMMAND_AUTHORITY,
+    invariants: Object.freeze([
+      'ONE_LOGICAL_FOLDER_BUSINESS_COMMAND_AUTHORITY',
+      'SINGLE_FOLDER_PER_CHAT_BINDING',
+      'SHELL_STRUCTURAL_HOST_NOT_OWNED',
+      'SYNC_CONVERGENCE_NOT_OWNED',
+      'HOST_ENVIRONMENT_ADAPTER_NOT_OWNED',
+      'SAVED_CHATS_STORAGE_NOT_ACTIVATED',
+      'STUDIO_RUNTIME_NOT_ACTIVATED',
+    ]),
+    execute: executeFolderCommand,
+    create: (input = {}) => executeFolderCommand('create', input),
+    rename: (input = {}) => executeFolderCommand('rename', input),
+    update: (input = {}) => executeFolderCommand('update', input),
+    setColor: (input = {}) => executeFolderCommand('color', input),
+    delete: (input = {}) => executeFolderCommand('delete', input),
+    remove: (input = {}) => executeFolderCommand('delete', input),
+    restore: (input = {}) => executeFolderCommand('restore', input),
+    bind: (input = {}) => executeFolderCommand('bind', input),
+    unbind: (input = {}) => executeFolderCommand('unbind', input),
+    cleanup: (input = {}) => executeFolderCommand('cleanup', input),
+    maintenance: (input = {}) => executeFolderCommand('maintenance', input),
+    diagnose() {
+      const adapter = folderActionAdapter();
+      return {
+        contract: FOLDER_COMMAND_CONTRACT_ID,
+        version: FOLDER_COMMAND_VERSION,
+        owner: FOLDER_COMMAND_OWNER,
+        authority: FOLDER_COMMAND_AUTHORITY,
+        surface: 'studio',
+        adapterRole: 'SURFACE_ADAPTER_NOT_BUSINESS_AUTHORITY',
+        adapterAvailable: !!adapter,
+        adapterMethods: adapter ? Object.keys(adapter).filter((key) => typeof adapter[key] === 'function').sort() : [],
+        workspaceBindingAdapterAvailable: typeof getWorkspace()?.setFolderBinding === 'function',
+        lastCommand,
+        boundaries: {
+          shell: 'L-STUDIO-APPLICATION-SHELL',
+          sync: 'L-PLATFORM-SYNC',
+          hostIntegration: 'L-STUDIO-HOST-INTEGRATION',
+          savedChatsStorage: 'NOT_ACTIVATED',
+          studioRuntime: 'NOT_ACTIVATED',
+        },
+      };
+    },
+  });
+
+  // Canonical T02A business-intent entry authority. Existing lower-level
+  // H2O.Studio.actions.folders remains a surface/persistence adapter only and
+  // is intentionally not absorbed or re-owned by this contract.
+  H2O.Library.FolderCommands = FolderCommands;
+
+  // Compatibility facade: existing H2O.folders.setBinding callers now enter
+  // the logical command authority before reaching the Workspace/host adapter.
+  async function setBinding(chatId, folderId, opts = {}) {
+    const folder = normalizeFolderId(folderId);
+    return folder
+      ? FolderCommands.bind({ chatId, folderId: folder, options: opts })
+      : FolderCommands.unbind({ chatId, options: opts });
+  }
+
   function buildRouteHash(folderId) {
     return getCore()?.getService?.('route')?.buildLibraryHash?.('folder', folderId) || '';
   }
@@ -344,6 +620,7 @@
         hasIndex: !!getIndex(),
         hasFolderCore: !!folderCore(),
         folderCorePhase: folderCore()?.__phase || '',
+        folderCommandContract: FolderCommands.diagnose(),
         projection: {
           catalogSource: 'LibraryWorkspace.getFolders(chat-list bridge)',
           cachedCount: cachedFolders ? cachedFolders.length : 0,
@@ -363,7 +640,6 @@
   // Expose to match the native H2O.folders namespace shape.
   H2O.folders = H2O.folders || Folders;
   // Always expose the Studio facade under H2O.Library.Folders so studio.js + Library modules can find it cleanly.
-  H2O.Library = H2O.Library || {};
   H2O.Library.Folders = Folders;
 
   function registerOnCore() {
@@ -372,6 +648,8 @@
     try {
       core.registerOwner('folders', Folders, { replace: true });
       core.registerService('folders', Folders, { replace: true });
+      core.registerOwner('folder-commands', FolderCommands, { replace: true });
+      core.registerService('folder-commands', FolderCommands, { replace: true });
       // Register Studio folder route handler
       core.registerRoute('folder', async (route) => {
         const id = String(route?.id || '').trim();
@@ -379,7 +657,7 @@
         return true;
       }, { replace: true });
       core.registerRoute('folders', async () => { step('route:folders'); return true; }, { replace: true });
-      step('register-on-core', 'folders');
+      step('register-on-core', 'folders+folder-commands');
       return true;
     } catch (e) { err('register-on-core', e); return false; }
   }
