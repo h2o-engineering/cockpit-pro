@@ -1,3 +1,3 @@
 export { ChatMarkdownRenderer } from './ChatMarkdownRenderer';
-export { parseMarkdown } from './parse';
-export type { BlockToken, InlineToken } from './parse';
+export { parseMarkdownToRenderBlocks } from './semantic-markdown';
+export type { RenderBlock, RenderMark, SemanticMarkdown } from './semantic-markdown';

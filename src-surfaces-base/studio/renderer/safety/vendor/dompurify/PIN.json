@@ -1,0 +1,10 @@
+{
+  "name": "dompurify",
+  "version": "3.4.15",
+  "artifact": "dist/purify.js",
+  "sha256": "979b6c28df92881a36009de0bda1e866bee043ad69d36e54509e7210723d9af4",
+  "npmIntegrity": "sha512-EUBjM+B+lkDE41iE82DDSCfkoPGfXx8IxFxPMjNzm/Uk4xDet77rTN9wqlxlVg71kK7XGuUMv6wUxJUwwv+Xyw==",
+  "source": "https://registry.npmjs.org/dompurify/-/dompurify-3.4.15.tgz",
+  "license": "Apache-2.0 (elected from: MPL-2.0 OR Apache-2.0)",
+  "reviewedAt": "2026-09-10"
+}

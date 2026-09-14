@@ -1477,6 +1477,55 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   // flag-gated + opt-in, default off). Keep parallel to
   // ARCHIVE_WORKBENCH_OUT_FILES below.
   "reader-notes/annotation-report.studio.js",
+
+  // Renderer sanitizer v2 (M03 P1 S1A) — DELIVERY-ONLY admission. These four
+  // files ship inside the produced artifact but are deliberately UNUSED: no
+  // studio.html <script> tag references them and no runtime consumer exists.
+  // Current rich replay stays on v1 (platform/html-sanitizer.js). The vendored
+  // engine is byte-verbatim DOMPurify 3.4.15; its LICENSE ships beside it as an
+  // Apache-2.0 condition. PIN.json is source/build provenance and is NOT
+  // delivered. Keep parallel to ARCHIVE_WORKBENCH_OUT_FILES below.
+  "renderer/safety/sanitizer-policy.v1.js",
+  "renderer/safety/vendor/dompurify/purify.js",
+  "renderer/safety/html-sanitizer.v2.js",
+  "renderer/safety/vendor/dompurify/LICENSE",
+
+  // Renderer Markdown semantic engine (M03 P2 S2A T4 S1) — DELIVERY-ONLY
+  // admission. These five files ship inside the produced artifact but are
+  // deliberately UNUSED: no studio.html <script> tag references them and no
+  // runtime consumer exists. Both bespoke Markdown parsers stay live during the
+  // bounded dual-path window. The vendored engine is byte-verbatim markdown-it
+  // 15.0.1; THIRD_PARTY_NOTICES ships beside it because the artifact physically
+  // incorporates six projects across MIT and BSD-2-Clause. PIN.json is
+  // source/build provenance and is NOT delivered. Keep parallel to
+  // ARCHIVE_WORKBENCH_OUT_FILES below.
+  "renderer/markdown/vendor/markdown-it/markdown-it.umd.min.js",
+  "renderer/markdown/vendor/markdown-it/THIRD_PARTY_NOTICES",
+  "renderer/markdown/h2o-gfm.v1.js",
+  "renderer/markdown/markdown-engine.v1.js",
+  "renderer/markdown/markdown-ir-adapter.v1.js",
+
+  // Renderer typed semantic rendering (M03 P2 S2B T5) — LIVE. The Render IR
+  // contract is now consumed at runtime as the validation authority, and the
+  // ContentRenderer registry turns accepted blocks into H2O-owned DOM. Keep
+  // parallel to ARCHIVE_WORKBENCH_OUT_FILES below.
+  "renderer/semantic/render-ir.v1.js",
+  // S2C/T11: semantic ingress is now consumed at runtime (Saved-Chat v3 typed
+  // content[] -> Render IR). Loads after the IR contract, before the renderers.
+  "renderer/semantic/semantic-ingress.v1.js",
+  // S4A/T8: read-only Semantic Index over the H2O shells — LIVE. Passive
+  // Renderer dependency; loads after semantic ingress, before the renderers.
+  "renderer/semantic/semantic-index.v1.js",
+  // S4B/T8: DecorationContribution lifecycle over Semantic Index targets — LIVE.
+  // Passive Renderer dependency; loads after the Semantic Index, before the renderers.
+  "renderer/decoration/decoration-contribution.v1.js",
+  // S3B/T6: PresentationProfile contract + ChatGPT reference profile — LIVE.
+  // Presentation class hooks only; loads before the renderers that consume it.
+  "renderer/presentation/presentation-profile.v1.js",
+  // S3C/T7: Renderer-owned chatgpt-reference stylesheet, linked by studio.html
+  // after studio.css. Keep parallel to ARCHIVE_WORKBENCH_OUT_FILES below.
+  "renderer/presentation/chatgpt-reference.v1.css",
+  "renderer/content/content-renderer.v1.js",
 ]);
 export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   "studio.html",
@@ -1894,6 +1943,28 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
 
   // Reader & Notes — NV1 annotation report consumer — see SOURCE_FILES.
   "reader-notes/annotation-report.studio.js",
+
+  // Renderer sanitizer v2 (M03 P1 S1A) — delivered but UNUSED — see SOURCE_FILES.
+  "renderer/safety/sanitizer-policy.v1.js",
+  "renderer/safety/vendor/dompurify/purify.js",
+  "renderer/safety/html-sanitizer.v2.js",
+  "renderer/safety/vendor/dompurify/LICENSE",
+
+  // Renderer Markdown semantic engine (M03 P2 S2A T4 S1) — delivered but UNUSED — see SOURCE_FILES.
+  "renderer/markdown/vendor/markdown-it/markdown-it.umd.min.js",
+  "renderer/markdown/vendor/markdown-it/THIRD_PARTY_NOTICES",
+  "renderer/markdown/h2o-gfm.v1.js",
+  "renderer/markdown/markdown-engine.v1.js",
+  "renderer/markdown/markdown-ir-adapter.v1.js",
+
+  // Renderer typed semantic rendering (M03 P2 S2B T5) — see SOURCE_FILES.
+  "renderer/semantic/render-ir.v1.js",
+  "renderer/semantic/semantic-ingress.v1.js",
+  "renderer/semantic/semantic-index.v1.js",
+  "renderer/decoration/decoration-contribution.v1.js",
+  "renderer/presentation/presentation-profile.v1.js",
+  "renderer/presentation/chatgpt-reference.v1.css",
+  "renderer/content/content-renderer.v1.js",
 ]);
 
 function ensureDir(dirPath) {

@@ -698,6 +698,9 @@ async function runRuntimeScenarios() {
     assert.equal(receipt.validatorResult.extension.extensionId, receipt.expectedExtensionId);
     assert.deepEqual(receipt.validatorResult.extension.requiredLoadOrder,
       ["platform/selectors.contract.js", "platform/html-sanitizer.js",
+        "renderer/safety/sanitizer-policy.v1.js",
+        "renderer/safety/vendor/dompurify/purify.js",
+        "renderer/safety/html-sanitizer.v2.js",
         "renderer/chat-renderer.studio.js", "studio.js"]);
     assert.equal(fs.existsSync(path.join(receipt.outputPaths.extension,
       "surfaces", "studio", "renderer", "chat-renderer.studio.js")), true);

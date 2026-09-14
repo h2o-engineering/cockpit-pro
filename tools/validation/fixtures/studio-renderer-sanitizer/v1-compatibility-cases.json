@@ -1,0 +1,328 @@
+{
+  "schema": "h2o.studio.html-sanitizer-v1-compatibility",
+  "schemaVersion": 1,
+  "capturedFromVersion": "0.1.0-phase-c-c3.1",
+  "note": "Expected values were captured verbatim from the current v1 implementation (H2O.Studio.html.sanitize) and must not be hand-edited. They pin projector-observable output bytes for sanitizeHtml/escapeHtml/extractTextFromHtml only.",
+  "cases": [
+    {
+      "id": "plain-text",
+      "requirement": "plain text",
+      "input": "Hello world, no markup here.",
+      "expect": {
+        "sanitizeHtml": "Hello world, no markup here.",
+        "escapeHtml": "Hello world, no markup here.",
+        "extractTextFromHtml": "Hello world, no markup here."
+      }
+    },
+    {
+      "id": "plain-text-with-specials",
+      "requirement": "plain text carrying HTML-significant characters",
+      "input": "a < b && c > d \"quoted\" 'single'",
+      "expect": {
+        "sanitizeHtml": "a < b && c > d \"quoted\" 'single'",
+        "escapeHtml": "a &lt; b &amp;&amp; c &gt; d &quot;quoted&quot; &#39;single&#39;",
+        "extractTextFromHtml": "a d \"quoted\" 'single'"
+      }
+    },
+    {
+      "id": "safe-basic-markup",
+      "requirement": "safe basic markup",
+      "input": "<p>Hello <strong>world</strong></p>",
+      "expect": {
+        "sanitizeHtml": "<p>Hello <strong>world</strong></p>",
+        "escapeHtml": "&lt;p&gt;Hello &lt;strong&gt;world&lt;/strong&gt;&lt;/p&gt;",
+        "extractTextFromHtml": "Hello world"
+      }
+    },
+    {
+      "id": "safe-nested-markup",
+      "requirement": "nested safe markup",
+      "input": "<div><p>Outer <em>inner <code>deep</code></em></p><ul><li>one</li><li>two</li></ul></div>",
+      "expect": {
+        "sanitizeHtml": "<div><p>Outer <em>inner <code>deep</code></em></p><ul><li>one</li><li>two</li></ul></div>",
+        "escapeHtml": "&lt;div&gt;&lt;p&gt;Outer &lt;em&gt;inner &lt;code&gt;deep&lt;/code&gt;&lt;/em&gt;&lt;/p&gt;&lt;ul&gt;&lt;li&gt;one&lt;/li&gt;&lt;li&gt;two&lt;/li&gt;&lt;/ul&gt;&lt;/div&gt;",
+        "extractTextFromHtml": "Outer inner deep \none\ntwo"
+      }
+    },
+    {
+      "id": "safe-anchor-http",
+      "requirement": "safe http anchor preserved",
+      "input": "<p>See <a href=\"https://example.test/a?b=1&amp;c=2\">link</a>.</p>",
+      "expect": {
+        "sanitizeHtml": "<p>See <a href=\"https://example.test/a?b=1&amp;c=2\">link</a>.</p>",
+        "escapeHtml": "&lt;p&gt;See &lt;a href=&quot;https://example.test/a?b=1&amp;amp;c=2&quot;&gt;link&lt;/a&gt;.&lt;/p&gt;",
+        "extractTextFromHtml": "See link ."
+      }
+    },
+    {
+      "id": "safe-image-https",
+      "requirement": "safe https image preserved",
+      "input": "<p><img src=\"https://example.test/i.png\" alt=\"Alt text\"></p>",
+      "expect": {
+        "sanitizeHtml": "<p><img src=\"https://example.test/i.png\" alt=\"Alt text\"></p>",
+        "escapeHtml": "&lt;p&gt;&lt;img src=&quot;https://example.test/i.png&quot; alt=&quot;Alt text&quot;&gt;&lt;/p&gt;",
+        "extractTextFromHtml": ""
+      }
+    },
+    {
+      "id": "dangerous-script",
+      "requirement": "script element removed",
+      "input": "<p>before</p><script>alert(1)</script><p>after</p>",
+      "expect": {
+        "sanitizeHtml": "<p>before</p><p>after</p>",
+        "escapeHtml": "&lt;p&gt;before&lt;/p&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;p&gt;after&lt;/p&gt;",
+        "extractTextFromHtml": "before\nafter"
+      }
+    },
+    {
+      "id": "dangerous-style",
+      "requirement": "style element removed",
+      "input": "<p>a</p><style>body{display:none}</style><p>b</p>",
+      "expect": {
+        "sanitizeHtml": "<p>a</p><p>b</p>",
+        "escapeHtml": "&lt;p&gt;a&lt;/p&gt;&lt;style&gt;body{display:none}&lt;/style&gt;&lt;p&gt;b&lt;/p&gt;",
+        "extractTextFromHtml": "a\nb"
+      }
+    },
+    {
+      "id": "dangerous-iframe",
+      "requirement": "iframe element removed",
+      "input": "<p>a</p><iframe src=\"https://example.test/x\"></iframe><p>b</p>",
+      "expect": {
+        "sanitizeHtml": "<p>a</p><p>b</p>",
+        "escapeHtml": "&lt;p&gt;a&lt;/p&gt;&lt;iframe src=&quot;https://example.test/x&quot;&gt;&lt;/iframe&gt;&lt;p&gt;b&lt;/p&gt;",
+        "extractTextFromHtml": "a\nb"
+      }
+    },
+    {
+      "id": "dangerous-object-embed",
+      "requirement": "object and embed removed",
+      "input": "<object data=\"x.swf\"></object><embed src=\"y.swf\"><p>kept</p>",
+      "expect": {
+        "sanitizeHtml": "<p>kept</p>",
+        "escapeHtml": "&lt;object data=&quot;x.swf&quot;&gt;&lt;/object&gt;&lt;embed src=&quot;y.swf&quot;&gt;&lt;p&gt;kept&lt;/p&gt;",
+        "extractTextFromHtml": "kept"
+      }
+    },
+    {
+      "id": "dangerous-c31-tags",
+      "requirement": "C3.1 hardened tags base/meta/form/svg/math removed",
+      "input": "<base href=\"https://evil.test/\"><meta http-equiv=\"refresh\" content=\"0\"><form action=\"/x\"><input></form><svg onload=\"alert(1)\"></svg><math><mi>x</mi></math><p>kept</p>",
+      "expect": {
+        "sanitizeHtml": "<p>kept</p>",
+        "escapeHtml": "&lt;base href=&quot;https://evil.test/&quot;&gt;&lt;meta http-equiv=&quot;refresh&quot; content=&quot;0&quot;&gt;&lt;form action=&quot;/x&quot;&gt;&lt;input&gt;&lt;/form&gt;&lt;svg onload=&quot;alert(1)&quot;&gt;&lt;/svg&gt;&lt;math&gt;&lt;mi&gt;x&lt;/mi&gt;&lt;/math&gt;&lt;p&gt;kept&lt;/p&gt;",
+        "extractTextFromHtml": "kept"
+      }
+    },
+    {
+      "id": "event-attr-onclick",
+      "requirement": "inline onclick handler stripped",
+      "input": "<p onclick=\"alert(1)\">click me</p>",
+      "expect": {
+        "sanitizeHtml": "<p>click me</p>",
+        "escapeHtml": "&lt;p onclick=&quot;alert(1)&quot;&gt;click me&lt;/p&gt;",
+        "extractTextFromHtml": "click me"
+      }
+    },
+    {
+      "id": "event-attr-onerror-img",
+      "requirement": "img onerror handler stripped",
+      "input": "<img src=\"x\" onerror=\"alert(1)\" alt=\"a\">",
+      "expect": {
+        "sanitizeHtml": "<img src=\"x\" alt=\"a\">",
+        "escapeHtml": "&lt;img src=&quot;x&quot; onerror=&quot;alert(1)&quot; alt=&quot;a&quot;&gt;",
+        "extractTextFromHtml": ""
+      }
+    },
+    {
+      "id": "event-attr-mixed-case",
+      "requirement": "mixed-case handler stripped",
+      "input": "<div OnMouseOver=\"steal()\">hover</div>",
+      "expect": {
+        "sanitizeHtml": "<div>hover</div>",
+        "escapeHtml": "&lt;div OnMouseOver=&quot;steal()&quot;&gt;hover&lt;/div&gt;",
+        "extractTextFromHtml": "hover"
+      }
+    },
+    {
+      "id": "attr-srcdoc",
+      "requirement": "srcdoc attribute stripped",
+      "input": "<div srcdoc=\"<script>alert(1)</script>\">x</div>",
+      "expect": {
+        "sanitizeHtml": "<div>x</div>",
+        "escapeHtml": "&lt;div srcdoc=&quot;&lt;script&gt;alert(1)&lt;/script&gt;&quot;&gt;x&lt;/div&gt;",
+        "extractTextFromHtml": "x"
+      }
+    },
+    {
+      "id": "uri-javascript",
+      "requirement": "javascript: URI neutralized",
+      "input": "<a href=\"javascript:alert(1)\">go</a>",
+      "expect": {
+        "sanitizeHtml": "<a href=\"#\">go</a>",
+        "escapeHtml": "&lt;a href=&quot;javascript:alert(1)&quot;&gt;go&lt;/a&gt;",
+        "extractTextFromHtml": "go"
+      }
+    },
+    {
+      "id": "uri-javascript-obfuscated",
+      "requirement": "obfuscated javascript URI neutralized",
+      "input": "<a href=\"  JaVaScRiPt:alert(1)\">go</a>",
+      "expect": {
+        "sanitizeHtml": "<a href=\"#\">go</a>",
+        "escapeHtml": "&lt;a href=&quot;  JaVaScRiPt:alert(1)&quot;&gt;go&lt;/a&gt;",
+        "extractTextFromHtml": "go"
+      }
+    },
+    {
+      "id": "uri-vbscript",
+      "requirement": "vbscript: URI neutralized",
+      "input": "<a href=\"vbscript:msgbox(1)\">go</a>",
+      "expect": {
+        "sanitizeHtml": "<a href=\"#\">go</a>",
+        "escapeHtml": "&lt;a href=&quot;vbscript:msgbox(1)&quot;&gt;go&lt;/a&gt;",
+        "extractTextFromHtml": "go"
+      }
+    },
+    {
+      "id": "uri-data-text-html",
+      "requirement": "data:text/html URI neutralized",
+      "input": "<a href=\"data:text/html;base64,PHNjcmlwdD4=\">go</a>",
+      "expect": {
+        "sanitizeHtml": "<a href=\"#\">go</a>",
+        "escapeHtml": "&lt;a href=&quot;data:text/html;base64,PHNjcmlwdD4=&quot;&gt;go&lt;/a&gt;",
+        "extractTextFromHtml": "go"
+      }
+    },
+    {
+      "id": "uri-data-image-png",
+      "requirement": "data:image/png URI treatment",
+      "input": "<img src=\"data:image/png;base64,iVBORw0KGgo=\" alt=\"px\">",
+      "expect": {
+        "sanitizeHtml": "<img src=\"data:image/png;base64,iVBORw0KGgo=\" alt=\"px\">",
+        "escapeHtml": "&lt;img src=&quot;data:image/png;base64,iVBORw0KGgo=&quot; alt=&quot;px&quot;&gt;",
+        "extractTextFromHtml": ""
+      }
+    },
+    {
+      "id": "entities-named-and-numeric",
+      "requirement": "entities preserved",
+      "input": "<p>&amp; &lt; &gt; &quot; &#39; &nbsp; &#8212;</p>",
+      "expect": {
+        "sanitizeHtml": "<p>&amp; &lt; &gt; &quot; &#39; &nbsp; &#8212;</p>",
+        "escapeHtml": "&lt;p&gt;&amp;amp; &amp;lt; &amp;gt; &amp;quot; &amp;#39; &amp;nbsp; &amp;#8212;&lt;/p&gt;",
+        "extractTextFromHtml": "& < > \" ' —"
+      }
+    },
+    {
+      "id": "entities-double-escaped",
+      "requirement": "double-escaped entity text",
+      "input": "<p>&amp;amp; &amp;lt;</p>",
+      "expect": {
+        "sanitizeHtml": "<p>&amp;amp; &amp;lt;</p>",
+        "escapeHtml": "&lt;p&gt;&amp;amp;amp; &amp;amp;lt;&lt;/p&gt;",
+        "extractTextFromHtml": "&amp; <"
+      }
+    },
+    {
+      "id": "malformed-unclosed",
+      "requirement": "unclosed tags accepted by the projector path",
+      "input": "<p>one<div>two<span>three",
+      "expect": {
+        "sanitizeHtml": "<p>one<div>two<span>three",
+        "escapeHtml": "&lt;p&gt;one&lt;div&gt;two&lt;span&gt;three",
+        "extractTextFromHtml": "one two three"
+      }
+    },
+    {
+      "id": "malformed-stray-close",
+      "requirement": "stray closing tags",
+      "input": "lead </p></div> trail",
+      "expect": {
+        "sanitizeHtml": "lead </p></div> trail",
+        "escapeHtml": "lead &lt;/p&gt;&lt;/div&gt; trail",
+        "extractTextFromHtml": "lead \ntrail"
+      }
+    },
+    {
+      "id": "malformed-broken-attr",
+      "requirement": "broken attribute quoting",
+      "input": "<p class=\"a onclick=alert(1)>text</p>",
+      "expect": {
+        "sanitizeHtml": "<p class=\"a>text</p>",
+        "escapeHtml": "&lt;p class=&quot;a onclick=alert(1)&gt;text&lt;/p&gt;",
+        "extractTextFromHtml": "text"
+      }
+    },
+    {
+      "id": "malformed-lone-lt",
+      "requirement": "lone angle brackets",
+      "input": "a < b > c <notatag",
+      "expect": {
+        "sanitizeHtml": "a < b > c <notatag",
+        "escapeHtml": "a &lt; b &gt; c &lt;notatag",
+        "extractTextFromHtml": "a c <notatag"
+      }
+    },
+    {
+      "id": "extract-multiline-blocks",
+      "requirement": "block markup for text extraction",
+      "input": "<div><h1>Title</h1><p>First paragraph.</p><p>Second paragraph.</p></div>",
+      "expect": {
+        "sanitizeHtml": "<div><h1>Title</h1><p>First paragraph.</p><p>Second paragraph.</p></div>",
+        "escapeHtml": "&lt;div&gt;&lt;h1&gt;Title&lt;/h1&gt;&lt;p&gt;First paragraph.&lt;/p&gt;&lt;p&gt;Second paragraph.&lt;/p&gt;&lt;/div&gt;",
+        "extractTextFromHtml": "Title\nFirst paragraph.\nSecond paragraph."
+      }
+    },
+    {
+      "id": "extract-br-and-li",
+      "requirement": "line breaks and list items for text extraction",
+      "input": "<p>line one<br>line two</p><ul><li>alpha</li><li>beta</li></ul>",
+      "expect": {
+        "sanitizeHtml": "<p>line one<br>line two</p><ul><li>alpha</li><li>beta</li></ul>",
+        "escapeHtml": "&lt;p&gt;line one&lt;br&gt;line two&lt;/p&gt;&lt;ul&gt;&lt;li&gt;alpha&lt;/li&gt;&lt;li&gt;beta&lt;/li&gt;&lt;/ul&gt;",
+        "extractTextFromHtml": "line one\nline two\nalpha\nbeta"
+      }
+    },
+    {
+      "id": "extract-whitespace-collapse",
+      "requirement": "whitespace handling for text extraction",
+      "input": "<p>   spaced    out   </p>\n\n<p>\ttabbed\t</p>",
+      "expect": {
+        "sanitizeHtml": "<p>   spaced    out   </p>\n\n<p>\ttabbed\t</p>",
+        "escapeHtml": "&lt;p&gt;   spaced    out   &lt;/p&gt;\n\n&lt;p&gt;\ttabbed\t&lt;/p&gt;",
+        "extractTextFromHtml": "spaced out \ntabbed"
+      }
+    },
+    {
+      "id": "extract-with-entities",
+      "requirement": "entity decoding for text extraction",
+      "input": "<p>Tom &amp; Jerry &lt;3 &quot;quotes&quot;</p>",
+      "expect": {
+        "sanitizeHtml": "<p>Tom &amp; Jerry &lt;3 &quot;quotes&quot;</p>",
+        "escapeHtml": "&lt;p&gt;Tom &amp;amp; Jerry &amp;lt;3 &amp;quot;quotes&amp;quot;&lt;/p&gt;",
+        "extractTextFromHtml": "Tom & Jerry <3 \"quotes\""
+      }
+    },
+    {
+      "id": "empty-string",
+      "requirement": "empty input",
+      "input": "",
+      "expect": {
+        "sanitizeHtml": "",
+        "escapeHtml": "",
+        "extractTextFromHtml": ""
+      }
+    },
+    {
+      "id": "whitespace-only",
+      "requirement": "whitespace-only input",
+      "input": "   \n\t  ",
+      "expect": {
+        "sanitizeHtml": "",
+        "escapeHtml": "   \n\t  ",
+        "extractTextFromHtml": ""
+      }
+    }
+  ]
+}
