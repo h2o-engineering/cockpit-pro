@@ -40,6 +40,7 @@ const MD_DIR_REL = 'src-surfaces-base/studio/renderer/markdown';
 const VENDOR_UMD_REL = `${MD_DIR_REL}/vendor/markdown-it/markdown-it.umd.min.js`;
 const VENDOR_PIN_REL = `${MD_DIR_REL}/vendor/markdown-it/PIN.json`;
 const SHARED_MODULES = Object.freeze(['h2o-gfm.v1.js', 'markdown-engine.v1.js', 'markdown-ir-adapter.v1.js']);
+const PRESENTATION_PROFILE_REL = 'src-surfaces-base/studio/renderer/presentation/presentation-profile.v1.js';
 const RENDER_IR_REL = 'src-surfaces-base/studio/renderer/semantic/render-ir.v1.js';
 const CHAT_RENDERER_REL = 'src-surfaces-base/studio/renderer/chat-renderer.studio.js';
 const MOBILE_BRIDGE_REL = 'apps/studio/mobile/src/renderer/semantic-markdown.ts';
@@ -150,9 +151,14 @@ function loadWebSurface() {
   vm.runInContext(readText(VENDOR_UMD_REL), sandbox, { filename: 'markdown-it.umd.min.js' });
   for (const rel of SHARED_MODULES) vm.runInContext(readText(`${MD_DIR_REL}/${rel}`), sandbox, { filename: rel });
   vm.runInContext(readText(RENDER_IR_REL), sandbox, { filename: 'render-ir.v1.js' });
+  /* M04 P1 T2: contentRenderContext() now names the active PresentationProfile
+   * for every content body (real module, reference profile; the capturing sink
+   * below ignores presentation, so semantics stay the subject here). */
+  vm.runInContext(readText(PRESENTATION_PROFILE_REL), sandbox, { filename: 'presentation-profile.v1.js' });
   const real = sandbox.H2O.Studio.Renderer;
   const record = { parsed: null, doc: null, sinkBlocks: null };
   const Renderer = {
+    presentationProfile: real.presentationProfile,
     markdownEngine: real.markdownEngine,
     markdownIrAdapter: { markdownToBlocks(md, text) { const r = real.markdownIrAdapter.markdownToBlocks(md, text); record.parsed = r; return r; } },
     renderIR: { createConversation(input) { const doc = real.renderIR.createConversation(input); record.doc = doc; return doc; }, validate: (doc) => real.renderIR.validate(doc) },
@@ -163,6 +169,10 @@ function loadWebSurface() {
   vm.runInContext([
     'let semanticEngineInstance = null;',
     'let ACTIVE_CONTENT_COLLECTOR = null;',
+    /* M04 P1 T2 presentation-authority seam consumed by contentRenderContext. */
+    'let ACTIVE_PRESENTATION_PROFILE = null;',
+    extractFunction(chatRendererSource, 'presentationProfileRegistry'),
+    extractFunction(chatRendererSource, 'activePresentationProfile'),
     extractFunction(chatRendererSource, 'semanticMarkdownEngine'),
     extractFunction(chatRendererSource, 'appendVerbatimBody'),
     extractFunction(chatRendererSource, 'contentRenderContext'),

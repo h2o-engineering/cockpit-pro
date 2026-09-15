@@ -52,15 +52,47 @@ Profile helpers: `transcriptClasses(mode)`, `turnClasses(role, mode)`,
 | `register(profileOrDefinition)` | append-only; validates plain definitions through `define()`; duplicate id → `TypeError` (`code: "duplicate-id"`); after sealing → `Error` (`code: "registry-sealed"`) |
 | `get(id)` / `ids()` / `list()` | registered profile or `null`; frozen ids / profiles in registration order |
 | `reference()` / `default()` | the built-in `chatgpt-reference` profile (`referenceId`); not mutable |
-| `resolve(requestedId)` | frozen `{ requestedId, effectiveId, profile, reason }` with reason `explicit`, `default` (absent / empty request) or `unknown-profile-fallback`; never throws |
+| `resolve(requestedId)` | frozen `{ requestedId, effectiveId, profile, reason }`; never throws. Absent (`undefined` / `null` / `""`) → `default`, `requestedId: null`. Known string → `explicit`. Unknown string → `unknown-profile-fallback` with the request echoed. Any non-string value is **malformed**: it is never coerced (no `toString` / `valueOf` / `Symbol.toPrimitive` runs), `requestedId` is `null` and the reason is `unknown-profile-fallback` |
 | `seal()` / `sealed()` / `registryDigest()` | idempotent; the digest is the deterministic evidence token (JSON of the sorted `{ id, owner, version }` entries), `null` before sealing |
 
 The reference profile is defined and registered at install through the same
-public path. Registration stays open after installation; the Renderer seals the
-registry at its first render in the document (M04 P1 T2 wiring). There is no
-dispose, unregister, replacement, re-registration or hot reload; every admitted
-definition and its metadata are immutable for the document lifetime. Test
-isolation uses fresh contexts, not production lifecycle machinery.
+public path. Registration stays open after installation and after any
+observational call; the Renderer seals both registries at its first
+`chatRenderer.render()` in the document. There is no dispose, unregister,
+replacement, re-registration or hot reload; every admitted definition and its
+metadata are immutable for the document lifetime. Test isolation uses fresh
+contexts, not production lifecycle machinery.
+
+## Per-render selection and binding (chat-renderer.studio.js)
+
+`render(input, options)` seals both registries, resolves
+`options.presentationProfile` through `resolve()`, opens the selected profile as
+the presentation context for the whole render (shells and every nested content
+body; restored in `finally`, nested calls and exceptions included) and binds the
+immutable profile plus a frozen descriptor to the H2O root in a Renderer-private
+WeakMap. The result exposes the descriptor as `presentation`:
+
+```text
+{ schema: "h2o.renderer.presentation-descriptor", schemaVersion: 1,
+  requestedId, effectiveId, profileVersion, reason, registryDigest }
+```
+
+`registryDigest` is the combined evidence token — JSON with the named fields
+`presentationProfile` and `contentRenderer`, each carrying that registry's own
+sealed token. `chatRenderer.describePresentation(request)` is DOM-free and
+observational: it neither seals nor registers; before the first render its
+`registryDigest` is `null` (the combined sealed token does not exist yet), after
+sealing it agrees with the render descriptor for the same request.
+
+The root's `data-h2o-presentation-profile` attribute only *projects* the
+effective id; it is never the authority. `applyEditedMessageBody()` (public
+signature unchanged) runs the whole edit — host modifiers and nested
+code/content classes — under the bound profile of the mounted root that contains
+the host; a genuinely unbound synthetic host keeps the reference profile as the
+documented compatibility fallback, which never overrides a mounted binding. Only
+the render that is still collecting projections indexes its bodies: later edits
+never mutate a completed Semantic Index and never enter another render's
+collection.
 
 The evidence token is not a security digest and not a cross-document cache
 guarantee.

@@ -125,6 +125,14 @@ check('extension registration requires owner/version metadata and an admitted Re
     assert.ok(failure && failure.code === 'invalid-metadata' && failure.name === 'TypeError', `${label}: rejected with invalid-metadata`);
     assert.equal(cr.has('math'), false, `${label}: nothing registered`);
   }
+  /* M04-P1-R02 (old -> new): numeric prerelease identifiers with leading zeroes were accepted; SemVer 2.0.0 items 9-10 now hold in this module too. */
+  for (const bad of ['1.0.0-01', '1.0.0-alpha.01', '01.0.0', '1.0.0-', '1.0.0+', 'v1.0.0']) {
+    const failure = code(() => loadRegistry().register('math', () => null, { owner: 'o', version: bad }));
+    assert.ok(failure && failure.code === 'invalid-metadata', `R02: version ${JSON.stringify(bad)} rejected`);
+  }
+  for (const good of ['1.0.0-0', '1.0.0-alpha.1', '1.0.0-01a', '1.0.0+001', '1.0.0-rc.1+build.01']) {
+    assert.equal(loadRegistry().register('math', () => null, { owner: 'o', version: good }), 'math', `R02: version ${JSON.stringify(good)} accepted`);
+  }
   const unknown = code(() => cr.register('sparkline', () => null, { owner: 'o', version: '1.0.0' }));
   assert.equal(unknown && unknown.code, 'unknown-kind', 'the admitted Render IR kind vocabulary is not expandable');
   assert.deepEqual([...cr.admittedKinds].sort(), [...cr.coreKinds, ...cr.extensionKinds].sort(), 'admitted kinds = core + reserved extension kinds');
@@ -1384,7 +1392,8 @@ if (!chromium) {
   });
 
   check('Semantic Index: one frozen read-only index per render, source/path keys, targets are the H2O shells (S4A slice A)', () => {
-    assert.deepEqual(s4a.canonical.resultKeys, ['root', 'turnsEl', 'scrollEl', 'assistantTurnEls', 'mountedTurnCount', 'renderMode', 'semanticSource', 'semanticIndex', 'decorationContributions'], 'render result gains semanticIndex additively (S4B appends decorationContributions)');
+    /* M04 P1 T2 (old -> new): the result additionally carries the frozen `presentation` descriptor after the lifecycle. */
+    assert.deepEqual(s4a.canonical.resultKeys, ['root', 'turnsEl', 'scrollEl', 'assistantTurnEls', 'mountedTurnCount', 'renderMode', 'semanticSource', 'semanticIndex', 'decorationContributions', 'presentation'], 'render result gains semanticIndex additively (S4B appends decorationContributions; M04 T2 appends presentation)');
     assert.deepEqual(s4a.api, ['schema', 'schemaVersion', 'version', 'renderMode', 'basis', 'semanticCorrespondenceLost', 'getConversation', 'getTurn', 'getMessage', 'getBlock', 'getText', 'turns', 'messages', 'blocks', 'texts', 'getGeometry'], 'N: read-only API only (S4A slices A + B)');
     assert.deepEqual(s4a.frozen, [true, true, true, true], 'C: frozen index, arrays and records');
     assert.equal(s4a.canonical.basis, 'source'); assert.equal(s4a.canonical.conversation, 'conversation:source:snap-1');
@@ -1559,7 +1568,7 @@ if (!chromium) {
   });
 
   check('DecorationContribution: one lifecycle per render bound to its Semantic Index, zero Product contributions, frozen module (S4B slice A)', () => {
-    assert.deepEqual(s4bDeco.resultKeys, ['root', 'turnsEl', 'scrollEl', 'assistantTurnEls', 'mountedTurnCount', 'renderMode', 'semanticSource', 'semanticIndex', 'decorationContributions'], 'render result gains decorationContributions additively');
+    assert.deepEqual(s4bDeco.resultKeys, ['root', 'turnsEl', 'scrollEl', 'assistantTurnEls', 'mountedTurnCount', 'renderMode', 'semanticSource', 'semanticIndex', 'decorationContributions', 'presentation'], 'render result gains decorationContributions additively (M04 P1 T2 appends the presentation descriptor)');
     assert.deepEqual(s4bDeco.module, { installed: true, version: '0.1.0-m03-s4b', frozen: true, rendererKeys: s4bDeco.module.rendererKeys }, 'A: frozen installed module');
     assert.deepEqual(s4bDeco.module.rendererKeys.filter((k) => /current|registry|singleton|decorations$/i.test(k)), [], 'AA: no global decoration registry on the Renderer namespace');
     assert.deepEqual(s4bDeco.perRender, { distinct: true, boundToOwnIndex: true, zero: [0, 0], frozen: true, api: ['schema', 'schemaVersion', 'version', 'semanticIndex', 'register', 'get', 'list', 'disposeAll'], schema: 'h2o.renderer.decoration-contribution', version: '0.1.0-m03-s4b' }, 'B / C / D: distinct per render, bound to that index, zero contributions');
@@ -1579,6 +1588,113 @@ if (!chromium) {
     assert.deepEqual(s4bDeco.disposeOne, { first: true, second: false, disposedCalls: 1, gone: null, count: 4, handleSnapshot: { contributionKey: 'decoration:smoke:text', owner: 'smoke', id: 'text', targetKey: s4bDeco.disposeOne.handleSnapshot.targetKey, targetKind: 'text', revision: 1, active: false }, markers: 4 }, 'P / Q / R: idempotent dispose, cleanup once, gone from the registry');
     assert.deepEqual(s4bDeco.disposeAll, { swept: ['decoration:smoke:block', 'decoration:smoke:message', 'decoration:smoke:turn', 'decoration:smoke:conversation'], remaining: 0, disposedCalls: [1, 1, 1, 1], markers: 0 }, 'T / U / V: reverse registration order, every cleanup once, registry empty');
     assert.deepEqual(s4bDeco.parity, { outerHTMLRestored: true, textRestored: true, noDecorationMarkup: true, attrs: [] }, 'X / AB: the render carries no decoration markup and the fixture DOM returns to its pre-registration state');
+  });
+
+  /* M04 P1 T2: per-render presentation selection and binding on a FRESH page
+   * (fresh document = open registries): test-only profiles registered before
+   * the first render, sealing at that render, descriptors, bound-profile edits,
+   * context restoration and the untouched index / lifecycle contracts. */
+  const t2Page = await browser.newPage();
+  const t2Errors = [];
+  t2Page.on('pageerror', (e) => t2Errors.push(String(e)));
+  await t2Page.goto(`${base}/__harness__`, { waitUntil: 'load' });
+  const t2 = await t2Page.evaluate(() => {
+    const R = globalThis.H2O.Studio.Renderer; const cr = globalThis.H2O.Studio.chatRenderer; const pp = R.presentationProfile; const cont = R.contentRenderer;
+    const out = { errors: [] };
+    const attempt = (label, fn) => { try { return fn(); } catch (e) { out.errors.push(label + ': ' + (e && e.message)); return null; } };
+    const hooks = (tag) => ({ transcript: { canonical: [`${tag}-canonical`], rich: [`${tag}-rich`] }, turn: { base: [`${tag}-turn`], canonical: [], rich: [], role: { user: [`${tag}-user`], assistant: [`${tag}-assistant`], system: [], tool: [] } }, message: { canonical: { user: [`${tag}-msg-user`], assistant: [`${tag}-msg-assistant`], system: [], tool: [] }, rich: { user: [], assistant: [], system: [], tool: [] } }, userBubble: { compat: [`${tag}-bubble`] }, content: { codeBlock: { container: [`${tag}-code`], language: [`${tag}-lang`] } }, state: { edited: { turn: [`${tag}-edited-turn`], message: [`${tag}-edited-msg`] } } });
+    const definition = (id, tag, version) => ({ id, owner: 't2-test', version, displayName: id, provider: null, stylesheet: null, modes: ['canonical', 'rich'], hooks: hooks(tag) });
+    pp.register(definition('t2-alpha', 'tpA', '1.0.0')); pp.register(definition('t2-beta', 'tpB', '2.1.0'));
+    cont.register('math', (block, ctx) => { const el = ctx.document.createElement('span'); el.className = 't2-math'; return el; }, { owner: 't2-test', version: '0.1.0' });
+    out.beforeRender = { describe: cr.describePresentation('t2-alpha'), sealed: [pp.sealed(), cont.sealed()], digest: [pp.registryDigest(), cont.registryDigest()] };
+    out.describeMalformedBefore = cr.describePresentation(Object.create(null));
+    /* still open after observation: a third profile registers */
+    pp.register(definition('t2-gamma', 'tpG', '3.0.0'));
+    out.stillOpen = { ids: [...pp.ids()], sealed: [pp.sealed(), cont.sealed()] };
+    const input = (id) => ({ chatId: 'c-t2', snapshotId: id, meta: { title: 'T2' }, messages: [ { role: 'user', text: 'question', messageId: `${id}-u1`, turnId: `${id}-t1` }, { role: 'assistant', text: 'answer:\n\n```js\nlet x = 1;\n```', messageId: `${id}-a1`, turnId: `${id}-t1` } ] });
+    const classesOf = (r) => ({ transcript: r.turnsEl.className, turn: r.root.querySelector('.cgTurn').className, assistantMsg: r.root.querySelector('.cgMsg[data-message-author-role="assistant"]').className, code: r.root.querySelector('.cgMsgBody > div').className, marker: r.root.getAttribute('data-h2o-presentation-profile') });
+    const A = cr.render(input('A'), { presentationProfile: 't2-alpha', getEditOverride: () => null });
+    out.afterFirstRender = { sealed: [pp.sealed(), cont.sealed()], descriptor: A.presentation, frozen: Object.isFrozen(A.presentation), classes: classesOf(A), resultKeys: Object.keys(A) };
+    out.late = { profile: attempt('late-profile', () => { try { pp.register(definition('t2-late', 'tpL', '1.0.0')); return 'accepted'; } catch (e) { return e.code; } }), content: attempt('late-content', () => { try { cont.register('citation', () => null, { owner: 't2-test', version: '1.0.0' }); return 'accepted'; } catch (e) { return e.code; } }), ids: [...pp.ids()] };
+    const digest = JSON.parse(A.presentation.registryDigest);
+    out.digest = { schema: digest.schema, keys: Object.keys(digest), matchesRegistries: digest.presentationProfile === pp.registryDigest() && digest.contentRenderer === cont.registryDigest(), profileEntries: JSON.parse(digest.presentationProfile).entries.map((e) => e.id), contentHasMath: JSON.parse(digest.contentRenderer).entries.some((e) => e.kind === 'math' && e.owner === 't2-test') };
+    out.describeAfter = { equalsRender: JSON.stringify(cr.describePresentation('t2-alpha')) === JSON.stringify(A.presentation), sealedAfterDescribe: [pp.sealed(), cont.sealed()] };
+    const B = cr.render(input('B'), { presentationProfile: 't2-beta', getEditOverride: () => null });
+    const D = cr.render(input('D'), { getEditOverride: () => null });
+    const U = cr.render(input('U'), { presentationProfile: 'no-such-profile', getEditOverride: () => null });
+    const M = cr.render(input('M'), { presentationProfile: { toString() { throw new Error('coerced'); } }, getEditOverride: () => null });
+    const brief = (r) => ({ requestedId: r.presentation.requestedId, effectiveId: r.presentation.effectiveId, profileVersion: r.presentation.profileVersion, reason: r.presentation.reason, marker: r.root.getAttribute('data-h2o-presentation-profile'), sameDigest: r.presentation.registryDigest === A.presentation.registryDigest });
+    out.selection = { B: brief(B), D: brief(D), U: brief(U), M: brief(M), classesB: classesOf(B), classesD: classesOf(D) };
+    /* semantic neutrality across profiles: same text, same index keys/roles */
+    const keys = (r) => JSON.stringify({ t: r.semanticIndex.turns().map((x) => [x.projectionKey, x.role]), m: r.semanticIndex.messages().map((x) => [x.projectionKey, x.role]), b: r.semanticIndex.blocks().length, x: r.semanticIndex.texts().length });
+    const N1 = cr.render(input('N'), { presentationProfile: 't2-alpha', getEditOverride: () => null }); const N2 = cr.render(input('N'), { presentationProfile: 't2-beta', getEditOverride: () => null }); const N3 = cr.render(input('N'), { getEditOverride: () => null });
+    out.neutral = { text: N1.root.textContent === N2.root.textContent && N1.root.textContent === N3.root.textContent, keys: keys(N1) === keys(N2) && keys(N1) === keys(N3), contributions: [A.decorationContributions.list().length, B.decorationContributions.list().length] };
+    /* edit root A after B/D/U/M rendered: A's binding governs, the marker is not the authority, indexes stay put */
+    A.root.setAttribute('data-h2o-presentation-profile', 't2-beta');
+    const msgA = A.root.querySelector('.cgMsg[data-message-author-role="assistant"]'); const msgB = B.root.querySelector('.cgMsg[data-message-author-role="assistant"]');
+    const before = { a: A.semanticIndex.blocks().length, b: B.semanticIndex.blocks().length };
+    cr.applyEditedMessageBody(msgA, 'assistant', 'edited:\n\n```py\nprint(1)\n```');
+    cr.applyEditedMessageBody(msgB, 'assistant', 'edited too');
+    out.edit = { hostA: msgA.className, codeA: msgA.querySelector('.cgMsgBody > div').className, hostB: msgB.className, indexA: A.semanticIndex.blocks().length, indexB: B.semanticIndex.blocks().length, before, frozenIndex: Object.isFrozen(A.semanticIndex) };
+    /* in-render edit override on a rich transcript under profile B: the override host takes B's hooks */
+    const richTurn = (role, idx, inner) => ({ role, turnIdx: idx, messageId: `r-${idx}`, turnId: `rt-${idx}`, outerHTML: '<article data-testid="conversation-turn-' + idx + '"><div data-message-author-role="' + role + '" data-message-id="p-' + idx + '">' + inner + '</div></article>' });
+    const rich = cr.render({ chatId: 'c-rich', snapshotId: 'R', messages: [ { role: 'user', text: 'q', messageId: 'r-1' }, { role: 'assistant', text: 'a', messageId: 'r-2' } ], richTurns: [ richTurn('user', 1, '<div class="flex w-full flex-col"><div class="user-message-bubble-color">q</div></div>'), richTurn('assistant', 2, '<div class="markdown prose"><p>a</p></div>') ] }, { presentationProfile: 't2-beta', getEditOverride: (sid, turnIdx) => (sid === 'R' && turnIdx === 2 ? 'override:\n\n```js\nz\n```' : null) });
+    const richHost = rich.root.querySelector('.cgMsg[data-message-author-role="assistant"]');
+    out.richOverride = { mode: rich.renderMode, transcript: rich.turnsEl.className, bubble: rich.root.querySelector('.cgBubble').className, host: richHost.className, code: richHost.querySelector('.cgMsgBody > div').className, turn: rich.root.querySelectorAll('.cgTurn')[1].className, indexed: rich.semanticIndex.blocks().length };
+    /* unbound synthetic host outside any render: documented reference fallback */
+    const synthetic = document.createElement('div'); cr.applyEditedMessageBody(synthetic, 'assistant', 'x\n\n```js\ny\n```');
+    out.synthetic = { host: synthetic.className, code: synthetic.querySelector('.cgMsgBody > div').className };
+    /* exception inside a render (index module sabotaged after the shells are built) restores the presentation context */
+    const realIndex = R.semanticIndex;
+    R.semanticIndex = Object.freeze({ __installed: true, createShellIndex() { throw new Error('index boom'); } });
+    let threw = null; try { cr.render(input('X'), { presentationProfile: 't2-beta', getEditOverride: () => null }); } catch (e) { threw = String(e.message); }
+    R.semanticIndex = realIndex;
+    const afterThrow = cr.render(input('Y'), { getEditOverride: () => null });
+    const syntheticAfter = document.createElement('div'); cr.applyEditedMessageBody(syntheticAfter, 'assistant', 'z');
+    out.restore = { threw, marker: afterThrow.presentation.effectiveId, classes: classesOf(afterThrow), syntheticHost: syntheticAfter.className };
+    out.rendererGlobals = Object.keys(R).filter((k) => /presentation|profile|binding/i.test(k));
+    out.publicApi = Object.keys(cr);
+    return out;
+  });
+  await t2Page.close();
+
+  check('M04 P1 T2: registration stays open after installation and observation; the first render seals both registries; later registration fails deterministically', () => {
+    assert.deepEqual(t2.errors, [], 'no harness errors'); assert.deepEqual(t2Errors, [], 'no page errors');
+    assert.deepEqual(t2.beforeRender.sealed, [false, false], 'A: no sealing at installation'); assert.deepEqual(t2.beforeRender.digest, [null, null]);
+    assert.equal(t2.beforeRender.describe.registryDigest, null, 'B: describePresentation() before sealing reports the unavailable combined token as null');
+    assert.deepEqual({ requestedId: t2.beforeRender.describe.requestedId, effectiveId: t2.beforeRender.describe.effectiveId, reason: t2.beforeRender.describe.reason, profileVersion: t2.beforeRender.describe.profileVersion }, { requestedId: 't2-alpha', effectiveId: 't2-alpha', reason: 'explicit', profileVersion: '1.0.0' });
+    assert.deepEqual({ requestedId: t2.describeMalformedBefore.requestedId, reason: t2.describeMalformedBefore.reason, effectiveId: t2.describeMalformedBefore.effectiveId }, { requestedId: null, reason: 'unknown-profile-fallback', effectiveId: 'chatgpt-reference' }, 'R01: describePresentation(Object.create(null)) falls back safely');
+    assert.deepEqual(t2.stillOpen, { ids: ['chatgpt-reference', 't2-alpha', 't2-beta', 't2-gamma'], sealed: [false, false] }, 'B: describePresentation() leaves registration open');
+    assert.deepEqual(t2.afterFirstRender.sealed, [true, true], 'C: the first render seals both registries');
+    assert.deepEqual(t2.late, { profile: 'registry-sealed', content: 'registry-sealed', ids: ['chatgpt-reference', 't2-alpha', 't2-beta', 't2-gamma'] }, 'C: subsequent registration into either registry is rejected with registry-sealed');
+    assert.deepEqual(t2.describeAfter, { equalsRender: true, sealedAfterDescribe: [true, true] }, 'B/D: after sealing describePresentation() agrees with the render descriptor');
+  });
+
+  check('M04 P1 T2: frozen descriptor (requested / effective / version / reason / combined digest) with named-field serialization; root marker projects the effective id', () => {
+    const d = t2.afterFirstRender.descriptor;
+    assert.equal(t2.afterFirstRender.frozen, true, 'descriptor is frozen');
+    assert.deepEqual(Object.keys(d), ['schema', 'schemaVersion', 'requestedId', 'effectiveId', 'profileVersion', 'reason', 'registryDigest']);
+    assert.deepEqual({ requestedId: d.requestedId, effectiveId: d.effectiveId, profileVersion: d.profileVersion, reason: d.reason }, { requestedId: 't2-alpha', effectiveId: 't2-alpha', profileVersion: '1.0.0', reason: 'explicit' });
+    assert.deepEqual(t2.digest, { schema: 'h2o.renderer.registry-digest', keys: ['schema', 'schemaVersion', 'presentationProfile', 'contentRenderer'], matchesRegistries: true, profileEntries: ['chatgpt-reference', 't2-alpha', 't2-beta', 't2-gamma'], contentHasMath: true }, 'the combined digest names both sealed registry tokens');
+    assert.deepEqual(t2.afterFirstRender.resultKeys.slice(-1), ['presentation'], 'the render result exposes the descriptor');
+    assert.deepEqual(t2.selection.B, { requestedId: 't2-beta', effectiveId: 't2-beta', profileVersion: '2.1.0', reason: 'explicit', marker: 't2-beta', sameDigest: true });
+    assert.deepEqual(t2.selection.D, { requestedId: null, effectiveId: 'chatgpt-reference', profileVersion: '1.0.0', reason: 'default', marker: 'chatgpt-reference', sameDigest: true }, 'absent request -> default');
+    assert.deepEqual(t2.selection.U, { requestedId: 'no-such-profile', effectiveId: 'chatgpt-reference', profileVersion: '1.0.0', reason: 'unknown-profile-fallback', marker: 'chatgpt-reference', sameDigest: true }, 'unknown request -> deterministic fallback');
+    assert.deepEqual(t2.selection.M, { requestedId: null, effectiveId: 'chatgpt-reference', profileVersion: '1.0.0', reason: 'unknown-profile-fallback', marker: 'chatgpt-reference', sameDigest: true }, 'R01: a throwing coercion hook in the request cannot break render()');
+  });
+
+  check('M04 P1 T2: two test profiles yield profile-correct shells and nested content while semantics stay identical; the bound profile governs later edits and the completed index is untouched', () => {
+    assert.deepEqual(t2.afterFirstRender.classes, { transcript: 'cgScroll wbReaderScroll wbRichRoot tpA-canonical', turn: 'cgTurn cgTurn--user tpA-turn tpA-user', assistantMsg: 'cgMsg tpA-msg-assistant', code: 'tpA-code', marker: 't2-alpha' }, 'profile A shells + nested content');
+    assert.deepEqual(t2.selection.classesB, { transcript: 'cgScroll wbReaderScroll wbRichRoot tpB-canonical', turn: 'cgTurn cgTurn--user tpB-turn tpB-user', assistantMsg: 'cgMsg tpB-msg-assistant', code: 'tpB-code', marker: 't2-beta' }, 'profile B shells + nested content');
+    assert.deepEqual(t2.selection.classesD, { transcript: 'cgScroll wbReaderScroll wbRichRoot', turn: 'cgTurn cgTurn--user wbTurn wbTurn--fallback wbTurn--user', assistantMsg: 'cgMsg cgMsg--assistant', code: 'wbCodeBlock', marker: 'chatgpt-reference' }, 'default output unchanged (accepted class order)');
+    assert.deepEqual(t2.neutral, { text: true, keys: true, contributions: [0, 0] }, 'AC05-style neutrality on this fixture: same text and Semantic Index keys/roles under every profile; zero Product contributions');
+    assert.deepEqual(t2.edit, { hostA: 'cgMsg tpA-msg-assistant tpA-edited-msg', codeA: 'tpA-code', hostB: 'cgMsg tpB-msg-assistant tpB-edited-msg', indexA: 3, indexB: 3, before: { a: 3, b: 3 }, frozenIndex: true }, 'editing root A after rendering B uses A\'s bound profile (marker tampered to t2-beta and ignored); completed indexes unchanged');
+    assert.deepEqual(t2.richOverride, { mode: 'rich', transcript: 'cgScroll wbReaderScroll wbRichRoot tpB-rich', bubble: 'cgBubble cgBubble--user tpB-bubble', host: 'cgMsg tpB-msg-assistant tpB-edited-msg', code: 'tpB-code', turn: 'cgTurn cgTurn--assistant tpB-turn tpB-assistant tpB-edited-turn', indexed: 2 }, 'an in-render edit override runs under the render\'s own profile and its body is indexed (paragraph + code block)');
+    assert.deepEqual(t2.synthetic, { host: 'cgMsg cgMsg--assistant cgMsg--edited', code: 'wbCodeBlock' }, 'an unbound synthetic host keeps the documented reference fallback');
+    assert.equal(t2.restore.threw, 'index boom', 'a render that throws after its shells exist propagates');
+    assert.deepEqual({ marker: t2.restore.marker, classes: t2.restore.classes, syntheticHost: t2.restore.syntheticHost }, { marker: 'chatgpt-reference', classes: { transcript: 'cgScroll wbReaderScroll wbRichRoot', turn: 'cgTurn cgTurn--user wbTurn wbTurn--fallback wbTurn--user', assistantMsg: 'cgMsg cgMsg--assistant', code: 'wbCodeBlock', marker: 'chatgpt-reference' }, syntheticHost: 'cgMsg cgMsg--assistant cgMsg--edited' }, 'the presentation context is restored after an exception: the next render and a later unbound edit see no leaked profile');
+    assert.deepEqual(t2.rendererGlobals, ['presentationProfile'], 'no current-profile / binding state on the Renderer namespace');
+    assert.deepEqual(t2.publicApi, ['normalizeInput', 'normalizeRole', 'isRenderEquivalent', 'render', 'describePresentation', 'applyEditedMessageBody'], 'public API: describePresentation added; applyEditedMessageBody signature unchanged');
   });
 
   /* M03 P4 S4C T8 slice B: the Answer Timestamp consumer on a real Studio-mode

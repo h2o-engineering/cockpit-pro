@@ -80,7 +80,10 @@
   const RESOLUTION_REASONS = Object.freeze(["explicit", "default", "unknown-profile-fallback"]);
 
   const ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
-  const SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+  /* SemVer 2.0.0 items 2, 9 and 10: numeric identifiers (core and prerelease)
+   * carry no leading zeroes; alphanumeric prerelease identifiers may; build
+   * metadata identifiers may. (M04-P1-R02) */
+  const SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*)?(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?$/;
   const CLASS_TOKEN_PATTERN = /^-?[_a-zA-Z][_a-zA-Z0-9-]*$/;
   const SLOT_NAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9]*$/;
 
@@ -346,18 +349,26 @@
     return reference();
   }
 
-  /* Safe selection: absent -> default, known -> explicit, unknown -> default
-   * with the fallback reason. Never throws for a bad request. */
+  /* Safe selection, never throws for a bad request:
+   *   absent (undefined / null / "")     -> default,  requestedId null, reason "default"
+   *   known string                       -> explicit, requestedId as given, reason "explicit"
+   *   unknown string                     -> default,  requestedId as given, reason "unknown-profile-fallback"
+   *   malformed (any non-string value)   -> default,  requestedId null,     reason "unknown-profile-fallback"
+   * A non-string request is never coerced: no toString / valueOf /
+   * Symbol.toPrimitive of the caller's value runs here (M04-P1-R01), so a
+   * null-prototype object or a throwing coercion hook cannot break selection. */
   function resolve(requestedId) {
-    const requested = requestedId === undefined || requestedId === null ? null : String(requestedId);
-    if (requested === null || requested === "") {
+    if (requestedId === undefined || requestedId === null || requestedId === "") {
       return Object.freeze({ requestedId: null, effectiveId: REFERENCE_ID, profile: reference(), reason: "default" });
     }
-    const found = get(requested);
-    if (found) {
-      return Object.freeze({ requestedId: requested, effectiveId: found.id, profile: found, reason: "explicit" });
+    if (typeof requestedId !== "string") {
+      return Object.freeze({ requestedId: null, effectiveId: REFERENCE_ID, profile: reference(), reason: "unknown-profile-fallback" });
     }
-    return Object.freeze({ requestedId: requested, effectiveId: REFERENCE_ID, profile: reference(), reason: "unknown-profile-fallback" });
+    const found = get(requestedId);
+    if (found) {
+      return Object.freeze({ requestedId, effectiveId: found.id, profile: found, reason: "explicit" });
+    }
+    return Object.freeze({ requestedId, effectiveId: REFERENCE_ID, profile: reference(), reason: "unknown-profile-fallback" });
   }
 
   /* Deterministic evidence token: sorted identities, unambiguously serialized. */

@@ -75,7 +75,9 @@
   /* The admitted Render IR block-kind vocabulary: exactly the core kinds and
    * the reserved extension kinds. Nothing else can be registered. */
   const ADMITTED_KINDS = Object.freeze([...CORE_KINDS, ...RESERVED_EXTENSION_KINDS]);
-  const SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+  /* SemVer 2.0.0 items 2, 9 and 10: no leading zeroes in numeric identifiers,
+   * including numeric prerelease identifiers (M04-P1-R02). */
+  const SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*)?(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?$/;
 
   /* kind -> { render, meta }; meta is frozen { kind, owner, version, core }. */
   const registry = new Map();

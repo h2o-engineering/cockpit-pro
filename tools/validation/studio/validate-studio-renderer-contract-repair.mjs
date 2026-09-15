@@ -114,8 +114,35 @@ function installPresentationProfile(context) {
  * Studio namespace carries (or deliberately lacks) the real profile API. */
 function presentationProfileGlobals(context, { withProfile = true } = {}) {
   const Studio = { Renderer: {} };
-  if (withProfile) Studio.Renderer.presentationProfile = installPresentationProfile(context);
+  if (withProfile) {
+    Studio.Renderer.presentationProfile = installPresentationProfile(context);
+    /* M04 P1 T2: render() seals BOTH governed registries, so the real
+     * ContentRenderer module is installed beside the real profile registry
+     * (dependency checks are not weakened for the harness). */
+    Studio.Renderer.contentRenderer = installContentRenderer(context);
+  }
   return { Studio, PRESENTATION_PROFILE_ATTR: 'data-h2o-presentation-profile', ...rendererVocabularyGlobals() };
+}
+
+function installContentRenderer(context) {
+  vm.runInContext(`${readRepo(CONTENT_RENDERER_REL)}\nthis.__contentRendererApi = this.H2O.Studio.Renderer.contentRenderer;`, context);
+  return context.__contentRendererApi;
+}
+
+/* M04 P1 T2: the Renderer's per-render presentation authority seam, extracted
+ * verbatim (constants, the private WeakMap binding, the context slot and every
+ * seam function) so harnesses that execute render() / activePresentationProfile()
+ * run the real selection, sealing, binding and context restoration code. */
+const PRESENTATION_AUTHORITY_SEAMS = ['presentationProfileRegistry', 'presentationRegistries', 'combinedRegistryDigest', 'sealPresentationRegistries', 'presentationDescriptor', 'describePresentation', 'openPresentationContext', 'boundPresentationRoot', 'activePresentationProfile'];
+function presentationAuthoritySource() {
+  return [
+    extractConst(rendererSource, 'PRESENTATION_DESCRIPTOR_SCHEMA'),
+    extractConst(rendererSource, 'REGISTRY_DIGEST_SCHEMA'),
+    extractConst(rendererSource, 'RENDER_PRESENTATION'),
+    extractConst(rendererSource, 'BINDING_LOOKUP_MAX_HOPS'),
+    'let ACTIVE_PRESENTATION_PROFILE = null;',
+    ...PRESENTATION_AUTHORITY_SEAMS.map((name) => extractFunction(rendererSource, name)),
+  ].join('\n');
 }
 
 /* M04 P1 T1: the Renderer-owned vocabulary the profile-consuming seams reference
@@ -390,7 +417,7 @@ function createRichMountHarness() {
   const profileContext = vm.createContext({});
   Object.assign(globals, presentationProfileGlobals(profileContext));
   const { fn, context } = loadFunction(rendererSource, 'mountRichTurns', globals);
-  vm.runInContext(extractFunction(rendererSource, 'activePresentationProfile'), context);
+  vm.runInContext(presentationAuthoritySource(), context);
   return { fn, decorated: shells, shells, attachedUsers, sanitizedContent, adoptions, order };
 }
 
@@ -812,7 +839,7 @@ function createRendererBuildHarness(richResult) {
      * delegates to renderWithCollector; the seam pair is extracted verbatim. */
     'let ACTIVE_CONTENT_COLLECTOR = null;',
     extractFunction(rendererSource, 'openContentCollector'),
-    extractFunction(rendererSource, 'activePresentationProfile'),
+    presentationAuthoritySource(),
     extractFunction(rendererSource, 'hasCompleteRichCoverage'),
     extractFunction(rendererSource, 'buildConversationShell'),
     extractFunction(rendererSource, 'renderWithCollector'),
@@ -928,7 +955,7 @@ function validateStructuralShellAuthority() {
   const context = vm.createContext(sandbox);
   Object.assign(sandbox, presentationProfileGlobals(context));
   vm.runInContext([
-    extractFunction(rendererSource, 'activePresentationProfile'),
+    presentationAuthoritySource(),
     extractFunction(rendererSource, 'normalizeRole'),
     extractFunction(rendererSource, 'getAccessibleRoleLabel'),
     extractFunction(rendererSource, 'applyTurnAccessibility'),
@@ -1082,7 +1109,7 @@ function validateRichUserBubbleAuthority() {
     extractFunction(rendererSource, 'buildMessageHost'),
     extractFunction(rendererSource, 'buildRichTurnShell'),
     extractFunction(rendererSource, 'attachUserAttachmentsToTurn'),
-    extractFunction(rendererSource, 'activePresentationProfile'),
+    presentationAuthoritySource(),
     extractConst(rendererSource, 'USER_BUBBLE_H2O_CLASSES'),
     shellFn,
     adoptFn,
@@ -1437,7 +1464,7 @@ function validatePresentationProfileContract() {
   });
   Object.assign(seams, presentationProfileGlobals(seams));
   vm.runInContext([
-    extractFunction(rendererSource, 'activePresentationProfile'),
+    presentationAuthoritySource(),
     extractFunction(rendererSource, 'normalizeRole'),
     extractFunction(rendererSource, 'getAccessibleRoleLabel'),
     extractFunction(rendererSource, 'applyTurnAccessibility'),
@@ -1450,6 +1477,8 @@ function validatePresentationProfileContract() {
   ].join('\n'), seams);
   vm.runInContext([
     'function renderSemanticBody(bodyEl){ bodyEl.appendChild(document.createElement("p")); }',
+    /* M04 P1 T2: the real edit path reads the private collection slot (never a collector here). */
+    'let ACTIVE_CONTENT_COLLECTOR = null;',
     extractFunction(rendererSource, 'applyEditedMessageBody'),
     'this.api.applyEditedMessageBody = applyEditedMessageBody;',
   ].join('\n'), seams);
@@ -1487,7 +1516,7 @@ function validatePresentationProfileContract() {
   });
   Object.assign(bare, presentationProfileGlobals(bare, { withProfile: false }));
   vm.runInContext([
-    extractFunction(rendererSource, 'activePresentationProfile'),
+    presentationAuthoritySource(),
     extractFunction(rendererSource, 'getAccessibleRoleLabel'),
     extractFunction(rendererSource, 'applyTurnAccessibility'),
     extractFunction(rendererSource, 'buildConversationShell'),
@@ -1555,6 +1584,9 @@ function validatePresentationProfileRegistry() {
   rejects(api, definition({ id: 'Bad Id' }), 'invalid-definition', 'B: id');
   rejects(api, definition({ owner: ' ' }), 'invalid-definition', 'B: owner');
   rejects(api, definition({ version: '1.0' }), 'invalid-definition', 'B: semver');
+  /* M04-P1-R02 (old -> new): numeric prerelease identifiers with leading zeroes were accepted; SemVer 2.0.0 items 9-10 now hold. */
+  for (const bad of ['1.0.0-01', '1.0.0-alpha.01', '01.0.0', '1.00.0', '1.0.0-', '1.0.0+', '1.0.0-alpha..1', 'v1.0.0', '1.0.0 ']) rejects(api, definition({ version: bad }), 'invalid-definition', `R02: version ${JSON.stringify(bad)} rejected`);
+  for (const good of ['1.0.0-0', '1.0.0-alpha.1', '1.0.0-01a', '1.0.0+001', '1.0.0-alpha.beta.11+build.01', '0.0.0', '10.20.30-rc.1']) assert.doesNotThrow(() => api.define(definition({ id: `v-${good.replace(/[^a-z0-9]/g, '-')}`.replace(/-+/g, '-').replace(/-$/, ''), version: good })), `R02: version ${JSON.stringify(good)} accepted`);
   rejects(api, definition({ displayName: '' }), 'invalid-definition', 'B: displayName');
   rejects(api, definition({ provider: 42 }), 'invalid-definition', 'B: provider');
   rejects(api, definition({ stylesheet: { href: 'https://evil.test/x.css' } }), 'invalid-definition', 'B: absolute stylesheet');
@@ -1581,14 +1613,30 @@ function validatePresentationProfileRegistry() {
   assert.equal(second.id, 'second-profile'); assert.deepEqual([...api.ids()], ['chatgpt-reference', 'test-profile', 'second-profile']);
   assert.equal(api.reference().id, 'chatgpt-reference', 'C: reference/default do not move'); assert.equal(api.default().id, 'chatgpt-reference');
 
-  /* D. resolve(): explicit / default / unknown-profile-fallback, never throws. */
+  /* D. resolve(): explicit / default / unknown-profile-fallback, never throws.
+   * M04-P1-R01 (old -> new): a non-string request used to be coerced with
+   * String(); it is now MALFORMED - never coerced, requestedId null, reason
+   * unknown-profile-fallback - so the old `resolve(42) -> requestedId "42"`
+   * expectation is replaced by the malformed contract below. */
   assert.deepEqual([...api.resolutionReasons], ['explicit', 'default', 'unknown-profile-fallback']);
-  for (const [request, effective, reason] of [['test-profile', 'test-profile', 'explicit'], ['chatgpt-reference', 'chatgpt-reference', 'explicit'], [undefined, 'chatgpt-reference', 'default'], [null, 'chatgpt-reference', 'default'], ['', 'chatgpt-reference', 'default'], ['nope', 'chatgpt-reference', 'unknown-profile-fallback'], [42, 'chatgpt-reference', 'unknown-profile-fallback']]) {
+  for (const [request, effective, reason, requestedId] of [['test-profile', 'test-profile', 'explicit', 'test-profile'], ['chatgpt-reference', 'chatgpt-reference', 'explicit', 'chatgpt-reference'], [undefined, 'chatgpt-reference', 'default', null], [null, 'chatgpt-reference', 'default', null], ['', 'chatgpt-reference', 'default', null], ['nope', 'chatgpt-reference', 'unknown-profile-fallback', 'nope'], [' test-profile', 'chatgpt-reference', 'unknown-profile-fallback', ' test-profile']]) {
     const r = api.resolve(request);
     assert.equal(r.effectiveId, effective, `D: resolve(${JSON.stringify(request)}) effective`); assert.equal(r.reason, reason, `D: resolve(${JSON.stringify(request)}) reason`);
     assert.equal(r.profile, api.get(effective), 'D: resolved profile is the registered object'); assert.equal(Object.isFrozen(r), true);
-    assert.equal(r.requestedId, request === undefined || request === null || request === '' ? null : String(request));
+    assert.equal(r.requestedId, requestedId, `D: resolve(${JSON.stringify(request)}) requestedId`);
   }
+  /* M04-P1-R01 negative controls: malformed non-string requests fall back safely without invoking caller coercion hooks. */
+  let coercions = 0;
+  const spy = { toString() { coercions += 1; return 'test-profile'; }, valueOf() { coercions += 1; return 'test-profile'; }, [Symbol.toPrimitive]() { coercions += 1; return 'test-profile'; } };
+  const thrower = { toString() { throw new Error('coerced'); }, valueOf() { throw new Error('coerced'); } };
+  for (const [label, request] of [['null-prototype object', Object.create(null)], ['throwing coercion', thrower], ['coercion spy', spy], ['number', 42], ['boolean', true], ['symbol', Symbol('s')], ['function', () => 'test-profile'], ['array', ['test-profile']], ['plain object', {}], ['String object', new String('test-profile')]]) {
+    let r = null;
+    assert.doesNotThrow(() => { r = api.resolve(request); }, `R01: resolve(${label}) never throws`);
+    assert.equal(r.requestedId, null, `R01: resolve(${label}) normalizes requestedId to null`); assert.equal(r.effectiveId, 'chatgpt-reference'); assert.equal(r.reason, 'unknown-profile-fallback', `R01: resolve(${label}) reason`);
+    assert.equal(r.profile, api.reference());
+  }
+  assert.equal(coercions, 0, 'R01: no toString / valueOf / Symbol.toPrimitive hook of a malformed request is ever invoked');
+  assert.doesNotThrow(() => api.get(thrower), 'R01: get() is coercion-free too'); assert.equal(api.get(spy), null); assert.equal(coercions, 0);
 
   /* E. seal(): idempotent evidence token; late registration fails deterministically; read paths unaffected. */
   const token = api.seal();
@@ -1659,7 +1707,7 @@ function validateRichShellPresentationOwnership() {
   });
   Object.assign(seams, presentationProfileGlobals(seams));
   vm.runInContext([
-    extractFunction(rendererSource, 'activePresentationProfile'),
+    presentationAuthoritySource(),
     extractFunction(rendererSource, 'normalizeRole'),
     extractFunction(rendererSource, 'getAccessibleRoleLabel'),
     extractFunction(rendererSource, 'applyTurnAccessibility'),
@@ -1773,7 +1821,7 @@ function validatePersistedEditPresentationOwnership() {
   });
   Object.assign(seams, presentationProfileGlobals(seams));
   vm.runInContext([
-    extractFunction(rendererSource, 'activePresentationProfile'),
+    presentationAuthoritySource(),
     extractFunction(rendererSource, 'normalizeRole'),
     extractFunction(rendererSource, 'getAccessibleRoleLabel'),
     extractFunction(rendererSource, 'applyTurnAccessibility'),
@@ -1781,6 +1829,8 @@ function validatePersistedEditPresentationOwnership() {
     extractFunction(rendererSource, 'buildTurnShell'),
     extractFunction(rendererSource, 'buildMessageHost'),
     'function renderSemanticBody(bodyEl){ bodyEl.appendChild(document.createElement("p")); }',
+    /* M04 P1 T2: the real edit path reads the private collection slot (never a collector here). */
+    'let ACTIVE_CONTENT_COLLECTOR = null;',
     extractFunction(rendererSource, 'applyEditedMessageBody'),
     'this.api = { buildTurnShell, buildMessageHost, applyEditedMessageBody };',
   ].join('\n'), seams);
@@ -1827,7 +1877,7 @@ function validateAttachmentPresentationOwnership() {
   });
   Object.assign(seams, presentationProfileGlobals(seams));
   vm.runInContext([
-    extractFunction(rendererSource, 'activePresentationProfile'),
+    presentationAuthoritySource(),
     extractFunction(rendererSource, 'normalizeRole'),
     extractFunction(rendererSource, 'getAccessibleRoleLabel'),
     extractFunction(rendererSource, 'applyTurnAccessibility'),
@@ -1939,7 +1989,7 @@ function validateFinalRendererCssBoundary() {
   });
   Object.assign(seams, presentationProfileGlobals(seams));
   vm.runInContext([
-    extractFunction(rendererSource, 'activePresentationProfile'),
+    presentationAuthoritySource(),
     extractFunction(rendererSource, 'normalizeRole'),
     extractFunction(rendererSource, 'getAccessibleRoleLabel'),
     extractFunction(rendererSource, 'applyTurnAccessibility'),
@@ -2088,7 +2138,8 @@ function validateSemanticIndexFoundation() {
   assert.match(renderFn, /const semanticIndex = activeSemanticIndexModule\(\)\.createShellIndex\(\{/, 'render() builds the index through the installed module');
   assert.match(renderFn, /semanticConversation: renderMode === "canonical" \? semanticConversation : null/, 'the semantic conversation reaches the index only on the canonical (semantic-v3) path');
   /* S4B: the DecorationContribution lifecycle follows the index additively; both are result-owned. */
-  assert.match(renderFn, /semanticSource: semanticConversation \? "savedChatSnapshotV3" : "",\s*semanticIndex,\s*decorationContributions,\s*\};/, 'the index is returned additively as semanticIndex (followed by the S4B lifecycle)');
+  /* M04 P1 T2 (old -> new): the result tail gained `presentation: presentation.descriptor` after the lifecycle (additive). */
+  assert.match(renderFn, /semanticSource: semanticConversation \? "savedChatSnapshotV3" : "",\s*semanticIndex,\s*decorationContributions,\s*presentation: presentation\.descriptor,\s*\};/, 'the index is returned additively as semanticIndex (followed by the S4B lifecycle and the M04 presentation descriptor)');
   assert.match(extractFunction(rendererSource, 'activeSemanticIndexModule'), /no embedded index fallback exists/, 'no embedded index fallback');
   assert.match(rendererSource, /const TURN_PROJECTION_META = new WeakMap\(\);/, 'projection meta lives in a WeakMap beside the shells');
   assert.match(extractFunction(rendererSource, 'buildTurnShell'), /TURN_PROJECTION_META\.set\(turn, Object\.freeze\(\{/, 'buildTurnShell records frozen projection meta');
@@ -2224,9 +2275,12 @@ function validateSemanticIndexContentProjections() {
   assert.doesNotMatch(bodyFn, /renderBlocks\(parsed\.blocks/, 'H: the pre-IR adapter blocks are no longer what the ContentRenderer receives');
   assert.match(extractFunction(rendererSource, 'renderSemanticBlocks'), /content\.renderBlocks\(blocks, contentRenderContext\(bodyEl\)\)/, 'the semantic-v3 path reports through the same seam');
   assert.match(rendererSource, /let ACTIVE_CONTENT_COLLECTOR = null;/, 'private per-render collector');
-  assert.match(extractFunction(rendererSource, 'render'), /const collection = openContentCollector\(\);\s*try \{\s*return renderWithCollector\(inputRaw, options, collection\.collector\);\s*\} finally \{\s*collection\.restore\(\);\s*\}/, 'the collector is scoped to one render invocation and always restored');
+  /* M04 P1 T2 (old -> new): render() now also opens the presentation context before the collector and restores both in finally (collector first, then presentation). */
+  assert.match(extractFunction(rendererSource, 'render'), /const presentationContext = openPresentationContext\(resolution\.profile\);\s*(?:\/\*[\s\S]*?\*\/\s*)?const collection = openContentCollector\(\);\s*try \{\s*return renderWithCollector\(inputRaw, options, collection\.collector, presentation\);\s*\} finally \{\s*collection\.restore\(\);\s*presentationContext\.restore\(\);\s*\}/, 'the collector is scoped to one render invocation and always restored');
   assert.match(extractFunction(rendererSource, 'renderWithCollector'), /contentProjections: contentCollector\.projections,\s*contentBodies: contentCollector\.bodies,/, 'the collection reaches createShellIndex');
-  assert.match(extractFunction(rendererSource, 'contentRenderContext'), /if \(!collector\) return \{ document \};/, 'without an open render the ContentRenderer runs with no sink (later edits do not mutate a snapshot)');
+  /* M04 P1 T2 (old -> new): the no-collector context also names the active presentation profile; it still carries no sink. */
+  assert.match(extractFunction(rendererSource, 'contentRenderContext'), /if \(!collector\) return \{ document, presentationProfile \};/, 'without an open render the ContentRenderer runs with no sink (later edits do not mutate a snapshot)');
+  assert.match(extractFunction(rendererSource, 'contentRenderContext'), /const presentationProfile = activePresentationProfile\(\);/, 'M04 P1 T2: the content context always supplies the active presentation profile');
   assert.match(rendererSource, /function applyEditedMessageBody\(messageEl, role, text\)\{/, 'P: public applyEditedMessageBody signature unchanged');
   /* The pre-existing Reader text-leak cleanup (cleanReaderUserTextNodeLeaks) walks text nodes for its own accepted purpose; no projection code path may. */
   for (const name of ['contentRenderContext', 'markContentBody', 'openContentCollector', 'renderWithCollector', 'renderSemanticBody', 'renderSemanticBlocks']) assert.doesNotMatch(extractFunction(rendererSource, name), /querySelector|TreeWalker|createTreeWalker|textContent|innerHTML|outerHTML/, `O: no DOM scraping for projections in ${name}`);
@@ -2423,7 +2477,7 @@ function validateDecorationContributionLifecycle() {
   /* D / B (Renderer integration, static): one lifecycle per render bound to that render's index, returned additively; the Renderer registers nothing. */
   const renderFn = extractFunction(rendererSource, 'render') + '\n' + extractFunction(rendererSource, 'renderWithCollector');
   assert.match(renderFn, /const decorationContributions = activeDecorationContributionModule\(\)\.createLifecycle\(\{ semanticIndex \}\);/, 'B / C: the lifecycle is created through the installed module and bound to this render\'s index');
-  assert.match(renderFn, /semanticIndex,\s*decorationContributions,\s*\};/, 'B: returned additively as decorationContributions');
+  assert.match(renderFn, /semanticIndex,\s*decorationContributions,\s*presentation: presentation\.descriptor,\s*\};/, 'B: returned additively as decorationContributions (M04 P1 T2 appends the presentation descriptor)');
   assert.equal((rendererSource.match(/\.createLifecycle\(/g) || []).length, 1, 'B: exactly one lifecycle creation site per render'); assert.equal((rendererSource.match(/\.register\(/g) || []).length, 0, 'D: the Renderer registers no Product contribution');
   assert.match(extractFunction(rendererSource, 'activeDecorationContributionModule'), /no embedded decoration fallback exists/, 'missing module fails clearly');
   assert.doesNotMatch(rendererSource, /currentDecorations|globalRegistry|singletonController|DECORATION_REGISTRY|ACTIVE_DECORATION/, 'AA: no global current lifecycle in the Renderer');
