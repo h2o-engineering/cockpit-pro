@@ -221,11 +221,38 @@ function createRenderHarness() {
       richTurns: Array.isArray(snapshot?.richTurns || meta.richTurns) ? (snapshot.richTurns || meta.richTurns) : [],
     });
   };
+  /* M04 P2 T4: the fake Renderer mirrors the implemented presentation contract
+   * (T2): describePresentation() resolves a request to the effective profile
+   * (absent / '' -> default, unknown / malformed -> reference fallback) and the
+   * combined registry token exists only once the first render sealed the
+   * registries (null before). The stubbed buildReaderDOM below "renders" with
+   * the current Appearance preference exactly like the real seam. */
+  const PROFILES = { 'chatgpt-reference': '1.0.0', 'h2o-clean-reader': '1.0.0' };
+  const rendererState = { sealed: false, digest: '{"schema":"h2o.renderer.registry-digest","schemaVersion":1,"presentationProfile":"pp","contentRenderer":"cr"}' };
+  const describePresentation = (request) => {
+    const absent = request === undefined || request === null || request === '';
+    const known = typeof request === 'string' && Object.prototype.hasOwnProperty.call(PROFILES, request);
+    const effectiveId = known ? request : 'chatgpt-reference';
+    return Object.freeze({ schema: 'h2o.renderer.presentation-descriptor', schemaVersion: 1, requestedId: typeof request === 'string' && !absent ? request : null, effectiveId, profileVersion: PROFILES[effectiveId], reason: absent ? 'default' : (known ? 'explicit' : 'unknown-profile-fallback'), registryDigest: rendererState.sealed ? rendererState.digest : null });
+  };
   const chatRenderer = {
     normalizeInput(snapshot) { return snapshot; },
     isRenderEquivalent(left, right) { return rendererProjection(left) === rendererProjection(right); },
     render() { return null; },
+    describePresentation,
   };
+  /* M04 P2 T4: Appearance store stub - the Reader-owned preference, its
+   * subscribe/unsubscribe contract and the ready / change notifications. */
+  const appearanceState = { presentationProfile: 'chatgpt-reference', ready: false };
+  const appearanceSubscribers = new Set();
+  const appearanceEvents = [];
+  const appearance = {
+    get(key) { return key === 'presentationProfile' ? appearanceState.presentationProfile : undefined; },
+    isReady() { return appearanceState.ready; },
+    subscribe(fn) { appearanceSubscribers.add(fn); return () => appearanceSubscribers.delete(fn); },
+    notify(event) { appearanceEvents.push(event); for (const fn of Array.from(appearanceSubscribers)) fn(event); },
+  };
+  const renders = [];
   const W = {
     location,
     history,
@@ -233,6 +260,7 @@ function createRenderHarness() {
       studioHost,
       Studio: {
         chatRenderer,
+        appearance,
         SELECTORS: {
           ATTR: { TESTID: 'data-testid' },
           TESTIDS: { CONVERSATION_TURNS: 'conversation-turns' },
@@ -293,9 +321,14 @@ function createRenderHarness() {
       const turns = new FakeNode(`${root.snapshotId}-turns`);
       root.appendChild(turns);
       roots.push(root);
-      /* The Renderer result shape the real seam binds: root + read-only index + lifecycle. */
+      /* The Renderer result shape the real seam binds: root + read-only index + lifecycle
+       * + (M04 P2 T4) the frozen presentation descriptor of THIS render, resolved from
+       * the current Appearance preference; the first render seals the registries. */
+      rendererState.sealed = true;
+      const presentation = describePresentation(appearance.get('presentationProfile'));
+      renders.push({ snapshotId: root.snapshotId, effectiveId: presentation.effectiveId, requestedId: presentation.requestedId });
       const semanticIndex = Object.freeze({ schema: 'h2o.renderer.semantic-index', schemaVersion: 1, version: '0.2.0-m03-s4a', getConversation: () => ({ kind: 'conversation', target: root }), messages: () => [] });
-      sandbox.bindReaderSemanticIndex({ root, turnsEl: turns, scrollEl: turns, semanticIndex, decorationContributions: makeSpyLifecycle(root, semanticIndex) });
+      sandbox.bindReaderSemanticIndex({ root, turnsEl: turns, scrollEl: turns, semanticIndex, decorationContributions: makeSpyLifecycle(root, semanticIndex), presentation });
       studioHost.mount({ readerRoot: root, turnsEl: turns, scrollEl: turns, snapshot: snap });
       return root;
     },
@@ -321,13 +354,19 @@ function createRenderHarness() {
     'isReusableReaderMountCurrent',
     'collectRendererEditOverrides',
     'haveEquivalentRendererEditOverrides',
+    /* M04 P2 T4: the presentation-preference seams the reuse decision and the
+     * guarded refresh run through (extracted verbatim, like the rest). */
+    'getReaderPresentationPreference',
+    'isReaderPresentationCurrent',
     'canReuseReaderDOM',
+    'refreshReaderPresentation',
+    'subscribeReaderToPresentationPreference',
     /* Current-main collaborator called by renderReader (Item 10 publication
      * target maintenance); extracted verbatim so the real seam runs unstubbed. */
     'rememberPublicationTarget',
     'renderReader',
   ].map((name) => extractFunction(studioSource, name)).join('\n');
-  vm.runInContext(`${lifecycleFunctions}\nthis.renderReaderUnderTest = renderReader;\nthis.isCurrentReaderRootUnderTest = isCurrentReaderRoot;\nthis.leaveReaderUnderTest = studioHostUnmountPreservingRouteHash;`, sandbox);
+  vm.runInContext(`${lifecycleFunctions}\nthis.renderReaderUnderTest = renderReader;\nthis.isCurrentReaderRootUnderTest = isCurrentReaderRoot;\nthis.leaveReaderUnderTest = studioHostUnmountPreservingRouteHash;\nthis.subscribeReaderUnderTest = subscribeReaderToPresentationPreference;\nthis.refreshReaderPresentationUnderTest = refreshReaderPresentation;\nthis.isReaderPresentationCurrentUnderTest = isReaderPresentationCurrent;`, sandbox);
 
   return {
     renderReader: sandbox.renderReaderUnderTest,
@@ -356,6 +395,26 @@ function createRenderHarness() {
     getReaderSemanticIndex: sandbox.getReaderSemanticIndex,
     getReaderDecorationContributions: sandbox.getReaderDecorationContributions,
     bindReaderSemanticIndex: sandbox.bindReaderSemanticIndex,
+    /* M04 P2 T4 */
+    renders,
+    appearanceState,
+    appearanceEvents,
+    appearanceSubscribers,
+    rendererState,
+    subscribeReader: sandbox.subscribeReaderUnderTest,
+    refreshReaderPresentation: sandbox.refreshReaderPresentationUnderTest,
+    isReaderPresentationCurrent: sandbox.isReaderPresentationCurrentUnderTest,
+    setPresentationPreference(value) {
+      const previous = appearanceState.presentationProfile;
+      appearanceState.presentationProfile = value;
+      if (previous !== value) appearance.notify({ type: 'change', key: 'presentationProfile', value });
+    },
+    hydrate(value) {
+      if (value !== undefined) appearanceState.presentationProfile = value;
+      appearanceState.ready = true;
+      appearance.notify({ type: 'ready', key: null, value: null });
+    },
+    notifyUnrelated() { appearance.notify({ type: 'change', key: 'theme', value: 'light' }); },
   };
 }
 
@@ -802,7 +861,9 @@ await check('S4C: current-render bridge exposes the exact Semantic Index + Decor
   assert.equal(h.getReaderDecorationContributions(), lifecycle, 'unqualified call answers for the current render');
   assert.equal(h.getReaderSemanticIndex(root), lifecycle.semanticIndex, 'the index of the same render');
   assert.equal(h.getReaderDecorationContributions(new FakeNode('foreign')), null, 'B: wrong root -> null'); assert.equal(h.getReaderDecorationContributions(null), null); assert.equal(h.getReaderSemanticIndex(new FakeNode('foreign')), null);
-  assert.deepEqual(Object.keys(h.state.currentReaderRender), ['root', 'semanticIndex', 'decorationContributions'], 'one bounded current-render record'); assert.equal(Object.isFrozen(h.state.currentReaderRender), true);
+  /* M04 P2 T4: the binding also retains the render's presentation descriptor (was ['root', 'semanticIndex', 'decorationContributions']). */
+  assert.deepEqual(Object.keys(h.state.currentReaderRender), ['root', 'semanticIndex', 'decorationContributions', 'presentation'], 'one bounded current-render record'); assert.equal(Object.isFrozen(h.state.currentReaderRender), true);
+  assert.deepEqual({ effectiveId: h.state.currentReaderRender.presentation.effectiveId, digest: typeof h.state.currentReaderRender.presentation.registryDigest }, { effectiveId: 'chatgpt-reference', digest: 'string' }, 'the mounted descriptor of the default render');
   /* missing lifecycle on a result -> null, never manufactured */
   h.bindReaderSemanticIndex({ root, semanticIndex: lifecycle.semanticIndex });
   assert.equal(h.getReaderDecorationContributions(root), null, 'missing lifecycle -> null'); assert.equal(h.getReaderSemanticIndex(root), lifecycle.semanticIndex);
@@ -854,7 +915,142 @@ await check('mounted Reader listener retains only primitive snapshot identity', 
   assert.match(studioSource, /String\(currentSnap\.snapshotId \|\| ''\) === mountedSnapshotId/);
 });
 
+/* M04 P2 T4 (HDA decision C) - Reader consumption of the presentation
+ * preference through the real seams: render call, current binding, reuse
+ * predicate, one application-lifetime Appearance subscription and the guarded
+ * refresh. Every scenario runs the REAL renderReader / canReuseReaderDOM /
+ * refreshReaderPresentation / subscribeReaderToPresentationPreference. */
+const readerTurnaround = () => new Promise((resolve) => setTimeout(resolve, 0));
+const tick = async () => { for (let i = 0; i < 12; i += 1) await readerTurnaround(); };
+
+await check('T4: the render passes the current preference; the binding keeps the descriptor; the same effective configuration reuses (renderReader and refresh are no-ops)', async () => {
+  const h = createRenderHarness();
+  h.setLoad('A', makeSnapshot('A'));
+  h.subscribeReader();
+  assert.equal(typeof h.state.readerPresentationUnsubscribe, 'function', 'unsubscribe handle retained');
+  assert.equal(h.appearanceSubscribers.size, 1, 'exactly one application-lifetime subscription');
+  h.subscribeReader();
+  assert.equal(h.appearanceSubscribers.size, 1, 'a repeated install is a no-op');
+  await h.renderReader('A');
+  const root = h.readerEl.children[0];
+  assert.deepEqual(h.renders, [{ snapshotId: 'A', effectiveId: 'chatgpt-reference', requestedId: 'chatgpt-reference' }], 'the render received the current preference');
+  assert.equal(h.state.currentReaderRender.presentation.effectiveId, 'chatgpt-reference');
+  await h.renderReader('A');
+  assert.equal(h.readerEl.children[0], root, 'same effective configuration: root reused'); assert.equal(h.hostState.mountCount, 1); assert.equal(h.renders.length, 1);
+  h.refreshReaderPresentation();
+  await tick();
+  assert.equal(h.readerEl.children[0], root, 'refresh with the same configuration: no-op'); assert.equal(h.renders.length, 1);
+  h.notifyUnrelated();
+  await tick();
+  assert.equal(h.renders.length, 1, 'other Appearance keys never refresh the Reader');
+});
+
+await check('T4: a different effective configuration disposes and rebuilds; committed A -> B -> A rebuilds twice with no old-root cache', async () => {
+  const h = createRenderHarness();
+  h.setLoad('A', makeSnapshot('A'));
+  h.subscribeReader();
+  await h.renderReader('A');
+  const rootA1 = h.readerEl.children[0];
+  const lifeA1 = h.lifecycles[0];
+  h.setPresentationPreference('h2o-clean-reader');
+  await tick();
+  const rootB = h.readerEl.children[0];
+  assert.notEqual(rootB, rootA1, 'changed configuration rebuilds'); assert.equal(rootA1.isConnected, false, 'the old root is discarded');
+  assert.equal(lifeA1.disposeAllCalls, 1, 'the replaced render was disposed exactly once'); assert.equal(lifeA1.bindingAtDispose[0]?.decorationContributions, lifeA1, 'cleanup before forgetting');
+  assert.deepEqual(h.renders.map((r) => r.effectiveId), ['chatgpt-reference', 'h2o-clean-reader']);
+  assert.equal(h.state.currentReaderRender.presentation.effectiveId, 'h2o-clean-reader', 'the binding follows the new render');
+  assert.equal(h.hostState.mountCount, 2);
+  h.setPresentationPreference('chatgpt-reference');
+  await tick();
+  const rootA2 = h.readerEl.children[0];
+  assert.ok(rootA2 !== rootB && rootA2 !== rootA1, 'committed A -> B -> A: the second A is a fresh render, never the cached first root');
+  assert.deepEqual(h.renders.map((r) => r.effectiveId), ['chatgpt-reference', 'h2o-clean-reader', 'chatgpt-reference']); assert.equal(h.hostState.mountCount, 3);
+  assert.equal(h.lifecycles[1].disposeAllCalls, 1); assert.equal(h.lifecycles[2].disposeAllCalls, 0); assert.equal(h.readerEl.children.length, 1);
+});
+
+await check('T4: rapid A -> B -> A before B commits keeps A (the outstanding render reads the preference at its decision); a stale B never installs', async () => {
+  const h = createRenderHarness();
+  h.setLoad('A', makeSnapshot('A'));
+  h.subscribeReader();
+  await h.renderReader('A');
+  const root = h.readerEl.children[0];
+  h.setPresentationPreference('h2o-clean-reader');   /* refresh starts and awaits its load */
+  h.setPresentationPreference('chatgpt-reference'); /* bounced back before B committed */
+  await tick();
+  assert.equal(h.readerEl.children[0], root, 'A stays mounted'); assert.equal(h.hostState.mountCount, 1, 'no rebuild');
+  assert.deepEqual(h.renders.map((r) => r.effectiveId), ['chatgpt-reference'], 'B was never rendered');
+  assert.equal(h.state.currentReaderRender.presentation.effectiveId, 'chatgpt-reference');
+  /* A -> B -> unknown while B is outstanding: the unknown choice resolves to
+   * the mounted reference configuration, so nothing rebuilds and B never installs. */
+  h.setPresentationPreference('h2o-clean-reader');
+  h.setPresentationPreference('unknown-profile');
+  await tick();
+  assert.deepEqual(h.renders.map((r) => r.effectiveId), ['chatgpt-reference'], 'an unknown choice that resolves to the mounted configuration reuses; the outstanding B never installs');
+  assert.equal(h.hostState.mountCount, 1); assert.equal(h.readerEl.children[0], root);
+  /* A -> B -> C (all distinct) while B is outstanding: only C renders. */
+  h.setPresentationPreference('h2o-clean-reader');
+  h.setPresentationPreference('chatgpt-reference');
+  h.setPresentationPreference('h2o-clean-reader');
+  await tick();
+  assert.deepEqual(h.renders.map((r) => r.effectiveId), ['chatgpt-reference', 'h2o-clean-reader'], 'the final selection renders once');
+  assert.equal(h.hostState.mountCount, 2); assert.equal(h.state.currentReaderRender.presentation.effectiveId, 'h2o-clean-reader');
+});
+
+await check('T4: hydration to the same effective profile never rebuilds; hydration to a different profile is a guarded refresh; a pre-seal null token never equals a mounted descriptor', async () => {
+  const h = createRenderHarness();
+  h.setLoad('A', makeSnapshot('A'));
+  h.subscribeReader();
+  /* unsealed registries: nothing mounted -> never "current" */
+  assert.equal(h.isReaderPresentationCurrent('chatgpt-reference'), false, 'no mounted render -> not current');
+  await h.renderReader('A');
+  const root = h.readerEl.children[0];
+  h.hydrate('chatgpt-reference');
+  await tick();
+  assert.equal(h.readerEl.children[0], root, 'ready with the same effective profile: no rebuild'); assert.equal(h.hostState.mountCount, 1);
+  h.rendererState.sealed = false; /* a describePresentation() answer without a sealed token */
+  assert.equal(h.isReaderPresentationCurrent('chatgpt-reference'), false, 'pre-seal null digest never equals the mounted sealed descriptor');
+  h.rendererState.sealed = true;
+  assert.equal(h.isReaderPresentationCurrent('chatgpt-reference'), true); assert.equal(h.isReaderPresentationCurrent(''), true, 'absent request resolves to the mounted default'); assert.equal(h.isReaderPresentationCurrent('no-such-profile'), true, 'unknown request resolves to the mounted reference');
+  assert.equal(h.isReaderPresentationCurrent('h2o-clean-reader'), false);
+  const h2 = createRenderHarness();
+  h2.setLoad('A', makeSnapshot('A'));
+  h2.subscribeReader();
+  await h2.renderReader('A');
+  const first = h2.readerEl.children[0];
+  h2.hydrate('h2o-clean-reader');
+  await tick();
+  assert.notEqual(h2.readerEl.children[0], first, 'ready that hydrated a different profile refreshes the open Reader'); assert.equal(h2.renders[1].effectiveId, 'h2o-clean-reader'); assert.equal(h2.hostState.mountCount, 2);
+});
+
+await check('T4: route leave and stale continuations keep the existing guards authoritative; no Reader means no refresh', async () => {
+  const h = createRenderHarness();
+  h.setLoad('A', makeSnapshot('A'));
+  h.subscribeReader();
+  h.setPresentationPreference('h2o-clean-reader');
+  await tick();
+  assert.equal(h.renders.length, 0, 'no open Reader: a preference change renders nothing');
+  await h.renderReader('A');
+  assert.equal(h.renders[0].effectiveId, 'h2o-clean-reader', 'the first render used the preference in force');
+  h.leaveReader('test:leave');
+  assert.equal(h.state.currentReaderRender, null);
+  h.setPresentationPreference('chatgpt-reference');
+  await tick();
+  assert.equal(h.renders.length, 1, 'after route leave a preference change renders nothing'); assert.equal(h.readerEl.children.length, 0);
+  /* stale continuation: a refresh render superseded by a route leave never installs */
+  await h.renderReader('A');
+  const root = h.readerEl.children[0];
+  h.setPresentationPreference('h2o-clean-reader'); /* refresh in flight */
+  h.leaveReader('test:leave-during-refresh');
+  await tick();
+  assert.equal(h.readerEl.children.length, 0, 'the superseded refresh installed nothing'); assert.equal(h.state.currentReaderRender, null); assert.equal(root.isConnected, false);
+  assert.equal(h.renders.length, 2, 'no render happened after the leave');
+  assert.equal(typeof h.state.readerPresentationUnsubscribe, 'function');
+  h.state.readerPresentationUnsubscribe();
+  assert.equal(h.appearanceSubscribers.size, 0, 'the retained handle unsubscribes');
+});
+
 const total = PASS.length + FAIL.length;
+
 console.log(`\n[validate-studio-renderer-lifecycle-idempotence] ${PASS.length}/${total} passed`);
 for (const label of PASS) console.log(`  ✓ ${label}`);
 if (FAIL.length) {

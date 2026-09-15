@@ -286,6 +286,43 @@
     return btn;
   }
 
+  /* M04 P2 T4 (HDA decision D) — Presentation row. The options are the
+   * Renderer's registered profiles, read from
+   * H2O.Studio.Renderer.presentationProfile.list() HERE, at row construction
+   * (the panel builds its controls lazily on first open; this module itself
+   * installs before the Renderer registry scripts evaluate). Only profile.id
+   * (value) and profile.displayName (label) are used; the panel registers,
+   * validates and resolves nothing. When the registry is unexpectedly
+   * unavailable the row is omitted and the rest of the panel is untouched. */
+  function makePresentationRow() {
+    var options = [];
+    try {
+      var registry = H2O.Studio.Renderer && H2O.Studio.Renderer.presentationProfile;
+      var profiles = registry && typeof registry.list === 'function' ? registry.list() : null;
+      for (var i = 0; profiles && i < profiles.length; i += 1) {
+        var profile = profiles[i];
+        if (!profile || typeof profile.id !== 'string' || !profile.id) continue;
+        options.push({
+          value: profile.id,
+          label: typeof profile.displayName === 'string' && profile.displayName ? profile.displayName : profile.id,
+        });
+      }
+    } catch (_) { options = []; }
+    if (!options.length) return null;
+    var segmented = makeSegmented({
+      logicalKey: 'presentationProfile',
+      label: 'Presentation',
+      options: options,
+    });
+    return el('div', { class: 'wbAppearanceRow' }, [
+      el('span', { class: 'wbAppearanceRowText' }, [
+        el('span', { class: 'wbAppearanceRowLabel' }, 'Presentation'),
+        el('span', { class: 'wbAppearanceRowHint' }, 'Reader presentation profile'),
+      ]),
+      segmented,
+    ]);
+  }
+
   function makeSection(title, body) {
     return el('section', { class: 'wbAppearanceSection' }, [
       el('h3', { class: 'wbAppearanceSectionTitle' }, title),
@@ -366,6 +403,10 @@
       widthStepper,
     ]);
 
+    /* READING — presentation profile (M04 P2 T4; omitted when unavailable) */
+    var presentationRow = makePresentationRow();
+    var readingRows = presentationRow ? [fontSizeRow, widthRow, presentationRow] : [fontSizeRow, widthRow];
+
     /* OPTIONS */
     var foldersToggle = makeToggle({
       logicalKey: 'showFolders',
@@ -399,7 +440,7 @@
     var body = el('div', { class: 'wbAppearanceBody' }, [
       makeSection('Theme', themeRow),
       makeSection('Typography', typographyRow),
-      makeSection('Reading', [fontSizeRow, widthRow]),
+      makeSection('Reading', readingRows),
       makeSection('Options', optionsChildren),
     ]);
 

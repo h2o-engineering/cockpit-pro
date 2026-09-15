@@ -113,6 +113,14 @@
       case 'plainText':
       case 'alwaysOnTop':
         return value === true || value === 'true' || value === 1;
+      case 'presentationProfile':
+        /* M04 P2 T4 (HDA decision D): a string is preserved exactly — an
+         * unknown profile id or '' included — because the Renderer owns the
+         * profile domain and resolves the effective profile / fallback per
+         * render; nothing is validated or resolved here and no effective
+         * fallback is ever persisted. Any non-string means the default; the
+         * typeof test invokes no String()/toString/valueOf conversion. */
+        return typeof value === 'string' ? value : DEFAULTS.presentationProfile;
       default:
         return value;
     }

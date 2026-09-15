@@ -1,5 +1,5 @@
 /*
- * @version 1.0.0
+ * @version 1.0.1
  * H2O Studio Renderer — h2o-clean-reader PresentationProfile stylesheet.
  *
  * Owner:   L-STUDIO-RENDERER
@@ -73,176 +73,11 @@
   box-shadow:inset 3px 0 0 var(--wb-focus-ring);
 }
 
-/* ── Canonical content body ──────────────────────────────────────────── */
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody{
-  font-size:1.0625em;
-  line-height:1.7;
-  color:var(--wb-text);
-  overflow-wrap:anywhere;
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody p{
-  margin:0 0 .8em;
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody p:last-child{
-  margin-bottom:0;
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody :where(h1, h2, h3, h4, h5, h6){
-  margin:1.15em 0 .45em;
-  line-height:1.3;
-  font-weight:600;
-  letter-spacing:-.01em;
-  color:var(--wb-text);
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody h1{ font-size:1.35em; }
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody h2{ font-size:1.2em; }
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody h3{ font-size:1.08em; }
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody :where(h4, h5, h6){ font-size:1em; }
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody :where(ul, ol){
-  margin:0 0 .8em;
-  padding-left:1.5em;
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody ul{ list-style:disc; }
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody ol{ list-style:decimal; }
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody li{
-  margin:.2em 0;
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody li > p{
-  margin:0;
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody blockquote{
-  margin:.8em 0;
-  padding:.1em 0 .1em 1em;
-  border-left:2px solid var(--wb-border-strong);
-  color:var(--wb-text-soft);
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody hr{
-  margin:1.4em 0;
-  border:0;
-  border-top:1px solid var(--wb-border);
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody table{
-  margin:.8em 0;
-  border-collapse:collapse;
-  font-size:.95em;
-  max-width:100%;
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody :where(th, td){
-  padding:.4em .75em;
-  border:1px solid var(--wb-border);
-  text-align:left;
-  vertical-align:top;
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody th{
-  font-weight:600;
-  background:var(--wb-surface-soft);
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody a{
-  color:var(--wb-focus);
-  text-decoration:underline;
-  text-underline-offset:2px;
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody a:hover{
-  color:var(--wb-text);
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody img{
-  max-width:100%;
-  height:auto;
-  border-radius:var(--wb-radius-sm);
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody code{
-  font-family:var(--wb-ff-mono);
-  font-size:.92em;
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody :not(pre) > code{
-  padding:.1em .35em;
-  border:1px solid var(--wb-border);
-  border-radius:var(--wb-radius-sm);
-  background:var(--wb-surface-soft);
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody pre{
-  margin:0;
-  overflow:auto;
-  padding:.8em 1em;
-  border:1px solid var(--wb-code-border);
-  border-radius:var(--wb-radius-sm);
-  background:var(--wb-code-bg);
-  font-family:var(--wb-ff-mono);
-  font-size:.82em;
-  line-height:1.6;
-}
-
-/* ── Code block content hooks (ContentRenderer codeBlock) ────────────── */
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .h2oCleanCode{
-  margin:.9em 0;
-  overflow:hidden;
-  border:1px solid var(--wb-code-border);
-  border-radius:var(--wb-radius-md);
-  background:var(--wb-code-bg);
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .h2oCleanCode > pre{
-  margin:0;
-  border:0;
-  border-radius:0;
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .h2oCleanCodeLang{
-  padding:.4em 1em;
-  border-bottom:1px solid var(--wb-code-border);
-  font-family:var(--wb-ff-mono);
-  font-size:.72em;
-  line-height:1.4;
-  letter-spacing:.06em;
-  text-transform:uppercase;
-  color:var(--wb-dim);
-}
-
-/* ── Rich replay: H2O shells around captured content ─────────────────── */
-/* The H2O user bubble is the same quiet block as the canonical user host.
-   The user host sits at the column end and carries the width cap (its
-   containing block, the turn, is definite); the bubble fills the host, so no
-   percentage resolves against a shrink-wrapped box. The assistant host spans
-   the column. */
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot .cgTurn--user [data-message-author-role="user"]{
-  max-width:min(var(--wb-user-w), 44rem);
-  margin-left:auto;
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot .cgBubble--user{
-  width:fit-content;
-  max-width:100%;
-  margin-left:auto;
-  padding:.6em 1em;
-  border:1px solid var(--wb-border);
-  border-radius:var(--wb-radius-md);
-  background:var(--wb-surface-soft);
-}
-
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot [data-message-author-role="assistant"]{
-  width:100%;
-  margin-right:auto;
-}
-
-/* ── Rich replay: captured content element rules (see the limitation) ── */
+/* ── Content element rules (both modes) ──────────────────────────────── */
+/* The transcript root carries wbRichRoot in both render modes (Renderer
+   compatibility vocabulary), so one element rule set covers canonical bodies
+   and captured provider content alike; canonical-only refinements follow and
+   win ties by source order. */
 :where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot :where(p, li, blockquote){
   line-height:1.7;
 }
@@ -256,6 +91,7 @@
   line-height:1.3;
   font-weight:600;
   letter-spacing:-.01em;
+  color:var(--wb-text);
 }
 
 :where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot h1{ font-size:1.35em; }
@@ -271,6 +107,14 @@
 :where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot ul{ list-style:disc; }
 :where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot ol{ list-style:decimal; }
 
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot li{
+  margin:.2em 0;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot li > p{
+  margin:0;
+}
+
 :where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot :where(strong, b){
   font-weight:600;
 }
@@ -280,6 +124,12 @@
   padding:.1em 0 .1em 1em;
   border-left:2px solid var(--wb-border-strong);
   color:var(--wb-text-soft);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot hr{
+  margin:1.4em 0;
+  border:0;
+  border-top:1px solid var(--wb-border);
 }
 
 :where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot table{
@@ -296,10 +146,25 @@
   vertical-align:top;
 }
 
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot th{
+  font-weight:600;
+  background:var(--wb-surface-soft);
+}
+
 :where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot a{
   color:var(--wb-focus);
   text-decoration:underline;
   text-underline-offset:2px;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot a:hover{
+  color:var(--wb-text);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot :where(img, video, canvas, svg){
+  max-width:100%;
+  height:auto;
+  border-radius:var(--wb-radius-sm);
 }
 
 :where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot code{
@@ -326,9 +191,100 @@
   line-height:1.6;
 }
 
-:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot :where(img, video, canvas, svg){
+/* ── Canonical content body ──────────────────────────────────────────── */
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody{
+  font-size:1.0625em;
+  line-height:1.7;
+  color:var(--wb-text);
+  overflow-wrap:anywhere;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody p:last-child{
+  margin-bottom:0;
+}
+
+/* ── Code block content hooks (ContentRenderer codeBlock) ────────────── */
+/* The panel owns the frame; its pre loses the standalone pre frame. */
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .h2oCleanCode{
+  margin:.9em 0;
+  overflow:hidden;
+  border:1px solid var(--wb-code-border);
+  border-radius:var(--wb-radius-md);
+  background:var(--wb-code-bg);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .h2oCleanCode > pre{
+  margin:0;
+  border:0;
+  border-radius:0;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .h2oCleanCodeLang{
+  padding:.4em 1em;
+  border-bottom:1px solid var(--wb-code-border);
+  font-family:var(--wb-ff-mono);
+  font-size:.72em;
+  line-height:1.4;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+  color:var(--wb-dim);
+}
+
+/* ── User image attachments (H2O attachment grid / card, both modes) ─── */
+/* Renderer-projected user attachments sit before the user host at the column
+   end: a compact grid of square cards on the shared surface tokens. */
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgUserAttachmentGrid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit, minmax(96px, 96px));
+  justify-content:end;
+  gap:8px;
+  width:fit-content;
+  max-width:min(100%, calc(96px * 3 + 16px));
+  margin:0 0 .5em auto;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgUserAttachmentCard{
+  width:96px;
+  height:96px;
+  overflow:hidden;
+  border:1px solid var(--wb-border);
+  border-radius:var(--wb-radius-md);
+  background:var(--wb-surface-soft);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgUserAttachmentCard img{
+  display:block;
+  width:100%;
+  height:100%;
+  max-width:none;
+  object-fit:cover;
+  border-radius:inherit;
+}
+
+/* ── Rich replay: H2O shells around captured content ─────────────────── */
+/* The H2O user bubble is the same quiet block as the canonical user host.
+   The user host sits at the column end and carries the width cap (its
+   containing block, the turn, is definite); the bubble fills the host, so no
+   percentage resolves against a shrink-wrapped box. The assistant host spans
+   the column. */
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot .cgTurn--user [data-message-author-role="user"]{
+  max-width:min(var(--wb-user-w), 44rem);
+  margin-left:auto;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot .cgBubble--user{
+  width:fit-content;
   max-width:100%;
-  height:auto;
+  margin-left:auto;
+  padding:.6em 1em;
+  border:1px solid var(--wb-border);
+  border-radius:var(--wb-radius-md);
+  background:var(--wb-surface-soft);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot [data-message-author-role="assistant"]{
+  width:100%;
+  margin-right:auto;
 }
 
 /* ── Narrow viewport ─────────────────────────────────────────────────── */

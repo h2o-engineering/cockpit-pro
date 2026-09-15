@@ -508,7 +508,7 @@ check('M04 P2 T3: h2o-clean-reader registers through public define/register duri
   const profile = pp.get('h2o-clean-reader');
   assert.equal(profile, pp.resolve('h2o-clean-reader').profile); assert.equal(pp.resolve('h2o-clean-reader').reason, 'explicit');
   assert.deepEqual({ id: profile.id, owner: profile.owner, version: profile.version, displayName: profile.displayName, provider: profile.provider, modes: [...profile.modes], stylesheet: { ...profile.stylesheet } },
-    { id: 'h2o-clean-reader', owner: 'L-STUDIO-RENDERER', version: '1.0.0', displayName: 'H2O Clean Reader', provider: null, modes: ['canonical', 'rich'], stylesheet: { href: CLEAN_READER_CSS_REL, version: '1.0.0' } }, 'B: governed metadata');
+    { id: 'h2o-clean-reader', owner: 'L-STUDIO-RENDERER', version: '1.0.0', displayName: 'H2O Clean Reader', provider: null, modes: ['canonical', 'rich'], stylesheet: { href: CLEAN_READER_CSS_REL, version: '1.0.1' } }, 'B: governed metadata'); /* stylesheet 1.0.0 -> 1.0.1: M04 P2 T4 attachment-card rules */
   for (const mode of ['canonical', 'rich']) {
     assert.deepEqual([...profile.transcriptClasses(mode)], [], `C: empty transcript hook (${mode})`);
     for (const role of ['user', 'assistant', 'system', 'tool']) {

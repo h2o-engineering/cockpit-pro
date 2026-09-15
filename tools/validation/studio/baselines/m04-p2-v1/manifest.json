@@ -1,0 +1,261 @@
+{
+  "schema": "h2o.renderer.visual-regression-baseline",
+  "schemaVersion": 1,
+  "matrixVersion": "m04-p2-v1",
+  "fixtureVersion": "renderer-visual-matrix.v1",
+  "profile": "h2o-clean-reader",
+  "defaultMatrixVersion": "m03-s5a-v1",
+  "viewports": {
+    "wide": {
+      "width": 1280,
+      "baseHeight": 900
+    },
+    "narrow": {
+      "width": 480,
+      "baseHeight": 900
+    }
+  },
+  "themes": {
+    "dark": {
+      "htmlAttribute": "dark",
+      "colorScheme": "dark"
+    },
+    "light": {
+      "htmlAttribute": "light",
+      "colorScheme": "light"
+    }
+  },
+  "context": {
+    "deviceScaleFactor": 1,
+    "locale": "en-US",
+    "timezoneId": "UTC",
+    "reducedMotion": "reduce"
+  },
+  "cells": [
+    "wide-dark",
+    "wide-light",
+    "narrow-dark",
+    "narrow-light"
+  ],
+  "environment": {
+    "browserFamily": "chromium",
+    "browserVersion": "147.0.7727.15",
+    "browserExecutableName": "Google Chrome for Testing",
+    "browserBuildDir": "chromium-1217",
+    "playwrightVersion": "1.59.1",
+    "platform": "darwin",
+    "arch": "arm64",
+    "osRelease": "25.6.0",
+    "osMajor": "25"
+  },
+  "images": {
+    "wide-dark": {
+      "file": "wide-dark.png",
+      "width": 1280,
+      "height": 2664,
+      "sha256": "f1c240f404c58fef2399ab1aab423827222f5f41202b87b49f96cde03d04d2be",
+      "fingerprint": [
+        {
+          "label": "canonical",
+          "renderMode": "canonical",
+          "semanticSource": "",
+          "messageCount": 6,
+          "roles": {
+            "user": 2,
+            "assistant": 2,
+            "system": 1,
+            "tool": 1
+          },
+          "index": {
+            "conversation": 1,
+            "turns": 6,
+            "messages": 6,
+            "blocks": 89,
+            "texts": 56
+          },
+          "contributions": 0,
+          "outerHtmlSha256": "53c417cdae8b6b5cad3fac3e5b8c5fa1c9d863a5a621d769f0c436078eeeb001",
+          "textContentSha256": "f95010df5473b559a25706cdd9bc106542ef048a91a6583b51ad1c208f452360"
+        },
+        {
+          "label": "rich",
+          "renderMode": "rich",
+          "semanticSource": "",
+          "messageCount": 4,
+          "roles": {
+            "user": 2,
+            "assistant": 2,
+            "system": 0,
+            "tool": 0
+          },
+          "index": {
+            "conversation": 1,
+            "turns": 4,
+            "messages": 4,
+            "blocks": 0,
+            "texts": 0
+          },
+          "contributions": 0,
+          "outerHtmlSha256": "3f645971ee928d14f92a298f1783b35e008bd2714e5b1800bddb10e807b5a0b0",
+          "textContentSha256": "60aa3704e5e321fa81c5207aa2edebc68be75672c3095cac007636b5194a2e30"
+        }
+      ]
+    },
+    "wide-light": {
+      "file": "wide-light.png",
+      "width": 1280,
+      "height": 2664,
+      "sha256": "63203ce84c3056e44ac268e1e3e170c7e12fe3abeb4f42b75bfdbacb395a0df6",
+      "fingerprint": [
+        {
+          "label": "canonical",
+          "renderMode": "canonical",
+          "semanticSource": "",
+          "messageCount": 6,
+          "roles": {
+            "user": 2,
+            "assistant": 2,
+            "system": 1,
+            "tool": 1
+          },
+          "index": {
+            "conversation": 1,
+            "turns": 6,
+            "messages": 6,
+            "blocks": 89,
+            "texts": 56
+          },
+          "contributions": 0,
+          "outerHtmlSha256": "53c417cdae8b6b5cad3fac3e5b8c5fa1c9d863a5a621d769f0c436078eeeb001",
+          "textContentSha256": "f95010df5473b559a25706cdd9bc106542ef048a91a6583b51ad1c208f452360"
+        },
+        {
+          "label": "rich",
+          "renderMode": "rich",
+          "semanticSource": "",
+          "messageCount": 4,
+          "roles": {
+            "user": 2,
+            "assistant": 2,
+            "system": 0,
+            "tool": 0
+          },
+          "index": {
+            "conversation": 1,
+            "turns": 4,
+            "messages": 4,
+            "blocks": 0,
+            "texts": 0
+          },
+          "contributions": 0,
+          "outerHtmlSha256": "3f645971ee928d14f92a298f1783b35e008bd2714e5b1800bddb10e807b5a0b0",
+          "textContentSha256": "60aa3704e5e321fa81c5207aa2edebc68be75672c3095cac007636b5194a2e30"
+        }
+      ]
+    },
+    "narrow-dark": {
+      "file": "narrow-dark.png",
+      "width": 480,
+      "height": 2773,
+      "sha256": "52913c4a83ca18879041649ccb2739b4de8d35dfb1f6e42987599792a0aafb2c",
+      "fingerprint": [
+        {
+          "label": "canonical",
+          "renderMode": "canonical",
+          "semanticSource": "",
+          "messageCount": 6,
+          "roles": {
+            "user": 2,
+            "assistant": 2,
+            "system": 1,
+            "tool": 1
+          },
+          "index": {
+            "conversation": 1,
+            "turns": 6,
+            "messages": 6,
+            "blocks": 89,
+            "texts": 56
+          },
+          "contributions": 0,
+          "outerHtmlSha256": "53c417cdae8b6b5cad3fac3e5b8c5fa1c9d863a5a621d769f0c436078eeeb001",
+          "textContentSha256": "f95010df5473b559a25706cdd9bc106542ef048a91a6583b51ad1c208f452360"
+        },
+        {
+          "label": "rich",
+          "renderMode": "rich",
+          "semanticSource": "",
+          "messageCount": 4,
+          "roles": {
+            "user": 2,
+            "assistant": 2,
+            "system": 0,
+            "tool": 0
+          },
+          "index": {
+            "conversation": 1,
+            "turns": 4,
+            "messages": 4,
+            "blocks": 0,
+            "texts": 0
+          },
+          "contributions": 0,
+          "outerHtmlSha256": "3f645971ee928d14f92a298f1783b35e008bd2714e5b1800bddb10e807b5a0b0",
+          "textContentSha256": "60aa3704e5e321fa81c5207aa2edebc68be75672c3095cac007636b5194a2e30"
+        }
+      ]
+    },
+    "narrow-light": {
+      "file": "narrow-light.png",
+      "width": 480,
+      "height": 2773,
+      "sha256": "5f2ce89c70238d8edc698ee10c54655f7183012322b8abb447e3c3de69fff6f6",
+      "fingerprint": [
+        {
+          "label": "canonical",
+          "renderMode": "canonical",
+          "semanticSource": "",
+          "messageCount": 6,
+          "roles": {
+            "user": 2,
+            "assistant": 2,
+            "system": 1,
+            "tool": 1
+          },
+          "index": {
+            "conversation": 1,
+            "turns": 6,
+            "messages": 6,
+            "blocks": 89,
+            "texts": 56
+          },
+          "contributions": 0,
+          "outerHtmlSha256": "53c417cdae8b6b5cad3fac3e5b8c5fa1c9d863a5a621d769f0c436078eeeb001",
+          "textContentSha256": "f95010df5473b559a25706cdd9bc106542ef048a91a6583b51ad1c208f452360"
+        },
+        {
+          "label": "rich",
+          "renderMode": "rich",
+          "semanticSource": "",
+          "messageCount": 4,
+          "roles": {
+            "user": 2,
+            "assistant": 2,
+            "system": 0,
+            "tool": 0
+          },
+          "index": {
+            "conversation": 1,
+            "turns": 4,
+            "messages": 4,
+            "blocks": 0,
+            "texts": 0
+          },
+          "contributions": 0,
+          "outerHtmlSha256": "3f645971ee928d14f92a298f1783b35e008bd2714e5b1800bddb10e807b5a0b0",
+          "textContentSha256": "60aa3704e5e321fa81c5207aa2edebc68be75672c3095cac007636b5194a2e30"
+        }
+      ]
+    }
+  }
+}

@@ -100,6 +100,25 @@ Clean Reader element rules only. Provider-fidelity presentation of captured
 markup is not promised by this profile; `chatgpt-reference` stays the
 provider-fidelity presentation and is unchanged.
 
+Stylesheet `1.0.1` (M04 P2 T4): the H2O user attachment grid / card is skinned
+(structural `cgUserAttachmentGrid` / `cgUserAttachmentCard` selectors), and the
+content element rules are keyed once on `wbRichRoot` for both render modes —
+the transcript root carries that compatibility class in canonical mode too —
+with the canonical code-panel hooks ordered after them so they win ties.
+
+## Consumers (Reader and Appearance, M04 P2 T4)
+
+The Reader passes the Appearance preference `presentationProfile` (Reader-owned
+consumption preference, default `chatgpt-reference`, any string preserved
+verbatim by the store) into every `render()` as `options.presentationProfile`,
+retains `result.presentation` with its current-render binding, and reuses a
+mounted transcript only when `describePresentation(currentPreference)` agrees
+with the mounted descriptor on `effectiveId`, `profileVersion` and
+`registryDigest` (a pre-seal `null` token never matches). The Appearance panel
+enumerates `presentationProfile.list()` at row construction (`id` → value,
+`displayName` → label) and never registers or resolves profiles. The Renderer
+keeps the profile domain, resolution and fallback authority.
+
 ## Per-render selection and binding (chat-renderer.studio.js)
 
 `render(input, options)` seals both registries, resolves

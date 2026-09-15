@@ -150,6 +150,8 @@ const state = {
   /* S4C: the currently mounted Reader render's { root, semanticIndex, decorationContributions } (read-only bridge; disposed + cleared on unmount). */
   currentReaderRender: null,
   currentReaderNavigationTarget: null,
+  /* M04 P2 T4: the one application-lifetime Appearance subscription that refreshes an open Reader when the presentation preference changes (unsubscribe handle only; never DOM). */
+  readerPresentationUnsubscribe: null,
   titleStateByChat: {},
   interfaceMetaByChat: {},
 };
@@ -367,11 +369,16 @@ function bindReaderSemanticIndex(rendererResult){
   const root = rendererResult?.root;
   const semanticIndex = rendererResult?.semanticIndex;
   const decorationContributions = rendererResult?.decorationContributions;
+  const presentation = rendererResult?.presentation;
   state.currentReaderRender = root && semanticIndex && typeof semanticIndex === "object"
     ? Object.freeze({
       root,
       semanticIndex,
       decorationContributions: decorationContributions && typeof decorationContributions === "object" ? decorationContributions : null,
+      /* M04 P2 T4: the render's frozen presentation descriptor (effective
+       * profile id, profile version, sealed registry token) - the mounted
+       * configuration the reuse decision compares against. */
+      presentation: presentation && typeof presentation === "object" ? presentation : null,
     })
     : null;
 }
@@ -621,6 +628,37 @@ function haveEquivalentRendererEditOverrides(leftRaw, rightRaw){
   return true;
 }
 
+/* M04 P2 T4 (HDA decision C) - Reader consumption of the presentation
+ * preference. Reader owns the preference's meaning (Appearance
+ * `presentationProfile`, default chatgpt-reference, any string preserved);
+ * the Renderer owns the profile domain and resolves the effective profile and
+ * its fallback per render. Reader passes the current preference into each
+ * render, keeps the render's frozen descriptor with the current-render
+ * binding, and reuses a mounted transcript only when the configuration the
+ * current preference resolves to NOW is the mounted one. */
+function getReaderPresentationPreference(){
+  const appearance = W.H2O?.Studio?.appearance;
+  return typeof appearance?.get === "function" ? appearance.get("presentationProfile") : undefined;
+}
+
+function isReaderPresentationCurrent(request){
+  const mounted = state.currentReaderRender?.presentation;
+  const renderer = getStudioChatRenderer();
+  if (!mounted || typeof renderer.describePresentation !== "function") return false;
+  let expected = null;
+  try { expected = renderer.describePresentation(request); } catch { return false; }
+  /* The mounted descriptor carries the sealed registry token; a pre-seal
+   * (null) token can never equal it, so it never justifies reuse. */
+  return !!(
+    expected
+    && typeof mounted.registryDigest === "string"
+    && mounted.registryDigest
+    && mounted.registryDigest === expected.registryDigest
+    && mounted.effectiveId === expected.effectiveId
+    && mounted.profileVersion === expected.profileVersion
+  );
+}
+
 function canReuseReaderDOM(options){
   options = options && typeof options === "object" ? options : {};
   const renderer = getStudioChatRenderer();
@@ -632,7 +670,34 @@ function canReuseReaderDOM(options){
     && isReusableReaderMountCurrent(options.mount, options.previousSnapshot)
     && renderer.isRenderEquivalent(options.previousSnapshot, options.rendererInput)
     && haveEquivalentRendererEditOverrides(options.previousEditOverrides, options.nextEditOverrides)
+    && isReaderPresentationCurrent(options.presentationProfile)
   );
+}
+
+/* Guarded refresh of an open Reader after the preference changed or hydrated:
+ * only on the Reader route with a mounted current render, and only when the
+ * mounted configuration is no longer the one the preference resolves to. It
+ * goes through the existing renderReader path, so the render token, the
+ * reuse decision and the unmount/disposal paths stay authoritative; an
+ * outstanding render reads the preference at its own decision point. */
+function refreshReaderPresentation(){
+  if (state.activeRoute !== "reader" || !state.currentReaderRender) return;
+  const snapshotId = String(state.currentReaderSnapshot?.snapshotId || "").trim();
+  if (!snapshotId) return;
+  if (isReaderPresentationCurrent(getReaderPresentationPreference())) return;
+  renderReader(snapshotId).catch(console.error);
+}
+
+function subscribeReaderToPresentationPreference(){
+  if (typeof state.readerPresentationUnsubscribe === "function") return;
+  const appearance = W.H2O?.Studio?.appearance;
+  if (typeof appearance?.subscribe !== "function") return;
+  const unsubscribe = appearance.subscribe((event) => {
+    if (!event) return;
+    if (event.type !== "ready" && !(event.type === "change" && event.key === "presentationProfile")) return;
+    refreshReaderPresentation();
+  });
+  state.readerPresentationUnsubscribe = typeof unsubscribe === "function" ? unsubscribe : function () {};
 }
 
 // ─── Edit-override persistence ────────────────────────────────────────────────
@@ -5195,7 +5260,11 @@ function refreshReaderOverlay(root, snap){
 function buildReaderDOM(snap, rendererInputRaw){
   const renderer = getStudioChatRenderer();
   const rendererInput = rendererInputRaw || renderer.normalizeInput(snap);
-  const rendererResult = renderer.render(rendererInput, { getEditOverride });
+  /* M04 P2 T4: the current Appearance preference selects the presentation
+   * profile of THIS render; the Renderer resolves it (unknown -> reference). */
+  const appearance = W.H2O?.Studio?.appearance;
+  const presentationProfile = typeof appearance?.get === "function" ? appearance.get("presentationProfile") : undefined;
+  const rendererResult = renderer.render(rendererInput, { getEditOverride, presentationProfile });
   const {
     root,
     turnsEl: sc,
@@ -5661,6 +5730,9 @@ async function renderReader(snapshotId){
       rendererInput,
       previousEditOverrides,
       nextEditOverrides,
+      /* M04 P2 T4: read at the decision, so a superseded preference can never
+       * keep or install an obsolete selection. */
+      presentationProfile: getReaderPresentationPreference(),
     });
     if (canReuseMountedReader){
       try {
@@ -15236,6 +15308,8 @@ function boot(){
   readUiPrefs();
   applyUiState();
   subscribeLibraryIndexToWorkbenchCache();
+  /* M04 P2 T4: once per application; refreshes an open Reader on presentation preference ready/change. */
+  subscribeReaderToPresentationPreference();
 
   $("#refreshBtn")?.addEventListener("click", () => {
     state.rowsCache = null;

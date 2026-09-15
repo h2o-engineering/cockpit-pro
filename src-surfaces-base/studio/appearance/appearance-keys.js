@@ -35,6 +35,10 @@
     showNotes:    'h2o:studio:appearance:showNotes:v1',     /* boolean */
     plainText:    'h2o:studio:appearance:plainText:v1',     /* boolean */
     alwaysOnTop:  'h2o:studio:appearance:alwaysOnTop:v1',   /* boolean — Tauri only */
+    /* M04 P2 T4 (HDA decision D): Reader-owned consumption preference — the
+     * requested Renderer presentation profile id, kept verbatim (unknown ids
+     * and '' included); the Renderer resolves the effective profile. */
+    presentationProfile: 'h2o:studio:appearance:presentationProfile:v1', /* string profile id */
   });
 
   var THEMES = Object.freeze(['dark', 'light', 'sepia']);
@@ -57,6 +61,7 @@
     showNotes: true,
     plainText: false,
     alwaysOnTop: false,
+    presentationProfile: 'chatgpt-reference',
   });
 
   var EVENTS = Object.freeze({

@@ -2514,8 +2514,15 @@ function validateExtractedRendererBoundary() {
     'Renderer module must install the canonical Studio API');
   assert.match(studioSource, /renderer\.normalizeInput\(snap\)/,
     'studio.js must normalize snapshots through the Renderer boundary');
-  assert.match(studioSource, /renderer\.render\(rendererInput,\s*\{\s*getEditOverride\s*\}\)/,
-    'studio.js must construct transcripts through the Renderer boundary');
+  /* M04 P2 T4 (HDA decision C): the single Reader render call now also passes
+   * the Appearance presentation preference (was `{ getEditOverride }`); the
+   * Renderer boundary stays the only transcript constructor and resolves the
+   * preference itself (unknown -> reference fallback). */
+  assert.match(studioSource, /renderer\.render\(rendererInput,\s*\{\s*getEditOverride,\s*presentationProfile\s*\}\)/,
+    'studio.js must construct transcripts through the Renderer boundary, passing the presentation preference');
+  assert.equal((studioSource.match(/renderer\.render\(/g) || []).length, 1, 'exactly one Reader render call site');
+  assert.match(studioSource, /presentationProfile\s*=\s*typeof appearance\?\.get === "function" \? appearance\.get\("presentationProfile"\) : undefined/,
+    'the preference is read from the Appearance store at the render call, never resolved in studio.js');
   assert.doesNotMatch(studioSource, /function\s+(mountRichTurns|buildCanonicalConversation|renderTextAsChatGPTBlocks)\s*\(/,
     'studio.js must not retain extracted Renderer implementations');
 }

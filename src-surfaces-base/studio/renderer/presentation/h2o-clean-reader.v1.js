@@ -78,7 +78,7 @@
     version: "1.0.0",
     displayName: "H2O Clean Reader",
     provider: null,
-    stylesheet: { href: "renderer/presentation/h2o-clean-reader.v1.css", version: "1.0.0" },
+    stylesheet: { href: "renderer/presentation/h2o-clean-reader.v1.css", version: "1.0.1" },
     modes: ["canonical", "rich"],
     hooks: {
       transcript: { canonical: [], rich: [] },
