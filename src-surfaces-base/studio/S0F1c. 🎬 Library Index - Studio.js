@@ -69,6 +69,11 @@
     subscribers: new Set(),
     ready: false,
     lastRowsSignature: '',
+    // STAB-P0 AC04: semantic signature for the Desktop Folder catalog. This is
+    // intentionally separate from the chat-row signature so an empty-folder
+    // create/rename can wake the existing Library fan-out without pretending
+    // that chat rows changed.
+    lastFolderCatalogSignature: '',
     lastRowsSignatureBefore: '',
     lastRowsSignatureAfter: '',
     lastRefreshChanged: false,
@@ -174,6 +179,34 @@
     return JSON.stringify(list);
   }
 
+  function canonicalFolderForSignature(row) {
+    const r = row && typeof row === 'object' ? row : {};
+    const meta = r.meta && typeof r.meta === 'object' && !Array.isArray(r.meta) ? r.meta : {};
+    const sortOrderRaw = r.sortOrder ?? meta.sortOrder;
+    const sortOrder = Number(sortOrderRaw);
+    return {
+      folderId: cleanString(r.folderId || r.id),
+      name: cleanString(r.name || r.title),
+      source: cleanString(r.source || meta.source),
+      sourceKind: cleanString(r.sourceKind || r.kind || meta.sourceKind || meta.kind),
+      parentId: cleanString(r.parentId || meta.parentId),
+      color: cleanString(r.color || r.iconColor || meta.iconColor || meta.color).toUpperCase(),
+      sortOrder: Number.isFinite(sortOrder) ? sortOrder : 0,
+      userCreated: r.userCreated === true || meta.userCreated === true,
+      materializedUserFolder: r.materializedUserFolder === true || meta.materializedUserFolder === true,
+      trustedFolderDisplay: r.trustedFolderDisplay === true || meta.trustedFolderDisplay === true,
+      shownInNormalMode: r.shownInNormalMode === true || meta.shownInNormalMode === true,
+    };
+  }
+
+  function folderCatalogSignature(rows) {
+    const list = (Array.isArray(rows) ? rows : [])
+      .map(canonicalFolderForSignature)
+      .filter((row) => row.folderId)
+      .sort((a, b) => String(a.folderId).localeCompare(String(b.folderId)));
+    return JSON.stringify(list);
+  }
+
   function rememberUpdateEvent(reason, beforeHash, afterHash, emitted) {
     const now = Date.now();
     state.lastUpdateReason = String(reason || '');
@@ -189,7 +222,9 @@
     const rows = Array.isArray(nextRows) ? nextRows : [];
     const before = state.lastRowsSignature || rowsSignature(state.rows);
     const after = rowsSignature(rows);
-    const changed = before !== after;
+    const rowsChanged = before !== after;
+    const folderCatalogChanged = refreshSources?.folderCatalogChanged === true;
+    const changed = rowsChanged || folderCatalogChanged;
     state.lastRowsSignatureBefore = before;
     state.lastRowsSignatureAfter = after;
     state.lastRefreshChanged = changed;
@@ -204,6 +239,8 @@
       totalRows: rows.length,
       source: state.lastSource,
       changed,
+      rowsChanged,
+      folderCatalogChanged,
       dataHashBefore: before,
       dataHashAfter: after,
       skippedReason: changed ? '' : state.lastRefreshSkipReason,
@@ -214,10 +251,12 @@
       step('refresh.skip-unchanged', `${rows.length}:${reason}`);
       return false;
     }
-    state.rows = rows;
-    state.byChatId = Object.create(null);
-    for (const r of state.rows) state.byChatId[r.chatId] = r;
-    rebuildFacets();
+    if (rowsChanged) {
+      state.rows = rows;
+      state.byChatId = Object.create(null);
+      for (const r of state.rows) state.byChatId[r.chatId] = r;
+      rebuildFacets();
+    }
     state.lastRowsSignature = after;
     return true;
   }
@@ -1261,7 +1300,9 @@
 
   async function refreshFromStores(reason = 'manual') {
     if (state.refreshInFlight) return state.refreshInFlight;
-    const chatsStore = W.H2O?.Studio?.store?.chats;
+    const stores = W.H2O?.Studio?.store || {};
+    const chatsStore = stores.chats;
+    const foldersStore = stores.folders;
     if (!chatsStore || typeof chatsStore.list !== 'function') {
       err('refreshFromStores', 'store.chats unavailable');
       return state.rows;
@@ -1270,6 +1311,29 @@
       try {
         const chatRows = await chatsStore.list();
         const list = Array.isArray(chatRows) ? chatRows : [];
+
+        // STAB-P0 AC04: the chat-row model cannot see an empty Folder catalog
+        // create/rename. Read the active Desktop Folder catalog independently
+        // and compare a semantic signature that ignores timestamp-only churn.
+        let folderCatalogRows = [];
+        let folderCatalogAvailable = false;
+        try {
+          if (foldersStore && typeof foldersStore.list === 'function') {
+            const listedFolders = await foldersStore.list();
+            folderCatalogRows = Array.isArray(listedFolders) ? listedFolders : [];
+            folderCatalogAvailable = true;
+          }
+        } catch (e) {
+          err('refreshFromStores.folderCatalog', e);
+        }
+        const folderCatalogHashBefore = state.lastFolderCatalogSignature;
+        const folderCatalogHashAfter = folderCatalogAvailable
+          ? folderCatalogSignature(folderCatalogRows)
+          : folderCatalogHashBefore;
+        const folderCatalogChanged = folderCatalogAvailable
+          && folderCatalogHashBefore !== folderCatalogHashAfter;
+        if (folderCatalogAvailable) state.lastFolderCatalogSignature = folderCatalogHashAfter;
+
         const joins = await loadDesktopJoinsForChats(list);
         const compact = list.map((c) => projectChatToCompactRow(c, joins));
         const normalized = compact.map(normalizeRow).filter(Boolean);
@@ -1277,10 +1341,15 @@
           reason: String(reason),
           sqliteChats: list.length,
           normalizedRows: normalized.length,
+          folderCatalogAvailable,
+          folderCatalogRows: folderCatalogRows.length,
+          folderCatalogChanged,
+          folderCatalogHashBefore,
+          folderCatalogHashAfter,
         };
         const changed = applyRowsIfChanged(normalized, reason, 'desktop-sqlite', refreshSources);
         if (!changed) return state.rows;
-        step('refreshFromStores.ok', `${list.length}->${normalized.length}:${reason}`);
+        step('refreshFromStores.ok', `${list.length}->${normalized.length}:${reason}:folderCatalog=${folderCatalogChanged ? 'changed' : 'same'}`);
         // Skip persist() on Desktop — SQLite tables are the canonical source
         // and the entity blob would only carry a redundant compact mirror.
         emitUpdated(reason);
@@ -1665,6 +1734,7 @@
         lastSource: state.lastSource,
         lastUpdateReason: state.lastUpdateReason,
         dataHash: state.lastRowsSignature,
+        folderCatalogHash: state.lastFolderCatalogSignature,
         dataHashBefore: state.lastRowsSignatureBefore,
         dataHashAfter: state.lastRowsSignatureAfter,
         lastRefreshChanged: state.lastRefreshChanged,

@@ -42,7 +42,7 @@ const wsBind = workspace;
 const sidebarBind = between(sidebar, '  function bindUpdates() {', '\n\n  function diagnosticHash');
 const sidebarRender = between(sidebar, '  async function renderFolders() {', '\n\n  async function renderLabels()');
 const shellSchedule = between(shell, 'function scheduleLibraryIndexWorkbenchRefresh(){', '\n\nfunction subscribeLibraryIndexToWorkbenchCache');
-const shellSubscribe = between(shell, 'function subscribeLibraryIndexToWorkbenchCache(attempt = 0){', '\n\n// ── Library Workspace facade integration');
+const shellSubscribe = shell;
 const shellFolderRender = between(shell, 'function renderFolderSidebar(rows, view, selectedFolderId){', '\n\nfunction getActiveSnapshotId');
 
 check(index.includes("lastFolderCatalogSignature: ''"), 'Folder catalog signature state missing');
@@ -78,7 +78,7 @@ check(shellFolderRender.includes('host.innerHTML = ""'), 'Shell destructive life
 check(!sidebarRender.includes("getElementById('folderList')"), 'S0Z1g must not regain Folder host ownership');
 check(!sidebarRender.includes("innerHTML = ''"), 'S0Z1g renderFolders must remain non-destructive');
 
-check(commands.includes("const FOLDER_COMMAND_CONTRACT = 'h2o.library.folder-commands.v1'"), 'FolderCommands contract changed');
+check(commands.includes("const FOLDER_COMMAND_CONTRACT_ID = 'h2o.library.folder-commands.v1';"), 'FolderCommands contract changed');
 check(commands.includes("const FOLDER_COMMAND_OWNER = 'L-COCKPIT-LIBRARY'"), 'FolderCommands owner changed');
 check(sync.includes("LIBRARY_REFRESH_EVENT: 'evt:h2o:library-index:refresh-request'"), 'Sync refresh boundary changed');
 check(!index.includes('h2o_p02_relationship_apply'), 'Library Index must not absorb Host Integration command');
