@@ -795,6 +795,25 @@ function attachUserAttachmentsToTurn(turnEl, messageEl, attachmentsRaw){
  * authority.
  */
 const PRESENTATION_PROFILE_ATTR = "data-h2o-presentation-profile";
+/*
+ * Renderer compatibility vocabulary (M04 P1 T1): `wbRichRoot` is the
+ * transcript-root class the global Studio stylesheet still keys on for both
+ * render modes. It is not a presentation choice a profile may make or drop,
+ * so the Renderer emits it itself, before any profile transcript hook, in
+ * exactly the accepted position (cgScroll wbReaderScroll wbRichRoot ...).
+ */
+const RICH_ROOT_COMPAT_CLASS = "wbRichRoot";
+/*
+ * Rich-replay source compatibility (M04 P1 T1): the captured-source class the
+ * Renderer recognizes inside sanitized provider markup to locate a captured
+ * user bubble. This is recognition of the accepted ChatGPT web capture only -
+ * a Renderer decision about provider input, not a presentation hook and not a
+ * general provider-recognition framework.
+ */
+const RICH_REPLAY_SOURCE_COMPAT = Object.freeze({
+  source: "chatgpt-web-capture",
+  userBubbleMarkerClass: "user-message-bubble-color",
+});
 
 /* S4A: the Semantic Index module is a passive Renderer dependency admitted by
  * the Studio script chain; like the PresentationProfile it has no embedded
@@ -1002,16 +1021,18 @@ function claimReplayIdentity(el, attrName, preferredRaw, seen){
  *
  * The Renderer decides that a rich user message has exactly one bubble and
  * creates that element itself. Provider markup may still supply the CONTENT
- * inside the bubble, and its `user-message-bubble-color` marker is read only to
- * locate where that bubble sits in the sanitized content; the provider element
- * never survives as the bubble boundary, and several or nested markers cannot
- * create more than one bubble.
+ * inside the bubble, and the captured-source marker class
+ * (RICH_REPLAY_SOURCE_COMPAT.userBubbleMarkerClass) is read only to locate
+ * where that bubble sits in the sanitized content; the provider element never
+ * survives as the bubble boundary, and several or nested markers cannot create
+ * more than one bubble.
  *
  * Presentation stays on the accepted compatibility path: the compatibility
- * class the H2O bubble carries, and the provider marker class that locates a
- * captured bubble, both come from the active PresentationProfile (for the
- * ChatGPT reference profile they are the same token), and nothing else is
- * taken from the provider element except a sanitized `dir` (bidi rendering).
+ * class the H2O bubble carries comes from the active PresentationProfile,
+ * while the provider marker that locates a captured bubble is Renderer-owned
+ * rich-replay source compatibility (for the ChatGPT reference profile the two
+ * are the same token), and nothing else is taken from the provider element
+ * except a sanitized `dir` (bidi rendering).
  * Identity is never copied: the message host owns role and identity, and the
  * bubble is presentation-container structure beneath it.
  *
@@ -1033,7 +1054,7 @@ function buildRichUserBubbleShell(){
 
 function adoptRichUserBubble(messageEl){
   if (!(messageEl instanceof Element)) return false;
-  const markerClass = activePresentationProfile().userBubbleMarkerClass();
+  const markerClass = RICH_REPLAY_SOURCE_COMPAT.userBubbleMarkerClass;
   messageEl.querySelectorAll(USER_BUBBLE_H2O_CLASSES.map((cls) => `.${cls}`).join(", ")).forEach((el) => {
     el.classList.remove(...USER_BUBBLE_H2O_CLASSES);
   });
@@ -1397,6 +1418,8 @@ function renderWithCollector(inputRaw, options, contentCollector){
     throw new Error("Studio Chat Renderer could not create the conversation root");
   }
   turnsEl.classList.add("wbReaderScroll");
+  /* Compatibility root for both modes (Renderer vocabulary, profile-independent). */
+  turnsEl.classList.add(RICH_ROOT_COMPAT_CLASS);
   const profile = activePresentationProfile();
   const richRootClasses = profile.transcriptClasses("rich");
 

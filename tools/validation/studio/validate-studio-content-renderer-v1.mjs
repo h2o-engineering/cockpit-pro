@@ -90,9 +90,12 @@ function stripComments(source) {
 
 check('registry exposes the small typed API and registers the core kinds once', () => {
   const cr = loadRegistry();
-  for (const fn of ['register', 'has', 'renderBlock', 'renderBlocks', 'registeredKinds']) {
+  /* M04 P1 T1 (old -> new): the governed registry adds describe/seal/sealed/registryDigest. */
+  for (const fn of ['register', 'has', 'renderBlock', 'renderBlocks', 'registeredKinds', 'describe', 'seal', 'sealed', 'registryDigest']) {
     assert.equal(typeof cr[fn], 'function', `missing ${fn}`);
   }
+  assert.equal(cr.__version, '2.0.0', 'M04 P1 T1: API 2.0.0 (old 1.1.0) - mandatory extension metadata, admitted-kind vocabulary and sealing');
+  assert.equal(cr.sealed(), false, 'installation does not seal the registry (the Renderer seals at its first render)');
   for (const kind of cr.coreKinds) assert.equal(cr.has(kind), true, `core kind not registered: ${kind}`);
   /* Both sides are spread into THIS realm first: values built inside the vm
    * sandbox carry the sandbox's intrinsics, which deepStrictEqual compares. */
@@ -102,11 +105,76 @@ check('registry exposes the small typed API and registers the core kinds once', 
 
 check('duplicate registration fails rather than silently replacing', () => {
   const cr = loadRegistry();
-  assert.throws(() => cr.register('paragraph', () => null), /already has a renderer/i);
-  /* A new kind still registers, so the guard is about duplicates, not writes. */
-  assert.equal(cr.register('citation', () => null), 'citation');
+  const meta = { owner: 'test-owner', version: '0.1.0' };
+  assert.throws(() => cr.register('paragraph', () => null, meta), /already has a renderer/i, 'core kinds cannot be overridden (unchanged since 1.x)');
+  /* A new kind still registers, so the guard is about duplicates, not writes.
+   * M04 P1 T1 (old -> new): an extension registration now carries mandatory
+   * owner/version metadata and still returns the kind string. */
+  assert.equal(cr.register('citation', () => null, meta), 'citation');
   assert.equal(cr.has('citation'), true);
-  assert.throws(() => cr.register('citation', () => null), /already has a renderer/i);
+  assert.throws(() => cr.register('citation', () => null, meta), /already has a renderer/i);
+});
+
+/* ------------------------------------------------- Tier 1: M04 P1 T1 */
+
+check('extension registration requires owner/version metadata and an admitted Render IR kind', () => {
+  const cr = loadRegistry();
+  const code = (fn) => { try { fn(); return null; } catch (e) { return { code: e.code, name: e.name, message: e.message }; } };
+  for (const [label, meta] of [['no meta', undefined], ['empty meta', {}], ['blank owner', { owner: ' ', version: '1.0.0' }], ['no version', { owner: 'o' }], ['non-semver', { owner: 'o', version: '1.0' }], ['numeric version', { owner: 'o', version: 1 }]]) {
+    const failure = code(() => cr.register('math', () => null, meta));
+    assert.ok(failure && failure.code === 'invalid-metadata' && failure.name === 'TypeError', `${label}: rejected with invalid-metadata`);
+    assert.equal(cr.has('math'), false, `${label}: nothing registered`);
+  }
+  const unknown = code(() => cr.register('sparkline', () => null, { owner: 'o', version: '1.0.0' }));
+  assert.equal(unknown && unknown.code, 'unknown-kind', 'the admitted Render IR kind vocabulary is not expandable');
+  assert.deepEqual([...cr.admittedKinds].sort(), [...cr.coreKinds, ...cr.extensionKinds].sort(), 'admitted kinds = core + reserved extension kinds');
+  assert.equal(code(() => cr.register('', () => null, { owner: 'o', version: '1.0.0' })) !== null, true, 'empty kind rejected');
+  assert.equal(code(() => cr.register('math', null, { owner: 'o', version: '1.0.0' })) !== null, true, 'non-function renderer rejected');
+  assert.equal(cr.register('math', () => null, { owner: 'ext-owner', version: '3.2.1-beta.1' }), 'math', 'valid extension registration returns the kind string');
+  assert.deepEqual({ ...cr.describe('math') }, { kind: 'math', owner: 'ext-owner', version: '3.2.1-beta.1', core: false }, 'describe(kind) reports the extension metadata');
+  assert.deepEqual({ ...cr.describe('paragraph') }, { kind: 'paragraph', owner: 'L-STUDIO-RENDERER', version: '2.0.0', core: true }, 'core metadata is Renderer-owned at install');
+  assert.equal(cr.describe('citation'), null, 'unregistered kinds describe as null'); assert.equal(cr.describe(42), null);
+  assert.equal(Object.isFrozen(cr.describe('math')), true, 'metadata is immutable');
+  assert.throws(() => { 'use strict'; cr.describe('math').owner = 'x'; }, { name: 'TypeError' });
+});
+
+check('sealing is idempotent, closes registration deterministically, and yields the sorted registry evidence token', () => {
+  const cr = loadRegistry();
+  assert.equal(cr.registryDigest(), null, 'no evidence token before sealing');
+  cr.register('math', () => null, { owner: 'ext-owner', version: '1.0.0' });
+  const before = cr.describe();
+  assert.equal(before.sealed, false); assert.equal(before.registryDigest, null);
+  const token = cr.seal();
+  assert.equal(cr.sealed(), true); assert.equal(cr.seal(), token, 'seal() is idempotent'); assert.equal(cr.registryDigest(), token);
+  const parsed = JSON.parse(token);
+  assert.equal(parsed.schema, 'h2o.renderer.content-renderer'); assert.equal(parsed.registry, 'content-renderer'); assert.equal(parsed.apiVersion, '2.0.0');
+  assert.deepEqual(parsed.entries.map((e) => e.kind), [...cr.coreKinds, 'math'].sort(), 'sorted kinds');
+  assert.deepEqual(parsed.entries.find((e) => e.kind === 'math'), { kind: 'math', owner: 'ext-owner', version: '1.0.0', core: false });
+  assert.ok(parsed.entries.every((e) => e.kind === 'math' ? !e.core : e.core && e.owner === 'L-STUDIO-RENDERER' && e.version === '2.0.0'));
+  let late = null; try { cr.register('citation', () => null, { owner: 'o', version: '1.0.0' }); } catch (e) { late = e; }
+  assert.ok(late && late.code === 'registry-sealed' && /registry-sealed/.test(late.message), 'late registration fails with registry-sealed');
+  assert.equal(cr.has('citation'), false, 'a refused late registration changes nothing');
+  assert.deepEqual([...cr.registeredKinds()], [...cr.coreKinds, 'math'].sort());
+  const after = cr.describe();
+  assert.equal(after.sealed, true); assert.equal(after.registryDigest, token); assert.equal(Object.isFrozen(after), true); assert.equal(Object.isFrozen(after.entries), true);
+  assert.deepEqual([...after.entries].map((e) => e.kind), [...cr.coreKinds, 'math'].sort(), 'describe() lists the sorted registry');
+  /* Determinism across fresh isolated contexts: identical admitted sets seal identically. */
+  const other = loadRegistry(); other.register('math', () => null, { owner: 'ext-owner', version: '1.0.0' });
+  assert.equal(other.seal(), token, 'identical admitted sets produce the identical evidence token');
+  const bare = loadRegistry();
+  assert.notEqual(bare.seal(), token, 'a different admitted set produces a different token');
+  assert.equal(bare.sealed(), true); assert.equal(loadRegistry().sealed(), false, 'sealing never leaks across contexts');
+  /* Rendering keeps working after sealing. */
+  const doc = fakeDocument();
+  const p = cr.renderBlock({ kind: 'paragraph', children: [{ kind: 'text', text: 'after seal' }] }, { document: doc });
+  assert.equal(p.tagName, 'P'); assert.equal(p.children[0].text, 'after seal');
+});
+
+check('the registry offers no dispose / unregister / replacement / hot-reload surface', () => {
+  const cr = loadRegistry();
+  for (const name of ['unregister', 'dispose', 'replace', 'reload', 'reset', 'clear']) assert.equal(name in cr, false, `no ${name}()`);
+  assert.equal(Object.isFrozen(cr), true);
+  assert.doesNotMatch(stripComments(read(CONTENT_REL)), /registry\.delete|registry\.clear|unregister|hotReload/, 'no removal path in the module');
 });
 
 check('reserved extension kinds are unregistered and fail deterministically', () => {
@@ -264,7 +332,8 @@ check('the content renderer embeds no presentation class map and stays semantics
   assert.match(code, /Renderer\.presentationProfile\.reference\(\)/, 'the installed reference profile is the default authority');
   /* One definition plus exactly one call site (the codeBlock renderer). */
   assert.equal((code.match(/resolvePresentationProfile\(context\)/g) || []).length, 2, 'only the codeBlock renderer consults presentation');
-  assert.match(code, /register\("codeBlock", \(block, context\) => \{\s*const profile = resolvePresentationProfile\(context\);/);
+  /* M04 P1 T1 (old -> new): core kinds install through registerCore() (Renderer-owned metadata); the codeBlock seam is unchanged. */
+  assert.match(code, /registerCore\("codeBlock", \(block, context\) => \{\s*const profile = resolvePresentationProfile\(context\);/);
   assert.doesNotMatch(code, /presentationProfile[^\n]*(renderIR|markdown|blocks\.push|kind\s*=)/, 'profile data never reaches Render IR or block shape');
   for (const rel of ['renderer/semantic/render-ir.v1.js', 'renderer/semantic/semantic-ingress.v1.js', 'renderer/markdown/markdown-ir-adapter.v1.js', 'renderer/markdown/markdown-engine.v1.js', 'renderer/markdown/h2o-gfm.v1.js']) {
     assert.doesNotMatch(stripComments(read(rel)), /presentationProfile/, `${rel} must stay profile-free`);

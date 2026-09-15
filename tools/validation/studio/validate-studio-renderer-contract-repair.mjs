@@ -115,7 +115,20 @@ function installPresentationProfile(context) {
 function presentationProfileGlobals(context, { withProfile = true } = {}) {
   const Studio = { Renderer: {} };
   if (withProfile) Studio.Renderer.presentationProfile = installPresentationProfile(context);
-  return { Studio, PRESENTATION_PROFILE_ATTR: 'data-h2o-presentation-profile' };
+  return { Studio, PRESENTATION_PROFILE_ATTR: 'data-h2o-presentation-profile', ...rendererVocabularyGlobals() };
+}
+
+/* M04 P1 T1: the Renderer-owned vocabulary the profile-consuming seams reference
+ * - the rich-replay compatibility root class and the rich-replay source
+ * compatibility definition (provider bubble capture marker) - extracted
+ * verbatim from the Renderer so every harness executes the real definitions.
+ * Before T1 both tokens were PresentationProfile hooks (transcript hook /
+ * userBubbleMarkerClass); they are compatibility / capture vocabulary, not a
+ * look, so T1 moved them to the Renderer. */
+function rendererVocabularyGlobals() {
+  const scratch = vm.createContext({ Object });
+  vm.runInContext(`${extractConst(rendererSource, 'RICH_ROOT_COMPAT_CLASS')}\n${extractConst(rendererSource, 'RICH_REPLAY_SOURCE_COMPAT')}\nthis.rootClass = RICH_ROOT_COMPAT_CLASS; this.sourceCompat = RICH_REPLAY_SOURCE_COMPAT;`, scratch);
+  return { RICH_ROOT_COMPAT_CLASS: scratch.rootClass, RICH_REPLAY_SOURCE_COMPAT: scratch.sourceCompat };
 }
 const studioHtmlSource = readRepo(STUDIO_HTML_REL);
 const archiveSource = readRepo(ARCHIVE_REL);
@@ -1036,7 +1049,13 @@ function validateRichUserBubbleAuthority() {
       `${name} must build with DOM APIs on sanitized nodes and never clone provider attributes`);
   }
   assert.match(adoptFn, /buildRichUserBubbleShell\(\)/, 'the adopted bubble must come from the H2O bubble shell seam');
-  assert.match(adoptFn, /activePresentationProfile\(\)\.userBubbleMarkerClass\(\)/, 'the provider marker class comes from the active presentation profile');
+  /* M04 P1 T1 (old -> new): the provider capture marker no longer comes from the
+   * PresentationProfile (`activePresentationProfile().userBubbleMarkerClass()`);
+   * capture recognition is a Renderer decision about provider input, so the
+   * marker is read from the Renderer-local rich-replay source-compatibility
+   * definition. The recognition behaviour proven below is unchanged. */
+  assert.match(adoptFn, /RICH_REPLAY_SOURCE_COMPAT\.userBubbleMarkerClass/, 'the provider marker class comes from the Renderer rich-replay source-compatibility definition');
+  assert.doesNotMatch(adoptFn, /userBubbleMarkerClass\(\)/, 'the profile no longer owns capture recognition');
   assert.match(shellFn, /createElement\("div"\)/, 'the bubble shell is a Renderer-created div');
   assert.doesNotMatch(adoptFn, /setAttribute\("(id|name|data-[^"]*)"/, 'the seam must not stamp identity on the bubble');
 
@@ -1305,9 +1324,16 @@ function validatePresentationProfileContract() {
     assert.deepEqual([...profile.messageClasses(role, 'rich')], [], `E: rich hosts get no message modifier (${role})`);
   }
   assert.deepEqual([...profile.userBubbleClasses()], ['user-message-bubble-color'], 'E: rich user-bubble compatibility class');
-  assert.equal(profile.userBubbleMarkerClass(), 'user-message-bubble-color', 'E: provider bubble marker');
-  assert.deepEqual([...profile.transcriptClasses('rich')], ['wbRichRoot', 'is-rich'], 'E: rich transcript mode');
-  assert.deepEqual([...profile.transcriptClasses('canonical')], ['wbRichRoot'], 'E: canonical transcript mode');
+  /* M04 P1 T1 (old -> new): `wbRichRoot` left the transcript hooks (rich was
+   * ['wbRichRoot', 'is-rich'], canonical ['wbRichRoot']) - it is the
+   * compatibility root the global stylesheet keys on in BOTH modes, so the
+   * Renderer emits it itself (RICH_ROOT_COMPAT_CLASS) and a profile may not
+   * claim it. `userBubbleMarkerClass()` was removed: provider capture
+   * recognition is Renderer rich-replay source compatibility. The effective
+   * class output is unchanged (proven executed in H below). */
+  assert.equal(typeof profile.userBubbleMarkerClass, 'undefined', 'E: the profile no longer exposes a provider capture marker');
+  assert.deepEqual([...profile.transcriptClasses('rich')], ['is-rich'], 'E: rich transcript mode hook (compatibility root is Renderer-owned)');
+  assert.deepEqual([...profile.transcriptClasses('canonical')], [], 'E: canonical transcript mode adds no profile hook');
   /* S3B slice B: content and edit-state hooks, exactly these. */
   assert.deepEqual([...profile.codeBlockClasses()], ['wbCodeBlock'], 'code-block container hook');
   assert.deepEqual([...profile.codeLanguageClasses()], ['wbCodeLang'], 'code-language badge hook');
@@ -1318,7 +1344,12 @@ function validatePresentationProfileContract() {
     assert.throws(() => { 'use strict'; arr.push('x'); }, { name: 'TypeError' });
   }
   assert.equal(Object.isFrozen(profile.hooks.content) && Object.isFrozen(profile.hooks.state), true);
-  assert.equal(api.__version, '0.2.0-m03-foundation', 'additive helper surface bumps the module API version');
+  /* M04 P1 T1 (old -> new): 0.2.0-m03-foundation -> 1.0.0-m04-p1; the governed
+   * registry (define/register/list/default/resolve/seal/sealed/registryDigest)
+   * and the vocabulary corrections change the public contract. */
+  assert.equal(api.__version, '1.0.0-m04-p1', 'the governed registry bumps the module API version');
+  assert.equal(api.schemaVersion, 1, 'schemaVersion 1 preserved'); assert.equal(api.schema, 'h2o.renderer.presentation-profile');
+  assert.deepEqual([...api.roles], ROLES); assert.deepEqual([...api.modes], ['canonical', 'rich']);
   for (const bad of ['admin', 'USER', '', null, undefined, 'user ', 'user; drop']) {
     assert.throws(() => profile.turnClasses(bad, 'rich'), { name: 'TypeError' }, `helpers reject unknown role ${JSON.stringify(bad)}`);
     assert.throws(() => profile.messageClasses(bad, 'canonical'), { name: 'TypeError' });
@@ -1335,18 +1366,33 @@ function validatePresentationProfileContract() {
   collect(profile.hooks);
   for (const token of STRUCTURAL) assert.equal(hookValues.includes(token), false, `G: structural class ${token} must not be profile-owned`);
   for (const token of READER_INTEGRATION) assert.equal(hookValues.includes(token), false, `H: Reader integration hook ${token} must not be profile-owned`);
+  /* M04 P1 T1 (old -> new): the two `wbRichRoot` occurrences (transcript hooks)
+   * and the second `user-message-bubble-color` (provider capture marker) are
+   * Renderer vocabulary now; the profile owns only presentation hooks. */
   assert.deepEqual([...hookValues].filter((t) => /^(wb|cg|is-|user-)/.test(t)).sort(), [
-    'cgMsg--assistant', 'cgMsg--edited', 'cgMsg--system', 'cgMsg--tool', 'cgMsg--user', 'is-rich', 'user-message-bubble-color', 'user-message-bubble-color',
-    'wbCodeBlock', 'wbCodeLang', 'wbRichRoot', 'wbRichRoot', 'wbTurn', 'wbTurn--assistant', 'wbTurn--edited', 'wbTurn--fallback', 'wbTurn--rich', 'wbTurn--system', 'wbTurn--tool', 'wbTurn--user',
+    'cgMsg--assistant', 'cgMsg--edited', 'cgMsg--system', 'cgMsg--tool', 'cgMsg--user', 'is-rich', 'user-message-bubble-color',
+    'wbCodeBlock', 'wbCodeLang', 'wbTurn', 'wbTurn--assistant', 'wbTurn--edited', 'wbTurn--fallback', 'wbTurn--rich', 'wbTurn--system', 'wbTurn--tool', 'wbTurn--user',
   ], 'the reference profile owns exactly the accepted presentation vocabulary and nothing else');
+  assert.equal(hookValues.includes('wbRichRoot'), false, 'G: wbRichRoot is Renderer compatibility vocabulary, never a profile hook');
   assert.doesNotMatch(stripJsComments(presentationProfileSource), /document\.|innerHTML|localStorage|sessionStorage|indexedDB|renderIR|markdownEngine|contentRenderer|semanticIngress|data-message-id|data-turn-id/,
     'the profile module has no DOM, persistence, semantic or identity coupling');
 
   /* F. chat-renderer consumes the profile: no duplicated map of the moved hooks. */
   const code = stripJsComments(rendererSource);
-  for (const token of ['wbRichRoot', 'is-rich', 'wbTurn--rich', 'wbTurn--fallback', 'user-message-bubble-color', 'chatgpt-reference', 'wbTurn--edited', 'cgMsg--edited', 'wbCodeBlock', 'wbCodeLang']) {
+  for (const token of ['is-rich', 'wbTurn--rich', 'wbTurn--fallback', 'chatgpt-reference', 'wbTurn--edited', 'cgMsg--edited', 'wbCodeBlock', 'wbCodeLang']) {
     assert.equal(code.includes(token), false, `F: chat-renderer must not hardcode moved presentation token ${token}`);
   }
+  /* M04 P1 T1 (old -> new): `wbRichRoot` and `user-message-bubble-color` were
+   * in the must-not-hardcode list above; they are Renderer vocabulary now and
+   * must appear exactly once each, only inside the two Renderer definitions. */
+  const vocabulary = rendererVocabularyGlobals();
+  assert.equal(vocabulary.RICH_ROOT_COMPAT_CLASS, 'wbRichRoot', 'F: the Renderer owns the rich-replay compatibility root class');
+  assert.equal(vocabulary.RICH_REPLAY_SOURCE_COMPAT.userBubbleMarkerClass, 'user-message-bubble-color', 'F: the Renderer owns provider bubble capture recognition');
+  assert.equal(Object.isFrozen(vocabulary.RICH_REPLAY_SOURCE_COMPAT), true, 'F: the source-compatibility definition is immutable');
+  assert.deepEqual(Object.keys(vocabulary.RICH_REPLAY_SOURCE_COMPAT).sort(), ['source', 'userBubbleMarkerClass'], 'F: a small single-source definition, not a provider-recognition framework');
+  assert.equal((code.match(/"wbRichRoot"/g) || []).length, 1, 'F: wbRichRoot is defined once (RICH_ROOT_COMPAT_CLASS)');
+  assert.equal((code.match(/"user-message-bubble-color"/g) || []).length, 1, 'F: the capture marker is defined once (RICH_REPLAY_SOURCE_COMPAT)');
+  assert.match(extractConst(rendererSource, 'RICH_ROOT_COMPAT_CLASS'), /^const RICH_ROOT_COMPAT_CLASS = "wbRichRoot";$/);
   assert.match(extractFunction(rendererSource, 'applyEditedMessageBody'), /\.editedMessageClasses\(\)/, 'E: edited message hook comes from the profile');
   assert.match(extractFunction(rendererSource, 'mountRichTurns'), /host\.classList\.add\(\.\.\.activePresentationProfile\(\)\.editedTurnClasses\(\)\)/, 'E: edited turn hook comes from the profile');
   const contentCode = stripJsComments(readRepo(CONTENT_RENDERER_REL));
@@ -1361,14 +1407,21 @@ function validatePresentationProfileContract() {
   assert.doesNotMatch(code, /["'`]wbTurn(--\$\{|["'`])/, 'F: chat-renderer must not hardcode wbTurn / wbTurn--<role>');
   assert.doesNotMatch(code, /cgMsg--\$\{|["'`]cgMsg--(user|assistant|system|tool)["'`]/, 'F: chat-renderer must not hardcode cgMsg--<role>');
   /* S4A slice B: the render body lives in renderWithCollector (render() only scopes the content collector around it). */
-  for (const name of ['buildTurnShell', 'buildMessageHost', 'buildRichUserBubbleShell', 'adoptRichUserBubble', 'buildConversationShell', 'renderWithCollector', 'applyEditedMessageBody', 'cleanReaderUserTextNodeLeaks']) {
+  /* M04 P1 T1 (old -> new): adoptRichUserBubble no longer resolves the profile -
+   * it reads the Renderer capture marker and takes the bubble's presentation
+   * from buildRichUserBubbleShell(), which still resolves the active profile. */
+  for (const name of ['buildTurnShell', 'buildMessageHost', 'buildRichUserBubbleShell', 'buildConversationShell', 'renderWithCollector', 'applyEditedMessageBody', 'cleanReaderUserTextNodeLeaks']) {
     assert.match(extractFunction(rendererSource, name), /activePresentationProfile\(\)/, `F: ${name} resolves the active profile`);
   }
+  assert.doesNotMatch(extractFunction(rendererSource, 'adoptRichUserBubble'), /activePresentationProfile\(\)/, 'F: adoptRichUserBubble takes no presentation decision of its own');
   assert.match(extractFunction(rendererSource, 'buildTurnShell'), /\.turnClasses\(role, mode\)/);
   assert.match(extractFunction(rendererSource, 'buildMessageHost'), /\.messageClasses\(role, mode\)/);
   assert.match(extractFunction(rendererSource, 'buildRichUserBubbleShell'), /\.userBubbleClasses\(\)/);
   assert.match(extractFunction(rendererSource, 'renderWithCollector'), /\.transcriptClasses\("rich"\)/);
   assert.match(extractFunction(rendererSource, 'renderWithCollector'), /\.transcriptClasses\("canonical"\)/);
+  /* M04 P1 T1: the Renderer emits the compatibility root right after the Reader
+   * scroll hook and before any profile transcript hook, in both modes. */
+  assert.match(extractFunction(rendererSource, 'renderWithCollector'), /turnsEl\.classList\.add\("wbReaderScroll"\);\s*(?:\/\*[\s\S]*?\*\/\s*)?turnsEl\.classList\.add\(RICH_ROOT_COMPAT_CLASS\);\s*const profile = activePresentationProfile\(\);/, 'F: compatibility root emitted by the Renderer before profile transcript hooks');
   for (const token of STRUCTURAL) {
     assert.equal(code.includes(`"${token}"`) || code.includes(`\`${token}`) || code.includes(`${token} `), true, `G: chat-renderer still owns structural class ${token}`);
   }
@@ -1445,6 +1498,130 @@ function validatePresentationProfileContract() {
   assert.throws(() => bare.api.buildConversationShell({ title: 'T', chatId: 'c', projectId: 'p' }), /presentationProfile/, 'J: missing profile fails clearly at the conversation seam');
   bare.Studio.Renderer.presentationProfile = { __installed: true, reference: () => null };
   assert.throws(() => bare.api.buildTurnShell('user', 'rich', { turnNo: 1 }), /reference PresentationProfile is unavailable/, 'J: an unresolvable reference profile fails clearly');
+}
+
+/*
+ * M04 P1 T1: the governed PresentationProfile registry. Executed against the
+ * real module in fresh isolated contexts (no production lifecycle machinery is
+ * used for isolation): definition validation, registration, enumeration,
+ * resolution, immutable metadata, idempotent sealing, late-registration and
+ * duplicate rejection, and the preserved compatibility accessors.
+ */
+function validatePresentationProfileRegistry() {
+  const fresh = () => installPresentationProfile(vm.createContext({}));
+  const baseHooks = () => ({
+    transcript: { canonical: [], rich: [] },
+    turn: { base: ['tp-turn'], canonical: [], rich: [], role: { user: [], assistant: [], system: [], tool: [] } },
+    message: { canonical: { user: [], assistant: [], system: [], tool: [] }, rich: { user: [], assistant: [], system: [], tool: [] } },
+    userBubble: { compat: [] },
+    content: { codeBlock: { container: ['tp-code'], language: [] } },
+    state: { edited: { turn: [], message: [] } },
+  });
+  const definition = (overrides = {}) => ({
+    id: 'test-profile', owner: 'test-owner', version: '0.1.0', displayName: 'Test profile', provider: null,
+    stylesheet: { href: 'renderer/presentation/test-profile.v1.css', version: '0.1.0' }, modes: ['canonical', 'rich'], hooks: baseHooks(), ...overrides,
+  });
+  const rejects = (api, def, code, label) => {
+    let error = null;
+    try { api.define(def); } catch (e) { error = e; }
+    assert.ok(error, `${label}: rejected`);
+    assert.equal(error.code, code, `${label}: failure code ${code}`);
+    assert.equal(error.name, 'TypeError', `${label}: definition failures are TypeErrors`);
+  };
+
+  /* A. Surface and preserved accessors. */
+  const api = fresh();
+  for (const fn of ['define', 'register', 'get', 'ids', 'list', 'reference', 'default', 'resolve', 'seal', 'sealed', 'registryDigest']) assert.equal(typeof api[fn], 'function', `A: ${fn}()`);
+  assert.equal(api.default(), api.reference(), 'A: default is the reference profile');
+  assert.deepEqual([...api.ids()], ['chatgpt-reference']); assert.equal(api.list().length, 1); assert.equal(api.list()[0], api.reference());
+  assert.equal(api.sealed(), false, 'A: installation does not seal the registry'); assert.equal(api.registryDigest(), null, 'A: no evidence token before sealing');
+  const ref = api.reference();
+  assert.equal(ref.owner, 'L-STUDIO-RENDERER'); assert.match(ref.version, /^\d+\.\d+\.\d+$/); assert.equal(ref.provider, 'chatgpt');
+  assert.deepEqual({ ...ref.stylesheet }, { href: 'renderer/presentation/chatgpt-reference.v1.css', version: '1.0.6' }, 'A: stylesheet metadata is relative admission metadata');
+  assert.deepEqual([...ref.modes], ['canonical', 'rich']);
+  assert.deepEqual([...ref.contentClasses('codeBlock', 'container')], ['wbCodeBlock']); assert.deepEqual([...ref.contentClasses('codeBlock', 'language')], ['wbCodeLang']);
+  assert.deepEqual([...ref.codeBlockClasses()], [...ref.contentClasses('codeBlock', 'container')], 'A: codeBlockClasses is a contentClasses wrapper');
+  assert.deepEqual([...ref.codeLanguageClasses()], [...ref.contentClasses('codeBlock', 'language')], 'A: codeLanguageClasses is a contentClasses wrapper');
+  for (const [kind, slot] of [['math', 'container'], ['codeBlock', 'nope'], [undefined, 'x'], ['codeBlock', undefined], ['__proto__', 'container']]) {
+    const out = ref.contentClasses(kind, slot);
+    assert.deepEqual([...out], [], `A: undeclared contentClasses(${kind}, ${slot}) is []`); assert.equal(Object.isFrozen(out), true, 'A: undeclared result is frozen');
+  }
+
+  /* B. define() validates and returns a frozen, admitted-but-unregistered profile. */
+  const defined = api.define(definition());
+  assert.equal(Object.isFrozen(defined), true); assert.equal(Object.isFrozen(defined.hooks.turn.base), true); assert.equal(Object.isFrozen(defined.stylesheet), true);
+  assert.equal(api.get('test-profile'), null, 'B: define() does not register');
+  assert.deepEqual([...defined.turnClasses('user', 'rich')], ['tp-turn']); assert.deepEqual([...defined.codeBlockClasses()], ['tp-code']); assert.deepEqual([...defined.transcriptClasses('rich')], []);
+  rejects(api, definition({ id: 'Bad Id' }), 'invalid-definition', 'B: id');
+  rejects(api, definition({ owner: ' ' }), 'invalid-definition', 'B: owner');
+  rejects(api, definition({ version: '1.0' }), 'invalid-definition', 'B: semver');
+  rejects(api, definition({ displayName: '' }), 'invalid-definition', 'B: displayName');
+  rejects(api, definition({ provider: 42 }), 'invalid-definition', 'B: provider');
+  rejects(api, definition({ stylesheet: { href: 'https://evil.test/x.css' } }), 'invalid-definition', 'B: absolute stylesheet');
+  rejects(api, definition({ stylesheet: { href: '../x.css' } }), 'invalid-definition', 'B: traversal stylesheet');
+  rejects(api, definition({ modes: ['canonical'] }), 'invalid-definition', 'B: missing mode');
+  rejects(api, definition({ modes: ['canonical', 'rich', 'print'] }), 'invalid-definition', 'B: extra mode');
+  rejects(api, definition({ hooks: { ...baseHooks(), extra: {} } }), 'invalid-definition', 'B: unknown hook family');
+  rejects(api, definition({ hooks: { ...baseHooks(), userBubble: { compat: [], providerMarker: 'x' } } }), 'invalid-definition', 'B: capture recognition is not a profile hook');
+  rejects(api, definition({ hooks: { ...baseHooks(), turn: { ...baseHooks().turn, base: ['bad token'] } } }), 'invalid-definition', 'B: invalid class token');
+  rejects(api, definition({ hooks: { ...baseHooks(), turn: { ...baseHooks().turn, base: ['x', 'x'] } } }), 'invalid-definition', 'B: repeated class token');
+  for (const token of ['cgFrame', 'cgBody', 'cgThread', 'cgScroll', 'cgTurn', 'cgMsg', 'cgMsgBody', 'cgBubble', 'cgBubbleRail', 'cgUserAttachmentGrid', 'cgUserAttachmentCard', 'cgTurn--has-attachments', 'cgTurn--user', 'cgBubble--user', 'wbReaderScroll', 'wbRichRoot']) {
+    rejects(api, definition({ hooks: { ...baseHooks(), transcript: { canonical: [token], rich: [] } } }), 'invalid-definition', `B: Renderer vocabulary ${token} rejected in a hook`);
+  }
+  assert.doesNotThrow(() => api.define(definition({ id: 'msg-mod', hooks: { ...baseHooks(), message: { ...baseHooks().message, canonical: { user: ['cgMsg--user'], assistant: [], system: [], tool: [] } } } })), 'B: cgMsg--<role> stays an admissible presentation modifier');
+
+  /* C. register(): admitted profiles or plain definitions; duplicates fail; enumeration order is registration order. */
+  const registered = api.register(defined);
+  assert.equal(registered, defined, 'C: register returns the admitted profile'); assert.equal(api.get('test-profile'), defined);
+  assert.deepEqual([...api.ids()], ['chatgpt-reference', 'test-profile']); assert.deepEqual([...api.list()].map((x) => x.id), ['chatgpt-reference', 'test-profile']); /* spread first: vm-realm arrays are not deepEqual to host arrays */
+  assert.throws(() => api.register(definition()), (e) => e.code === 'duplicate-id' && e.name === 'TypeError', 'C: duplicate id rejected');
+  assert.throws(() => api.register(definition({ id: 'chatgpt-reference' })), (e) => e.code === 'duplicate-id', 'C: the reference id cannot be re-registered');
+  assert.throws(() => api.register(definition({ id: 'broken', version: 'x' })), (e) => e.code === 'invalid-definition', 'C: register validates plain definitions');
+  const second = api.register(definition({ id: 'second-profile', owner: 'other', version: '2.3.4' }));
+  assert.equal(second.id, 'second-profile'); assert.deepEqual([...api.ids()], ['chatgpt-reference', 'test-profile', 'second-profile']);
+  assert.equal(api.reference().id, 'chatgpt-reference', 'C: reference/default do not move'); assert.equal(api.default().id, 'chatgpt-reference');
+
+  /* D. resolve(): explicit / default / unknown-profile-fallback, never throws. */
+  assert.deepEqual([...api.resolutionReasons], ['explicit', 'default', 'unknown-profile-fallback']);
+  for (const [request, effective, reason] of [['test-profile', 'test-profile', 'explicit'], ['chatgpt-reference', 'chatgpt-reference', 'explicit'], [undefined, 'chatgpt-reference', 'default'], [null, 'chatgpt-reference', 'default'], ['', 'chatgpt-reference', 'default'], ['nope', 'chatgpt-reference', 'unknown-profile-fallback'], [42, 'chatgpt-reference', 'unknown-profile-fallback']]) {
+    const r = api.resolve(request);
+    assert.equal(r.effectiveId, effective, `D: resolve(${JSON.stringify(request)}) effective`); assert.equal(r.reason, reason, `D: resolve(${JSON.stringify(request)}) reason`);
+    assert.equal(r.profile, api.get(effective), 'D: resolved profile is the registered object'); assert.equal(Object.isFrozen(r), true);
+    assert.equal(r.requestedId, request === undefined || request === null || request === '' ? null : String(request));
+  }
+
+  /* E. seal(): idempotent evidence token; late registration fails deterministically; read paths unaffected. */
+  const token = api.seal();
+  assert.equal(api.sealed(), true); assert.equal(api.seal(), token, 'E: seal is idempotent'); assert.equal(api.registryDigest(), token);
+  const parsed = JSON.parse(token);
+  assert.equal(parsed.schema, 'h2o.renderer.presentation-profile'); assert.equal(parsed.registry, 'presentation-profile'); assert.equal(parsed.apiVersion, api.__version);
+  assert.deepEqual(parsed.entries, [{ id: 'chatgpt-reference', owner: 'L-STUDIO-RENDERER', version: ref.version }, { id: 'second-profile', owner: 'other', version: '2.3.4' }, { id: 'test-profile', owner: 'test-owner', version: '0.1.0' }], 'E: sorted identities, owners and versions');
+  assert.throws(() => api.register(definition({ id: 'late-profile' })), (e) => e.code === 'registry-sealed' && /registry-sealed/.test(e.message), 'E: late registration fails with registry-sealed');
+  assert.deepEqual([...api.ids()], ['chatgpt-reference', 'test-profile', 'second-profile'], 'E: a refused registration changes nothing');
+  assert.equal(api.resolve('second-profile').reason, 'explicit', 'E: resolution keeps working after sealing');
+  assert.doesNotThrow(() => api.define(definition({ id: 'defined-after-seal' })), 'E: define() stays available after sealing (registration is what closes)');
+
+  /* F. Determinism and isolation: an identical fresh registry seals to the identical token; sealing order is registration-independent. */
+  const other = fresh(); other.register(definition({ id: 'second-profile', owner: 'other', version: '2.3.4' })); other.register(definition());
+  assert.equal(other.seal(), token, 'F: identical admitted sets produce the identical evidence token regardless of registration order');
+  const untouched = fresh();
+  assert.equal(untouched.sealed(), false); assert.deepEqual([...untouched.ids()], ['chatgpt-reference'], 'F: fresh contexts start from the reference alone');
+  assert.equal(JSON.parse(untouched.seal()).entries.length, 1);
+
+  /* G. Immutability: API, profiles, hooks and metadata cannot be mutated. */
+  assert.throws(() => { 'use strict'; api.define = null; }, { name: 'TypeError' });
+  assert.throws(() => { 'use strict'; defined.version = '9.9.9'; }, { name: 'TypeError' }, 'G: metadata is immutable');
+  assert.throws(() => { 'use strict'; defined.hooks.turn.base.push('x'); }, { name: 'TypeError' }, 'G: hooks are deep-frozen');
+  assert.throws(() => { 'use strict'; defined.stylesheet.href = 'x'; }, { name: 'TypeError' }, 'G: stylesheet metadata is frozen');
+  const idsBefore = api.ids(); assert.equal(Object.isFrozen(idsBefore), true); assert.equal(Object.isFrozen(api.list()), true);
+
+  /* H. The reference profile registers through the same public path (source contract). */
+  const src = stripJsComments(presentationProfileSource);
+  assert.match(src, /register\(define\(\{\s*id: REFERENCE_ID,/, 'H: the reference profile is admitted through define()+register()');
+  assert.equal((src.match(/registry\.set\(/g) || []).length, 1, 'H: exactly one registry write path');
+  assert.doesNotMatch(src, /seal\(\);|sealedToken = evidenceToken\(\);\s*\}\s*\)/, 'H: the module does not seal itself at installation');
+  assert.doesNotMatch(src, /unregister|dispose|replace\(|hotReload|reload/, 'H: no dispose / unregister / replacement / hot reload surface');
+  assert.doesNotMatch(src, /document\.|innerHTML|localStorage|sessionStorage|indexedDB|createElement|link\b.*stylesheet|appendChild/, 'H: no DOM, persistence or stylesheet loading');
 }
 
 /*
@@ -1631,7 +1808,13 @@ function validateAttachmentPresentationOwnership() {
   /* B: attachment vocabulary is not a profile hook and has no profile helper. */
   assert.doesNotMatch(JSON.stringify(profile.hooks), /Attachment|attachments/, 'B: attachment classes are not PresentationProfile hooks');
   assert.equal(Object.keys(profile).some((k) => /attachment/i.test(k)), false, 'B: no attachment helper on the profile');
-  assert.doesNotMatch(presentationProfileSource.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/.*$/gm, ''), /cgUserAttachment|has-attachments/, 'B: the profile module code carries no attachment vocabulary');
+  /* M04 P1 T1 (old -> new): the governed registry names the Renderer vocabulary
+   * ONLY in its rejection lists (RESERVED_TOKENS / RESERVED_PREFIXES); outside
+   * those two constants the profile code still carries no attachment vocabulary. */
+  const profileCode = presentationProfileSource.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^\s*\/\/.*$/gm, '');
+  const reservedLists = (profileCode.match(/const RESERVED_(?:TOKENS|PREFIXES) = Object\.freeze\(\[[\s\S]*?\]\);/g) || []).join('\n');
+  assert.match(reservedLists, /"cgTurn--has-attachments"/); assert.match(reservedLists, /"cgUserAttachment"/);
+  assert.doesNotMatch(profileCode.replace(/const RESERVED_(?:TOKENS|PREFIXES) = Object\.freeze\(\[[\s\S]*?\]\);/g, ''), /cgUserAttachment|has-attachments/, 'B: the profile module code carries no attachment vocabulary outside its rejection lists');
   /* A + L (executed): the real grid builder and attachment seam emit the structural classes, group semantics, alt and safe sources. */
   const seams = vm.createContext({
     document: { createElement: (tagName) => new FakeDomElement(tagName) },
@@ -1739,8 +1922,12 @@ function validateFinalRendererCssBoundary() {
   const studioCss = readRepo(STUDIO_CSS_REL);
   const context = vm.createContext({});
   const profile = installPresentationProfile(context).reference();
-  const marker = profile.userBubbleMarkerClass();
+  /* M04 P1 T1 (old -> new): the capture marker came from
+   * profile.userBubbleMarkerClass(); it is Renderer rich-replay source
+   * compatibility now (see rendererVocabularyGlobals). Same token, same seam. */
+  const marker = rendererVocabularyGlobals().RICH_REPLAY_SOURCE_COMPAT.userBubbleMarkerClass;
   assert.equal(marker, 'user-message-bubble-color');
+  assert.equal(profile.userBubbleClasses()[0], marker, 'the reference bubble hook and the capture marker are the same token');
   /* A (executed): the real adoption seam on four fragment shapes. */
   const seams = vm.createContext({
     document: { createElement: (tagName) => new FakeDomElement(tagName) },
@@ -1939,10 +2126,12 @@ function validateSemanticIndexContentProjections() {
   deep([...api.kinds], ['conversation', 'turn', 'message', 'block', 'text'], 'A: kinds include block + text');
   assert.equal(api.bases.RENDER_IR, 'render-ir', 'a Render IR basis token is exported');
   /* ContentRenderer seam (static): optional context hook, no public registry, text target reported before marks, no wrapper or attribute for indexing. */
-  assert.match(contentSource, /^\/\/ @version 1\.1\.0\n"use strict";/, 'ContentRenderer version comment advanced');
+  /* M04 P1 T1 (old -> new): 1.1.0 -> 2.0.0 (governed registration). */
+  assert.match(contentSource, /^\/\/ @version 2\.0\.0\n"use strict";/, 'ContentRenderer version comment advanced');
   assert.match(contentSource, /function projectionSinkOf\(context\) \{\s*const sink = context && context\.projectionSink;\s*return typeof sink === "function" \? sink : null;/, 'the sink is an OPTIONAL render-context function');
-  assert.match(contentSource, /const sink = block\.kind === "text" \? null : projectionSinkOf\(ctx\);\s*const report = sink \? \{ projection: "block", block, target: null \} : null;\s*if \(report\) sink\(report\);\s*const node = renderer\(block, ctx\);\s*if \(report\) report\.target = node;/, 'D: one pre-order block report per non-text node, completed with the returned element');
-  assert.match(contentSource, /register\("text", \(block, context\) => \{\s*(?:\/\*[\s\S]*?\*\/\s*)?const node = textNode\(context, block\.text\);\s*const sink = projectionSinkOf\(context\);\s*if \(sink\) sink\(\{ projection: "text", block, target: node \}\);\s*return applyMarks\(node, block\.marks, context\);/, 'E/F/G: the text report carries the Text node itself and marks still wrap that same node - no wrapper element');
+  assert.match(contentSource, /const sink = block\.kind === "text" \? null : projectionSinkOf\(ctx\);\s*const report = sink \? \{ projection: "block", block, target: null \} : null;\s*if \(report\) sink\(report\);\s*const node = entry\.render\(block, ctx\);\s*if \(report\) report\.target = node;/, 'D: one pre-order block report per non-text node, completed with the returned element'); /* M04 P1 T1: registry entries carry { render, meta }; the renderer call is entry.render() */
+  /* M04 P1 T1 (old -> new): core kinds install through registerCore() (Renderer-owned metadata); the seam body is unchanged. */
+  assert.match(contentSource, /registerCore\("text", \(block, context\) => \{\s*(?:\/\*[\s\S]*?\*\/\s*)?const node = textNode\(context, block\.text\);\s*const sink = projectionSinkOf\(context\);\s*if \(sink\) sink\(\{ projection: "text", block, target: node \}\);\s*return applyMarks\(node, block\.marks, context\);/, 'E/F/G: the text report carries the Text node itself and marks still wrap that same node - no wrapper element');
   assert.doesNotMatch(contentSource.replace(/\/\*[\s\S]*?\*\//g, ' '), /projectionSink[^\n]*setAttribute|data-h2o-projection|data-h2o-block-key|data-h2o-text-key/, 'U: the seam emits no DOM attribute');
   const exported = /Renderer\.contentRenderer = Object\.freeze\(\{([\s\S]*?)\}\);/.exec(contentSource)[1];
   assert.doesNotMatch(exported, /projection|sink|register\w+Projection/i, 'the seam is not part of the public ContentRenderer API');
@@ -1955,7 +2144,9 @@ function validateSemanticIndexContentProjections() {
   const contentContext = vm.createContext({});
   vm.runInContext(`${contentSource}\nthis.__content = this.H2O.Studio.Renderer.contentRenderer;`, contentContext);
   const content = contentContext.__content;
-  assert.equal(content.__version, '1.1.0');
+  /* M04 P1 T1 (old -> new): 1.1.0 -> 2.0.0 (governed registration: mandatory
+   * extension metadata, admitted-kind vocabulary, sealing). */
+  assert.equal(content.__version, '2.0.0');
   const urlPolicy = { classifyUrl: (value) => (/^https:\/\//.test(String(value)) ? { ok: true } : { ok: false, reason: 'denied' }) };
   const presentationProfile = installPresentationProfile(vm.createContext({})).reference();
   const conversation = ir.createConversation({ id: 'h2o.render', messages: [{ id: 'h2o.message', role: 'assistant', blocks: [
@@ -2286,6 +2477,7 @@ validateBuildFallbackDecision();
 validateStructuralShellAuthority();
 validateRichUserBubbleAuthority();
 validatePresentationProfileContract();
+validatePresentationProfileRegistry();
 validateRichShellPresentationOwnership();
 validatePersistedEditPresentationOwnership();
 validateAttachmentPresentationOwnership();
