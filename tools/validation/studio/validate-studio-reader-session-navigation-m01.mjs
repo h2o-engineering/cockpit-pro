@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Reader M01 T3: current contracts, remaining baseline gaps, and unimplemented
+// Reader M01 T4: current contracts, remaining baseline gaps, and unimplemented
 // acceptance vectors are separate results. No production behavior is replaced.
 // See docs/contracts/studio-reader-session-navigation-m01.md for scope,
 // policies and later write-sets.
@@ -490,7 +490,7 @@ try {
   // transition, rather than turning animations off or overriding the CSS.
   await mmPage.waitForFunction(() => {
     const refs = H2O.MM.mnmp.api.ui.getRefs();
-    return getComputedStyle(refs.toggle).opacity === '0.15' && refs.root.getBoundingClientRect().width > 0;
+    return getComputedStyle(refs.toggle).opacity === '1' && getComputedStyle(refs.root).opacity === '1' && refs.root.getBoundingClientRect().width > 0;
   }, null, { timeout: 10000 });
   const minimap = await mmPage.evaluate(() => {
     const api = H2O.MM.mnmp.api.ui, refs = api.getRefs();
@@ -516,16 +516,100 @@ try {
     assert.ok(minimap.before.collapsed && minimap.before.panelCollapsed && minimap.before.faded);
     assert.ok(minimap.expanded && minimap.collapsedAgain);
   });
-  await check('baseline', 'RDR-LIVE-002: collapsed access opacity 0.15; no aria-label/title; div outside keyboard tab order', () => {
-    assert.equal(minimap.before.opacity, '0.15');
-    assert.equal(minimap.before.ariaLabel, null);
-    assert.equal(minimap.before.title, null);
-    assert.equal(minimap.before.tag, 'DIV');
-    assert.equal(minimap.before.tabIndex, -1);
-    assert.equal(minimap.before.role, null);
-    console.log(`  RDR-LIVE-002 observation: ${JSON.stringify(minimap)}`);
+  const accessSelector = '[data-cgxui="mnmp-access"][data-cgxui-owner="mnmp"]';
+  const access = mmPage.locator(accessSelector);
+  await check('current', 'RDR-LIVE-002 repaired: native named MiniMap button, visible label/contrast/footprint and pointer hit target without hover', async () => {
+    await mmPage.mouse.move(0, 0);
+    const observed = await access.evaluate(button => {
+      const refs = H2O.MM.mnmp.api.ui.getRefs(), style = getComputedStyle(button), box = button.getBoundingClientRect();
+      const wrapper = getComputedStyle(refs.toggle), panel = getComputedStyle(refs.panel);
+      const luminance = color => {
+        const values = color.match(/[\d.]+/g).slice(0, 3).map(Number).map(v => {
+          v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+        });
+        return 0.2126 * values[0] + 0.7152 * values[1] + 0.0722 * values[2];
+      };
+      const a = luminance(style.color), b = luminance(wrapper.backgroundColor);
+      let effectiveOpacity = 1;
+      for (let el = button; el; el = el.parentElement) effectiveOpacity *= Number(getComputedStyle(el).opacity);
+      return { tag: button.tagName, type: button.type, disabled: button.disabled, tabIndex: button.tabIndex,
+        name: button.getAttribute('aria-label'), expanded: button.getAttribute('aria-expanded'), controls: button.getAttribute('aria-controls'), panelId: refs.panel.id,
+        label: button.textContent, visible: style.visibility === 'visible' && style.display !== 'none' && wrapper.visibility === 'visible',
+        width: box.width, height: box.height, font: parseFloat(style.fontSize),
+        opacity: Number(wrapper.opacity), effectiveOpacity, background: wrapper.backgroundColor, border: parseFloat(wrapper.borderTopWidth),
+        contrast: (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05),
+        hit: document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) === button,
+        inViewport: box.x >= 0 && box.y >= 0 && box.right <= innerWidth && box.bottom <= innerHeight,
+        noHover: !refs.toggle.matches(':hover'), panelHidden: panel.visibility === 'hidden',
+        nestedButtons: button.querySelectorAll('button').length,
+        pins: Array.from(refs.toggle.querySelectorAll('.cgx-mm-pin')).map(pin => {
+          const rect = pin.getBoundingClientRect();
+          return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === pin;
+        }),
+      };
+    });
+    assert.equal(await mmPage.getByRole('button', { name: 'Show MiniMap navigation', exact: true }).count(), 1);
+    assert.equal(observed.tag, 'BUTTON'); assert.equal(observed.type, 'button');
+    assert.equal(observed.disabled, false); assert.equal(observed.tabIndex, 0);
+    assert.equal(observed.expanded, 'false'); assert.equal(observed.controls, null); assert.equal(observed.panelId, '');
+    assert.equal(observed.label, 'MiniMap'); assert.equal(observed.nestedButtons, 0);
+    assert.ok(observed.visible && observed.hit && observed.inViewport && observed.noHover && observed.panelHidden, JSON.stringify(observed));
+    assert.ok(observed.width >= 64 && observed.height >= 32 && observed.font >= 12);
+    assert.ok(observed.opacity === 1 && observed.effectiveOpacity === 1 && observed.border >= 1 && observed.contrast >= 4.5, JSON.stringify(observed));
+    assert.equal(observed.pins.length, 3); assert.ok(observed.pins.every(Boolean), 'existing independent pin controls remain hit-testable');
+    console.log(`  Collapsed affordance: ${JSON.stringify(observed)}`);
+    if (process.env.H2O_READER_ACCESS_SCREENSHOT) await mmPage.screenshot({ path: process.env.H2O_READER_ACCESS_SCREENSHOT });
   });
-  console.log('FUTURE POST-FIX EXPECTATION (T4; pending): visible collapsed affordance and focus indicator; pointer click and Tab/Enter/Space expand/collapse; accessible name; preserve all six modules and working engine. See companion contract for acceptance vectors.');
+  await check('current', 'RDR-LIVE-002: sequential Tab, Enter and Space use one native click each; focus-visible and panel state stay coherent', async () => {
+    // Real sequential keyboard navigation; never call focus() to establish access.
+    await mmPage.keyboard.press('Tab');
+    const focused = await access.evaluate(button => {
+      const style = getComputedStyle(button);
+      window.readerAccessClicks = 0;
+      button.addEventListener('click', () => { readerAccessClicks++; });
+      return { active: document.activeElement === button, visible: button.matches(':focus-visible'),
+        outline: style.outlineStyle, width: parseFloat(style.outlineWidth), color: style.outlineColor };
+    });
+    assert.ok(focused.active && focused.visible, JSON.stringify(focused));
+    assert.equal(focused.outline, 'solid'); assert.ok(focused.width >= 2);
+    assert.notEqual(focused.color, 'rgba(0, 0, 0, 0)');
+    for (const [key, expanded, clicks] of [['Enter', true, 1], ['Space', false, 2]]) {
+      await mmPage.keyboard.press(key);
+      const observed = await access.evaluate(button => {
+        const refs = H2O.MM.mnmp.api.ui.getRefs();
+        return { expanded: button.getAttribute('aria-expanded'), name: button.getAttribute('aria-label'),
+          panelCollapsed: (refs.panel.getAttribute('data-cgxui-state') || '').split(/\s+/).includes('collapsed'),
+          hidden: getComputedStyle(refs.panel).visibility === 'hidden', active: document.activeElement === button,
+          focusVisible: button.matches(':focus-visible'), clicks: readerAccessClicks };
+      });
+      assert.equal(observed.expanded, String(expanded)); assert.equal(observed.panelCollapsed, !expanded);
+      assert.equal(observed.hidden, !expanded); assert.ok(observed.active && observed.focusVisible);
+      assert.equal(observed.name, expanded ? 'Hide MiniMap navigation' : 'Show MiniMap navigation');
+      assert.equal(observed.clicks, clicks, 'one click per native keyboard activation');
+    }
+  });
+  await check('current', 'RDR-LIVE-002: real pointer activation and programmatic state updates preserve the same access button and state', async () => {
+    for (const expanded of [true, false]) {
+      await access.click(); // Playwright pointer hit-testing and real mouse events
+      const observed = await access.evaluate(button => {
+        const refs = H2O.MM.mnmp.api.ui.getRefs();
+        return { expanded: button.getAttribute('aria-expanded'), hidden: getComputedStyle(refs.panel).visibility === 'hidden',
+          active: document.activeElement === button, clicks: readerAccessClicks };
+      });
+      assert.equal(observed.expanded, String(expanded)); assert.equal(observed.hidden, !expanded);
+      assert.ok(observed.active); assert.equal(observed.clicks, expanded ? 3 : 4);
+    }
+    const observed = await access.evaluate(button => {
+      const ui = H2O.MM.mnmp.api.ui;
+      ui.setCollapsed(false); const expanded = button.getAttribute('aria-expanded') === 'true';
+      ui.setCollapsed(true); const collapsed = button.getAttribute('aria-expanded') === 'false';
+      ui.ensureUI('reader-m01-t4:reuse'); ui.ensureUI('reader-m01-t4:reuse');
+      return { expanded, collapsed, retained: button.isConnected && document.activeElement === button,
+        count: document.querySelectorAll('[data-cgxui="mnmp-access"]').length, clicks: readerAccessClicks };
+    });
+    assert.ok(observed.expanded && observed.collapsed && observed.retained);
+    assert.equal(observed.count, 1); assert.equal(observed.clicks, 4);
+  });
   await check('current', 'MiniMap control fixture completes without uncaught script errors', () => assert.deepEqual(minimapErrors, []));
   // Populate the same real MiniMap fixture only after proving empty boot.
   for (const rel of rendererScripts.slice(1)) await mmPage.addScriptTag({ path: path.join(STUDIO, rel) });
@@ -694,5 +778,5 @@ try {
 } finally {
   await browser?.close();
 }
-console.log(`\nREADER M01 T3: ${JSON.stringify(results)}; lifecycle counts reported above; future behavior is NOT counted as passing current behavior.`);
+console.log(`\nREADER M01 T4: ${JSON.stringify(results)}; lifecycle counts reported above; future behavior is NOT counted as passing current behavior.`);
 process.exitCode = results.failed ? 1 : 0;

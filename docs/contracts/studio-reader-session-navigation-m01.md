@@ -4,7 +4,8 @@ T1 baseline: Product `f2a434c8ad457f82136f0a3668e5ab5d82c2036c`.
 T1 checkpoint: `98f9782dc6231c9ec2c453126eadd8f307d34542` (contract/tests only).
 T2 checkpoint: `5a8cf94a76550bedc1f378d771cd4fb037a08bbb` (selection identity).
 T3 implements common semantic navigation and repairs populated MiniMap rebuilding.
-MiniMap access remains a T4 baseline; Mission acceptance is pending.
+T4 repairs collapsed MiniMap access using a native control and focused browser
+evidence. Mission acceptance is pending; T6 still verifies the integrated New UI.
 
 ## Run and interpret
 
@@ -78,21 +79,52 @@ selection-class or editor side effects. Legitimate current messages without sour
 identity still select with null. Four Edit Mode vectors preserve existing classes
 and invoke the current snapshot's editor exactly once per eligible click.
 
-### RDR-LIVE-002 — control function healthy, access defective
+### RDR-LIVE-002 — historical gap, repaired by T4
 
-All six MiniMap modules report ready; real Core replaces the Kernel stub; Shell
-mounts; the actual bound toggle's programmatic click expands and collapses.
-Default collapsed-on-boot is intentional. Collapsed opacity computes to `0.15`;
-the outer toggle has no `aria-label` or `title`, is a `DIV` without a control role,
-and has `tabIndex: -1`. These are objective reproduction of the live
-discoverability/accessibility finding, not a new screenshot acceptance claim.
+T1–T3 reproduced a working toggle behind an effectively hidden access affordance:
+collapsed opacity `0.15`, no accessible name/title, and a DIV outside keyboard
+order. T4 supersedes that baseline diagnostic with passing browser assertions.
+Default collapsed-on-boot remains intentional and unchanged.
 
-**T4 promotion:** keep intentional default collapse and the working engine.
-Replace the access diagnostic with a nonempty accessible-name assertion,
-pointer hit-testing/click, sequential Tab focus plus Enter/Space activation,
-visible focus indicator, and expanded-state correspondence. Verify a clearly
-visible collapsed affordance in the current New UI without requiring hover.
-Do not reduce discoverability acceptance to a particular numeric opacity.
+The existing `mnmp-toggle` wrapper contains independent pin buttons. Turning
+that wrapper into a native button would nest interactive controls. T4 instead
+creates one `button[type=button]` (`data-cgxui="mnmp-access"`) inside the wrapper,
+as a sibling of the counter and pin row. It covers the same control footprint;
+pins remain separately hit-testable. Its native click bubbles to the existing
+Shell toggle binding. No keydown/keyup activation implementation is added.
+
+The access button exposes `Show MiniMap navigation` while collapsed and
+`Hide MiniMap navigation` while expanded through `aria-label` (also supplied as
+its title). `aria-expanded` follows the actual panel's collapsed state through
+`setCollapsed`, UI reuse and view visibility updates. The existing panel has no
+stable ID, so no `aria-controls` or invented panel ID is added.
+
+Collapsed presentation now shows a readable **MiniMap** label, opaque existing
+Studio surface/text colors and a restrained gold border in the existing 72×36
+control footprint. The old counter remains available and displays again when
+expanded. Pin controls and expanded presentation are retained. The native access
+button stays present in both states and receives a gold 2px `:focus-visible`
+outline with 3px offset. All styles remain scoped within MiniMap Skin.
+
+The real-module browser fixture proves:
+
+- all six modules, Shell mount and intentional default collapse;
+- one native named button, enabled and sequentially Tab-reachable;
+- Enter and Space each generate one click and one state transition;
+- actual pointer hit-testing and click activation;
+- focus-visible matching plus computed outline, with focus retained after toggle;
+- accessible expanded state matching real panel visibility;
+- visible text, text/background contrast, border, font size, usable hit dimensions,
+  viewport containment and unobstructed pin targets without hover;
+- programmatic toggle and repeated UI reuse retain one current access control;
+- all T2/T3 selection, navigation, populated rebuilding and Engine tests.
+
+The focused T4 checkpoint reports **22 current-contract groups, 0 baseline gaps,
+0 failures**, plus the reused lifecycle suite's **19/19 PASS**. This proves bounded
+browser behavior, not final Mission acceptance. T6 must still inspect the collapsed
+affordance in the integrated current-main New UI, including surrounding chrome,
+actual theme and window size. No known fixture visibility/hit-target concern is
+left open; integrated visual acceptance remains pending by the Mission plan.
 
 ### RDR-M01-T1-OBS-001 — T1/T2 gap, repaired by T3
 
@@ -181,10 +213,9 @@ T2 selection regression, runtime-unavailable populated rebuilding, real paired
 numbering, direct runtime-over-pagination priority/fallback coverage, and real
 Engine API/button/page dispatch. The T3 focused checkpoint reports 19 current
 contract groups, 1 known baseline, 0 pending T3 fixtures and 0 failures, with the
-reused lifecycle suite separately reporting 19/19 PASS. RDR-LIVE-002 remains a named
-baseline diagnostic; no T4 access success is claimed.
+reused lifecycle suite separately reporting 19/19 PASS. That historical T3 baseline is superseded by the T4 access evidence above.
 
-## Task write-sets (T3 implemented; T4 pending)
+## Task write-sets (T3/T4 implemented)
 
 Paths below are repository-relative. The validator and this contract remain
 Reader-owned and accompany each task's assertion/contract promotion.
@@ -226,3 +257,12 @@ The live Renderer worktree is clean and its branch has no `studio.js` delta.
 Reader takes only the bounded T3 navigation writer scope. The selection state
 reset added beside binding/unmount must be retained when later composing
 Renderer M04 integration; its profile/reuse/subscription behavior is not included.
+
+T4 pre-mutation recheck: Product main `f2a434c8`, Reader `677e863f`, Management
+`e9bdae1e39474b95c8656e5b29968b26b0367cce`, Renderer `885355fe`.
+No active sibling worktree has a dirty or committed Shell/Skin delta beyond
+Product main; no new remote writer to those files was found. Renderer remains
+outside these control seams. T4 changes only MiniMap Shell/Skin and the two
+Reader evidence files. It requires no Application Shell structural lease and
+leaves `studio.js`, Core, Engine, Renderer, Appearance and package/runtime lists
+unchanged. Product main, Management, PAL and publication remain untouched.

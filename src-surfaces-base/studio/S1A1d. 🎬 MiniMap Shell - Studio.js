@@ -129,6 +129,7 @@
     MINIMAP: 'mnmp-minimap',
     // Top control: toggle button
     TOGGLE: 'mnmp-toggle',
+    ACCESS: 'mnmp-access',
     // Bottom control: dial button (legacy alias: AUX)
     DIAL: 'mnmp-aux',
     AUX: 'mnmp-aux',
@@ -820,6 +821,7 @@
       } else {
         applyBootCollapsedDefault(`view:${String(reason || 'view')}`);
       }
+      ensureToggleAccess(refs);
       return show;
     } finally {
       const ms = perfNow() - perfT0;
@@ -958,6 +960,7 @@
     stateSet(refs.panel, 'collapsed', collapsed);
     stateSet(refs.dial, 'collapsed', collapsed);
     stateSet(refs.toggle, 'faded', collapsed);
+    ensureToggleAccess(refs);
 
     const persist = opts?.persist !== false;
     if (!persist) return collapsed;
@@ -2348,8 +2351,33 @@
     }
   }
 
+  // Keep the existing wrapper and its independent pin buttons. A sibling
+  // native button supplies access without nesting interactive controls or
+  // duplicating keyboard activation; its click bubbles to the existing binding.
+  function ensureToggleAccess(refs = getRefs()) {
+    const { toggle, panel } = refs;
+    if (!toggle || !panel) return;
+    let access = toggle.querySelector(`[${ATTR.CGXUI}="${UI.ACCESS}"][${ATTR.CGXUI_OWNER}="${SkID}"]`);
+    if (!access) {
+      access = document.createElement('button');
+      access.type = 'button';
+      access.setAttribute(ATTR.CGXUI, UI.ACCESS);
+      access.setAttribute(ATTR.CGXUI_OWNER, SkID);
+      access.textContent = 'MiniMap';
+      toggle.prepend(access);
+    }
+    const expanded = !stateHas(panel, 'collapsed');
+    const name = expanded ? 'Hide MiniMap navigation' : 'Show MiniMap navigation';
+    access.setAttribute('aria-label', name);
+    access.setAttribute('aria-expanded', String(expanded));
+    access.title = name;
+    // The existing panel has no stable ID; aria-controls is intentionally absent.
+  }
+
   function ensureToggleBinding(toggle) {
-    if (!toggle || toggle.dataset.h2oShellBound) return;
+    if (!toggle) return;
+    ensureToggleAccess({ toggle, panel: getRefs().panel });
+    if (toggle.dataset.h2oShellBound) return;
     toggle.dataset.h2oShellBound = '1';
 
     bind(toggle, 'click', (e) => {
