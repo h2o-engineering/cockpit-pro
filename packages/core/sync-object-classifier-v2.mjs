@@ -34,7 +34,17 @@ export const P02_BLOCK_REASONS = Object.freeze([
   'permission',
   'transport',
   'format',
-  'capacity'
+  'capacity',
+  /*
+   * P02 folder-relationship (T03): a relationship object whose materialization
+   * depends on local canonical state that does not exist yet - a binding whose
+   * chat or folder is absent. The scheduler-visible class is exactly
+   * `blocked(dependency)`; the typed detail (`folder-missing` /
+   * `chat-missing`) rides beside the verdict and never becomes a class of its
+   * own. Like every other block reason it is re-derived on each pass, so the
+   * object becomes runnable the moment the dependency appears.
+   */
+  'dependency'
 ]);
 
 const SHA256_RE = /^[0-9a-f]{64}$/;

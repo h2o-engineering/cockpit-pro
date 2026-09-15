@@ -1020,6 +1020,7 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   "sync/sync-writer-generation-desktop-v2.tauri.mjs",
   "sync/sync-steady-activation-desktop-v2.tauri.mjs",
   "sync/sync-p02-revision-proof.tauri.mjs",
+  "sync/sync-relationship-materialization-desktop-v2.tauri.mjs",
   "sync/sync-reverse-desktop-v2.tauri.mjs",
   // F3: outbound export log. Mints exportId / sequenceNumber on every
   // disk-writing export and tracks previousExportId. Single persistent
@@ -1759,6 +1760,7 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   "sync/sync-writer-generation-desktop-v2.tauri.mjs",
   "sync/sync-steady-activation-desktop-v2.tauri.mjs",
   "sync/sync-p02-revision-proof.tauri.mjs",
+  "sync/sync-relationship-materialization-desktop-v2.tauri.mjs",
   "sync/sync-reverse-desktop-v2.tauri.mjs",
   "sync/export-log.js",
   "sync/peer-transport.js",

@@ -29,6 +29,7 @@ export const P02_PACKED_LAYOUT = Object.freeze({
     'src-surfaces-base/studio/sync/sync-branch-evidence-desktop-v2.tauri.mjs',
     'src-surfaces-base/studio/sync/sync-p02-tip-memo-desktop-v2.tauri.mjs',
     'src-surfaces-base/studio/sync/sync-writer-generation-desktop-v2.tauri.mjs',
+    'src-surfaces-base/studio/sync/sync-relationship-materialization-desktop-v2.tauri.mjs',
     'src-surfaces-base/studio/sync/sync-reverse-desktop-v2.tauri.mjs',
   ]),
   'core': Object.freeze([
