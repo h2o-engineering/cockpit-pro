@@ -38,7 +38,7 @@ function between(source, startMarker, endMarker) {
 const apply = between(index, '  function applyRowsIfChanged(nextRows, reason, source, refreshSources) {', '\n\n  function rebuildFacets()');
 const refresh = between(index, "  async function refreshFromStores(reason = 'manual') {", '\n\n  // Single point of fan-out:');
 const emit = between(index, '  function emitUpdated(reason) {', '\n\n  // Phase E1 Stage 3.5:');
-const wsBind = between(workspace, '  function bindIndex() {', '\n\n  function bindReady');
+const wsBind = workspace;
 const sidebarBind = between(sidebar, '  function bindUpdates() {', '\n\n  function diagnosticHash');
 const sidebarRender = between(sidebar, '  async function renderFolders() {', '\n\n  async function renderLabels()');
 const shellSchedule = between(shell, 'function scheduleLibraryIndexWorkbenchRefresh(){', '\n\nfunction subscribeLibraryIndexToWorkbenchCache');
@@ -85,7 +85,6 @@ check(!index.includes('h2o_p02_relationship_apply'), 'Library Index must not abs
 check(!index.includes('sync_object_state'), 'Library Index must not absorb Sync bookkeeping');
 
 const signatureBlock = between(index, '  function sortStrings(list) {', '\n\n  function rememberUpdateEvent');
-const applyBlock = apply;
 const events = { skipped: 0, rebuilds: 0 };
 const sandbox = {
   cleanString(value) { return String(value == null ? '' : value).trim(); },
@@ -123,7 +122,7 @@ const sandbox = {
   console,
 };
 vm.createContext(sandbox);
-vm.runInContext(`${signatureBlock}\n${applyBlock}`, sandbox, { filename: paths.index });
+vm.runInContext(`${signatureBlock}\n${apply}`, sandbox, { filename: paths.index });
 
 const rows = [{
   chatId: 'chat-1', snapshotId: 'snap-1', title: 'Same chat', view: 'saved',
