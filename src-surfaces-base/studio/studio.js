@@ -5131,7 +5131,14 @@ function buildReaderDOM(snap, rendererInputRaw){
           const allTurns = Array.prototype.slice.call(sc.querySelectorAll('[data-turn]'));
           const turnIdx = allTurns.indexOf(turn) + 1; /* 1-based */
           if (turnIdx <= 0) return;
-          const messageId = String(turn.getAttribute('data-message-id') || '');
+          /* Reader consumes the current Renderer linkage; turn shells need
+           * not carry message identity. Never match a stale turn by position. */
+          const semanticIndex = getReaderSemanticIndex(root);
+          const turnRecord = semanticIndex?.turns().find((record) => record.target === turn);
+          if (!root.isConnected || !turn.isConnected || !turnRecord) return;
+          const messageRecord = semanticIndex.getMessage(turnRecord.messageKey);
+          if (!messageRecord) return;
+          const messageId = String(messageRecord.sourceRef?.messageId || '').trim();
           /* Phase 7b repair 7 — In Edit Mode, skip the selection-class
            * side-effect entirely. The user explicitly does NOT want any
            * selection visual (bg tint, ::before bar, outline) to appear

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Reader M01 T1: current contracts, named baseline gaps, and unimplemented
+// Reader M01 T2: current contracts, remaining baseline gaps, and unimplemented
 // acceptance vectors are separate results. No production behavior is replaced.
 // See docs/contracts/studio-reader-session-navigation-m01.md for scope,
 // policies and later write-sets.
@@ -95,7 +95,7 @@ try {
   page.on('pageerror', error => pageErrors.push(String(error)));
   // No application server, user data, or external resources. This route supplies
   // only the Shell container fixture; scripts are loaded from the checked-out tree.
-  await page.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><html><body data-route="reader"><main class="wbMain"><div id="viewReader"></div></main></body></html>' }));
+  await page.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><html><body data-route="reader"><main class="wbMain"><section id="viewReader" class="wbReader"></section></main></body></html>' }));
   await page.goto('http://reader.test/c/chat-reader');
   const rendererScripts = [
     'platform/selectors.contract.js', 'platform/html-sanitizer.js',
@@ -111,7 +111,7 @@ try {
   await page.addScriptTag({ content: `(() => {
     const W = window, H2O = W.H2O;
     const state = { currentReaderSnapshot: null, currentReaderRender: null, selectedSnapshotId: '', selectedChatId: '' };
-    let mounted = null, ribbonContext = {}, publications = 0;
+    let mounted = null, ribbonContext = {}, publications = 0, editorCalls = [];
     H2O.studioHost = {
       mount(opts) { mounted = opts; },
       getReaderRoot: () => mounted?.readerRoot,
@@ -123,18 +123,20 @@ try {
     const getEditOverride = () => null;
     const syncReaderTopOffset = () => {};
     const refreshReaderOverlay = () => {};
+    const __mountOverlayEditorOnTurn = (turn, snapshot, turnIdx) => { editorCalls.push({ turn, snapshot, turnIdx }); };
     ${seams}
     H2O.Studio.getReaderContext = ${extract('getReaderContext', true)};
     H2O.Studio.getDockContext = ${extract('getDockContext', true)};
     H2O.Studio.getReaderSemanticIndex = getReaderSemanticIndex;
     H2O.Studio.getReaderDecorationContributions = getReaderDecorationContributions;
     window.readerFixture = {
-      state, get publications() { return publications; },
+      state, get publications() { return publications; }, get editorCalls() { return editorCalls; },
       mount(snap) {
         state.currentReaderRender?.decorationContributions?.disposeAll();
         state.currentReaderSnapshot = snap;
-        ribbonContext = { route: 'reader', sentinel: 'preserved' }; publications = 0;
+        ribbonContext = { route: 'reader', sentinel: 'preserved' }; publications = 0; editorCalls = [];
         const root = buildReaderDOM(snap);
+        document.getElementById('viewReader').dataset.editMode = 'off';
         document.getElementById('viewReader').replaceChildren(root);
         return root;
       },
@@ -168,9 +170,21 @@ try {
       });
       // Interactive descendants and clicks outside a turn must not republish.
       const before = readerFixture.publications;
-      const button = document.createElement('button'); turns[0].appendChild(button); button.click();
+      const controls = [
+        ['button', {}], ['a', { href: '#' }], ['input', {}], ['select', {}], ['textarea', {}],
+        ['div', { contenteditable: 'true' }], ['div', { class: 'wbEditBtn' }],
+        ['div', { class: 'wbEditWrap' }], ['div', { class: 'wbEditTextarea' }],
+      ];
+      for (const [tag, attrs] of controls) {
+        const control = document.createElement(tag);
+        for (const [name, value] of Object.entries(attrs)) control.setAttribute(name, value);
+        turns[0].appendChild(control);
+        control.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        control.remove();
+      }
+      const ignoredInteractive = readerFixture.publications === before;
       readerFixture.mounted.turnsEl.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      return { rich, reversed, mode: index.renderMode, rows, ignoredClicks: readerFixture.publications === before,
+      return { rich, reversed, mode: index.renderMode, rows, ignoredInteractive, ignoredNonTurn: readerFixture.publications === before,
         bound: readerFixture.state.currentReaderRender.root === root && readerFixture.mounted.readerRoot === root,
         sameLifecycle: H2O.Studio.getReaderDecorationContributions(root).semanticIndex === index };
     }));
@@ -187,33 +201,130 @@ try {
         assert.equal(row.selected, true);
         assert.equal(row.selectedCount, 1);
       }
-      assert.ok(run.ignoredClicks);
+      assert.ok(run.ignoredInteractive && run.ignoredNonTurn);
     }
   });
   await check('current', 'buildReaderDOM binds the exact real Renderer root/index/decorations and supplies the host', () => {
     for (const run of selection) assert.ok(run.bound && run.sameLifecycle);
   });
-  await check('baseline', 'RDR-LIVE-001: rich assistant outer ID absent, inner ID present, turn correct, selectedMessageId null', () => {
+  await check('current', 'RDR-LIVE-001 repaired: source message identity for both roles/projections, including reversed role order', () => {
     const row = selection.find(r => r.rich && !r.reversed).rows[1];
     assert.equal(row.outerId, null);
     assert.equal(row.innerId, 'a-1');
     assert.equal(row.sourceId, 'a-1');
     assert.equal(row.context.selectedTurnIdx, 2);
-    assert.equal(row.context.selectedMessageId, null);
+    assert.equal(row.context.selectedMessageId, 'a-1');
     console.log(`  RDR-LIVE-001 observation: ${JSON.stringify(row)}`);
-    // The actual Renderer also exhibits this nesting in the canonical fixture
-    // and for user turns. Pin that observed scope instead of assuming they pass.
+    // T1's null diagnostic is superseded by the real T2 behavior for every row.
+    // The Renderer nesting remains unchanged; Reader consumes its public index.
     for (const run of selection) for (const selected of run.rows) {
       assert.equal(selected.outerId, null);
       assert.equal(selected.innerId, selected.sourceId);
-      assert.equal(selected.context.selectedMessageId, null);
+      assert.equal(selected.sourceId, selected.role === 'user' ? 'u-1' : 'a-1');
+      assert.equal(selected.context.selectedMessageId, selected.sourceId);
     }
-    console.log('  Same identity gap reproduced for both roles in canonical and rich fixtures, including reversed role order.');
+    console.log('  All 8 role/projection/order selections publish the linked source ID and correct 1-based Reader position.');
   });
-  await check('fixture', 'T2: canonical AND rich, both roles, message identity comes from the selected index-linked message', () => {
-    for (const run of selection) for (const row of run.rows) assert.equal(row.sourceId, row.role === 'user' ? 'u-1' : 'a-1');
-    // T2 promotion: assert row.context.selectedMessageId === row.sourceId for
-    // EVERY row above, replacing the RDR-LIVE-001 null diagnostic.
+
+  await check('current', 'missing source identity publishes null without using projection keys or DOM decoys', async () => {
+    const rows = await page.evaluate(() => Object.entries(readerSnapshots).flatMap(([mode, saved]) => {
+      const snap = structuredClone(saved);
+      for (const message of snap.messages) delete message.messageId;
+      for (const turn of snap.richTurns || []) {
+        delete turn.messageId;
+        turn.outerHTML = turn.outerHTML.replace(/ data-message-id="[^"]*"/g, '');
+      }
+      const root = readerFixture.mount(snap);
+      const index = H2O.Studio.getReaderSemanticIndex(root);
+      return index.turns().map((turn, i) => {
+        const message = index.getMessage(turn.messageKey);
+        // Index identity is already sealed. Neither shell nor descendant DOM
+        // attributes are a Reader fallback, even if they appear later.
+        turn.target.setAttribute('data-message-id', 'outer-decoy');
+        message.target.setAttribute('data-message-id', 'inner-decoy');
+        message.target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        return { mode: index.renderMode, expectedMode: mode, sourceId: message.sourceRef?.messageId ?? null,
+          key: message.projectionKey, context: H2O.Studio.ribbon.getContext(), turnIdx: i + 1,
+          publications: readerFixture.publications };
+      });
+    }));
+    assert.equal(rows.length, 4);
+    for (const row of rows) {
+      assert.equal(row.mode, row.expectedMode);
+      assert.equal(row.sourceId, null);
+      assert.ok(row.key);
+      assert.equal(row.context.selectedMessageId, null);
+      assert.equal(row.context.selectedTurnIdx, row.turnIdx);
+      assert.equal(row.context.sentinel, 'preserved');
+      assert.equal(row.publications, row.turnIdx);
+    }
+  });
+  await check('current', 'foreign, stale, detached and discarded render targets do not republish or select by guessed identity', async () => {
+    const rows = await page.evaluate(() => {
+      const f = readerFixture, rows = [];
+      const click = (label, target) => {
+        const before = f.publications;
+        const context = H2O.Studio.ribbon.getContext();
+        const oldClasses = target.className;
+        target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        rows.push({ label, unchanged: before === f.publications && context === H2O.Studio.ribbon.getContext() && target.className === oldClasses });
+      };
+      const oldRoot = f.mount(readerSnapshots.rich);
+      const oldIndex = H2O.Studio.getReaderSemanticIndex(oldRoot);
+      const oldTurn = oldIndex.turns()[0].target;
+      // Reopen the SAME snapshot/IDs with a new DOM: IDs/ordinals alone cannot
+      // prove that an old listener belongs to this current render.
+      const root = f.mount(readerSnapshots.rich);
+      const binding = f.state.currentReaderRender;
+      const turn = binding.semanticIndex.turns()[0].target;
+      turn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      click('detached previous render, same source IDs', oldTurn);
+      document.getElementById('viewReader').appendChild(oldRoot);
+      click('connected previous render, same source IDs', oldTurn);
+      oldRoot.remove();
+      const clone = turn.cloneNode(true);
+      clone.classList.remove('is-ribbon-selected');
+      f.mounted.turnsEl.appendChild(clone);
+      click('foreign cloned turn inside current container', clone);
+      clone.remove();
+      f.state.currentReaderRender = Object.freeze({ ...binding, semanticIndex: oldIndex });
+      click('current root bound to foreign index with identical IDs/ordinals', turn);
+      f.state.currentReaderRender = binding;
+      root.remove();
+      click('detached current render', turn);
+      document.getElementById('viewReader').appendChild(root);
+      f.state.currentReaderRender = null;
+      click('discarded current binding', turn);
+      f.state.currentReaderRender = binding;
+      return rows;
+    });
+    assert.equal(rows.length, 6);
+    for (const row of rows) assert.ok(row.unchanged, row.label);
+  });
+  await check('current', 'Edit Mode keeps its selection classes unchanged, publishes identity and invokes single-click editor once', async () => {
+    const rows = await page.evaluate(() => Object.values(readerSnapshots).flatMap(snap => {
+      const f = readerFixture, root = f.mount(snap);
+      document.getElementById('viewReader').dataset.editMode = 'on';
+      const turns = H2O.Studio.getReaderSemanticIndex(root).turns();
+      turns[0].target.classList.add('is-ribbon-selected');
+      return turns.map((turn, i) => {
+        const before = turns.map(t => t.target.className).join('|');
+        turn.target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        const edit = f.editorCalls.at(-1);
+        return { sameClasses: before === turns.map(t => t.target.className).join('|'),
+          context: H2O.Studio.ribbon.getContext(), expectedId: turn.sourceRef.messageId,
+          turnIdx: i + 1, calls: f.editorCalls.length,
+          correctEditor: edit?.turn === turn.target && edit?.snapshot === snap && edit?.turnIdx === i + 1 };
+      });
+    }));
+    assert.equal(rows.length, 4);
+    for (const row of rows) {
+      assert.ok(row.sameClasses && row.correctEditor);
+      assert.equal(row.calls, row.turnIdx);
+      assert.equal(row.context.selectedMessageId, row.expectedId);
+      assert.equal(row.context.selectedTurnIdx, row.turnIdx);
+      assert.equal(row.context.sentinel, 'preserved');
+    }
   });
 
   await check('current', 'Reader/Dock contexts follow A -> B -> closed and preserve visible saved-editor compatibility', async () => {
@@ -333,5 +444,5 @@ try {
 } finally {
   await browser?.close();
 }
-console.log(`\nREADER M01 T1: ${JSON.stringify(results)}; lifecycle counts reported above; future behavior is NOT counted as passing current behavior.`);
+console.log(`\nREADER M01 T2: ${JSON.stringify(results)}; lifecycle counts reported above; future behavior is NOT counted as passing current behavior.`);
 process.exitCode = results.failed ? 1 : 0;
