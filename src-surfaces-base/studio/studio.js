@@ -3597,6 +3597,103 @@ function collectFolderSidebarItems(rows, view, mode = "canonical"){
   return out;
 }
 
+const FOLDER_SIDEBAR_CONTRIBUTION_CONTRACT = "h2o.studio.folder-sidebar-contribution.v1";
+const LIBRARY_FOLDER_COMMAND_CONTRACT = "h2o.library.folder-commands.v1";
+const FOLDER_SIDEBAR_SHELL_OWNER = "L-STUDIO-APPLICATION-SHELL";
+const FOLDER_COMMAND_LIBRARY_OWNER = "L-COCKPIT-LIBRARY";
+
+function readFolderSidebarContribution(){
+  const service = W.H2O?.Studio?.FolderSidebarContribution;
+  if (
+    !service
+    || service.contract !== FOLDER_SIDEBAR_CONTRIBUTION_CONTRACT
+    || service.owner !== FOLDER_SIDEBAR_SHELL_OWNER
+    || service.contributor !== FOLDER_COMMAND_LIBRARY_OWNER
+    || service.libraryCommandContract !== LIBRARY_FOLDER_COMMAND_CONTRACT
+    || typeof service.getContribution !== "function"
+    || typeof service.getCommandAuthority !== "function"
+  ) return null;
+
+  let contribution = null;
+  let authority = null;
+  try {
+    contribution = service.getContribution();
+    authority = service.getCommandAuthority();
+  } catch {
+    return null;
+  }
+  if (
+    !contribution
+    || contribution.contract !== FOLDER_SIDEBAR_CONTRIBUTION_CONTRACT
+    || contribution.sourceOwner !== FOLDER_COMMAND_LIBRARY_OWNER
+    || !Array.isArray(contribution.rows)
+    || !Array.isArray(contribution.actions)
+    || !authority
+    || authority.contract !== LIBRARY_FOLDER_COMMAND_CONTRACT
+    || authority.owner !== FOLDER_COMMAND_LIBRARY_OWNER
+    || typeof authority.execute !== "function"
+  ) return null;
+
+  const actions = contribution.actions.map((descriptor) => {
+    const command = String(descriptor?.command || "").trim();
+    if (!command) return null;
+    const input = descriptor?.input && typeof descriptor.input === "object" ? descriptor.input : {};
+    return Object.freeze({
+      command,
+      input,
+      execute(nextInput = input){
+        return authority.execute(command, nextInput);
+      },
+    });
+  }).filter(Boolean);
+
+  return {
+    rows: contribution.rows.filter((row) => row && typeof row === "object"),
+    actions,
+  };
+}
+
+function composeFolderSidebarContribution(items, contribution, review = false){
+  if (!contribution) return items;
+  const out = Array.isArray(items) ? items.slice() : [];
+  for (const row of contribution.rows){
+    const folderId = String(row.folderId || row.id || "").trim();
+    if (!folderId) continue;
+    const isReview = row.review === true
+      || row.localReview === true
+      || row.section === "review"
+      || !!row.reviewBucket
+      || row.isExtra === true
+      || row.isTestCandidate === true
+      || row.isConflict === true;
+    if (isReview !== review) continue;
+    const index = out.findIndex((item) => String(item?.folderId || "") === folderId);
+    const current = index >= 0 ? out[index] : {};
+    const isUnfiled = row.isUnfiled === true || folderId === FOLDER_FILTER_NONE;
+    const next = {
+      ...current,
+      ...row,
+      folderId,
+      label: String(row.label || row.name || current.label || folderId).trim() || folderId,
+      kind: isUnfiled ? "utility" : "folder",
+      folderKind: String(row.folderKind || current.folderKind || "local").trim() || "local",
+      iconColor: normalizeSidebarIconColor(row.iconColor || row.color || current.iconColor || ""),
+      isUnfiled,
+    };
+    if (index >= 0) out[index] = next;
+    else out.push(next);
+  }
+
+  return out.map((item) => {
+    const folderId = String(item?.folderId || "").trim();
+    const folderContributionActions = contribution.actions.filter((action) => {
+      const actionFolderId = String(action.input?.folderId || action.input?.id || "").trim();
+      return !!actionFolderId && actionFolderId === folderId;
+    });
+    return folderContributionActions.length ? { ...item, folderContributionActions } : item;
+  });
+}
+
 const SIDEBAR_FOLDER_ICON_SVG = `
   <svg viewBox="0 0 24 24" aria-hidden="true">
     <path d="M3 6.5A2.5 2.5 0 0 1 5.5 4H10l2 2h6.5A2.5 2.5 0 0 1 21 8.5v9A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5v-11Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
@@ -3769,6 +3866,7 @@ function renderFolderSidebarRow(view, item, opts){
           iconKey: appearance?.icon || "folder",
           folderKind: item.folderKind || item.kind || "",
           isCanonical: item.isCanonical === true,
+          folderContributionActions: Array.isArray(item.folderContributionActions) ? item.folderContributionActions : [],
         });
       }
     });
@@ -3780,16 +3878,27 @@ function renderFolderSidebar(rows, view, selectedFolderId){
   const host = $("#folderList");
   if (!host) return;
   ensureFolderCountToggle();
-  let items = collectFolderSidebarItems(rows, view, "canonical");
+  const folderContribution = readFolderSidebarContribution();
+  let items = composeFolderSidebarContribution(
+    collectFolderSidebarItems(rows, view, "canonical"),
+    folderContribution,
+    false
+  );
   const showLocalReview = folderLocalReviewUiEnabled();
-  const reviewItems = showLocalReview ? collectFolderSidebarItems(rows, view, "review") : [];
+  const reviewItems = showLocalReview
+    ? composeFolderSidebarContribution(collectFolderSidebarItems(rows, view, "review"), folderContribution, true)
+    : [];
   host.innerHTML = "";
   host.dataset.h2oFolderLocalReview = showLocalReview ? "operator" : "hidden";
 
   let folderEntries = items.filter((item) => item.kind === "folder");
   if (!folderEntries.length) {
     state.folderCatalog = normalizeFolderCatalog(makeKnownCanonicalFolderCatalogFallback("studio-sidebar-cache-fallback"));
-    items = collectFolderSidebarItems(rows, view, "canonical");
+    items = composeFolderSidebarContribution(
+      collectFolderSidebarItems(rows, view, "canonical"),
+      folderContribution,
+      false
+    );
     folderEntries = items.filter((item) => item.kind === "folder");
   }
   const reviewEntries = reviewItems.filter((item) => item.kind === "folder");
