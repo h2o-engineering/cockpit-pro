@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Reader M01 T2: current contracts, remaining baseline gaps, and unimplemented
+// Reader M01 T3: current contracts, remaining baseline gaps, and unimplemented
 // acceptance vectors are separate results. No production behavior is replaced.
 // See docs/contracts/studio-reader-session-navigation-m01.md for scope,
 // policies and later write-sets.
@@ -28,17 +28,17 @@ async function check(kind, label, fn) {
 
 // Same source-extraction convention as the existing lifecycle validator.
 // Only these small, named seams run; the full Studio application is not booted.
-function extract(name, assigned = false) {
+function extract(name, assigned = false, text = source) {
   const marker = assigned ? `H2O.Studio.${name} = function` : `function ${name}(`;
-  const at = source.indexOf(marker);
+  const at = text.indexOf(marker);
   assert.ok(at >= 0, `missing source seam: ${name}`);
-  const start = assigned ? source.indexOf('function', at) : at;
-  const open = source.indexOf('{', start);
+  const start = assigned ? text.indexOf('function', at) : at;
+  const open = text.indexOf('{', text.indexOf(')', start));
   let depth = 0;
-  for (let i = open; i < source.length; i += 1) {
-    if (source[i] === '{') depth += 1;
-    if (source[i] === '}' && --depth === 0) {
-      const fn = source.slice(start, i + 1);
+  for (let i = open; i < text.length; i += 1) {
+    if (text[i] === '{') depth += 1;
+    if (text[i] === '}' && --depth === 0) {
+      const fn = text.slice(start, i + 1);
       new vm.Script(`(${fn})`); // fail clearly if a future edit breaks extraction
       return fn;
     }
@@ -57,10 +57,9 @@ await check('current', 'existing Renderer/Reader lifecycle suite', () => {
   assert.equal(run.status, 0, 'required lifecycle suite must be green');
 });
 
-// Proposed T3 acceptance data, NOT a mock navigation implementation. The browser
-// check below only proves these references resolve against the real current index.
+// T3 acceptance vectors execute the source-extracted production navigation API.
 const navigationVectors = Object.freeze({
-  status: 'pending-T3',
+  status: 'implemented-T3',
   targetShape: ['currentRendererRoot', 'projectionKey'],
   orderedTargets: 'currentSemanticIndex.turns()',
   cases: [
@@ -73,6 +72,8 @@ const navigationVectors = Object.freeze({
     { operation: 'previous', selectedOrdinal: 0, expectedOrdinal: null, reason: 'boundary' },
     { operation: 'goTo', projectionKey: 'missing', expectedOrdinal: null, reason: 'unresolved' },
     { operation: 'goTo', root: 'discarded-render', expectedOrdinal: null, reason: 'stale-session' },
+    { operation: 'goTo', root: 'foreign-render', expectedOrdinal: null, reason: 'foreign' },
+    { operation: 'goTo', disconnected: true, expectedOrdinal: null, reason: 'disconnected' },
   ],
   focus: { default: 'target-with-preventScroll', preserve: 'leave-activeElement-unchanged', failed: 'unchanged' },
   scroll: { root: 'Shell-provided', default: 'auto', smooth: 'explicit-opt-in', reducedMotion: 'auto', block: 'nearest', inline: 'nearest', failed: 'unchanged' },
@@ -107,18 +108,19 @@ try {
     'renderer/content/content-renderer.v1.js', 'renderer/chat-renderer.studio.js',
   ];
   for (const rel of rendererScripts) await page.addScriptTag({ path: path.join(STUDIO, rel) });
-  const seams = ['getStudioChatRenderer', 'bindReaderSemanticIndex', 'getReaderSemanticIndex', 'getReaderDecorationContributions', 'buildReaderDOM'].map(name => extract(name)).join('\n');
-  await page.addScriptTag({ content: `(() => {
-    const W = window, H2O = W.H2O;
+  const seams = ['getStudioChatRenderer', 'bindReaderSemanticIndex', 'getReaderSemanticIndex', 'getReaderDecorationContributions', 'isCurrentReaderRoot', 'resolveReaderNavigationTarget', 'getReaderNavigationTarget', 'publishReaderTurnSelection', 'readerNearestScrollDelta', 'goToReaderTarget', 'stepReaderTarget', 'nextReaderTarget', 'previousReaderTarget', 'disposeReaderRenderDecorations', 'studioHostUnmount', 'buildReaderDOM'].map(name => extract(name)).join('\n');
+  const readerSeamsScript = `(() => {
+    const W = window, H2O = W.H2O, $ = selector => document.querySelector(selector);
     const state = { currentReaderSnapshot: null, currentReaderRender: null, selectedSnapshotId: '', selectedChatId: '' };
     let mounted = null, ribbonContext = {}, publications = 0, editorCalls = [];
     H2O.studioHost = {
       mount(opts) { mounted = opts; },
+      unmount() { mounted = null; },
       getReaderRoot: () => mounted?.readerRoot,
       getTurnsRoot: () => mounted?.turnsEl,
       getScrollRoot: () => document.querySelector('.wbMain'),
     };
-    H2O.util = { getChatId: () => state.currentReaderSnapshot?.chatId || '' };
+    H2O.util = Object.assign(H2O.util || {}, { getChatId: () => state.currentReaderSnapshot?.chatId || '' });
     H2O.Studio.ribbon = { getContext: () => ribbonContext, setContext(ctx) { publications++; ribbonContext = ctx; } };
     const getEditOverride = () => null;
     const syncReaderTopOffset = () => {};
@@ -129,8 +131,9 @@ try {
     H2O.Studio.getDockContext = ${extract('getDockContext', true)};
     H2O.Studio.getReaderSemanticIndex = getReaderSemanticIndex;
     H2O.Studio.getReaderDecorationContributions = getReaderDecorationContributions;
+    ${source.match(/H2O\.Studio\.readerNavigation = Object\.freeze\([\s\S]*?\);/)[0]}
     window.readerFixture = {
-      state, get publications() { return publications; }, get editorCalls() { return editorCalls; },
+      state, unmount: studioHostUnmount, get publications() { return publications; }, get editorCalls() { return editorCalls; },
       mount(snap) {
         state.currentReaderRender?.decorationContributions?.disposeAll();
         state.currentReaderSnapshot = snap;
@@ -142,7 +145,8 @@ try {
       },
       get mounted() { return mounted; },
     };
-  })();` });
+  })();`;
+  await page.addScriptTag({ content: readerSeamsScript });
 
   const selection = await page.evaluate(() => {
     const messages = [{ role: 'user', text: 'question', messageId: 'u-1' }, { role: 'assistant', text: 'answer', messageId: 'a-1' }];
@@ -349,22 +353,123 @@ try {
     assert.deepEqual(observed[2], [{ snapshotId: '', chatId: '', title: '' }, { snapshotId: '', chatId: '', source: 'none', eligible: false }]);
     assert.deepEqual(observed[3], { snapshotId: 'editor-snap', chatId: 'editor-chat', source: 'saved-editor', eligible: true });
   });
-  await check('fixture', 'T3: goTo/next/previous vectors resolve against the current immutable Semantic Index; navigation/focus/scroll remain pending', async () => {
-    const observed = await page.evaluate(vectors => {
-      const root = readerFixture.state.currentReaderRender.root;
-      const index = H2O.Studio.getReaderSemanticIndex(root);
-      return { frozen: Object.isFrozen(index) && Object.isFrozen(index.turns()),
-        foreign: H2O.Studio.getReaderSemanticIndex(document.createElement('div')),
-        targets: vectors.cases.filter(c => Number.isInteger(c.expectedOrdinal)).map(c => {
-          const turn = index.turns()[c.expectedOrdinal];
-          return index.getTurn(turn.projectionKey) === turn && root.contains(turn.target) && !!index.getMessage(turn.messageKey);
-        }),
-      };
+  await check('current', 'T3: goTo / next / previous, boundaries and stale/foreign/disconnected rejection in both projections', async () => {
+    const rows = await page.evaluate(vectors => {
+      const f = readerFixture, nav = H2O.Studio.readerNavigation, pane = document.getElementById('viewReader');
+      const scrollRoot = document.querySelector('.wbMain');
+      scrollRoot.style.cssText = 'height:240px;width:640px;overflow:auto;position:relative';
+      const keeper = document.createElement('button'); document.body.prepend(keeper);
+      return Object.entries(readerSnapshots).flatMap(([mode, snap]) => vectors.cases.map(vector => {
+        const oldRoot = f.mount(snap), oldIndex = H2O.Studio.getReaderSemanticIndex(oldRoot);
+        const root = f.mount(snap), index = H2O.Studio.getReaderSemanticIndex(root), turns = index.turns();
+        turns.forEach(t => { t.target.style.cssText = 'height:180px;margin:0'; });
+        const target = { currentRendererRoot: root, projectionKey: turns[vector.targetOrdinal ?? 1].projectionKey };
+        if (vector.root === 'discarded-render') {
+          target.currentRendererRoot = oldRoot;
+          // Even reattaching the old root cannot make the reused key current.
+          pane.appendChild(oldRoot);
+        }
+        if (vector.root === 'foreign-render') target.currentRendererRoot = document.createElement('div');
+        if (vector.projectionKey) target.projectionKey = vector.projectionKey;
+        if (vector.disconnected) turns[1].target.remove();
+        if (vector.selectedOrdinal != null) turns[vector.selectedOrdinal].target.click();
+        scrollRoot.scrollTop = 0; keeper.focus();
+        const before = { context: H2O.Studio.ribbon.getContext(), publications: f.publications,
+          classes: turns.map(t => t.target.className).join('|'), selected: f.state.currentReaderNavigationTarget };
+        const effects = [], scrollCalls = [];
+        const scroll = scrollRoot.scrollTo;
+        scrollRoot.scrollTo = function(options) { effects.push('scroll'); scrollCalls.push(options); return scroll.call(this, options); };
+        const focuses = turns.map(t => t.target.focus);
+        turns.forEach(t => { const focus = t.target.focus; t.target.focus = function(options) { effects.push(['focus', options]); return focus.call(this, options); }; });
+        const ok = vector.operation === 'goTo' ? nav.goTo(target) : nav[vector.operation]();
+        scrollRoot.scrollTo = scroll; turns.forEach((t, i) => { t.target.focus = focuses[i]; });
+        const expected = Number.isInteger(vector.expectedOrdinal) ? turns[vector.expectedOrdinal] : null;
+        const row = { mode, vector, ok, frozen: Object.isFrozen(index) && Object.isFrozen(turns), sameKey: oldIndex.turns()[1].projectionKey === turns[1].projectionKey,
+          effects, scrollCalls, selectedCount: root.querySelectorAll('.is-ribbon-selected').length,
+          selected: expected ? expected.target.classList.contains('is-ribbon-selected') : false,
+          context: H2O.Studio.ribbon.getContext(), expectedId: expected ? index.getMessage(expected.messageKey).sourceRef?.messageId : null,
+          publications: f.publications - before.publications,
+          focused: document.activeElement === expected?.target, noTabStop: turns.every(t => t.target.tabIndex === -1),
+          unchanged: before.context === H2O.Studio.ribbon.getContext() && before.selected === f.state.currentReaderNavigationTarget &&
+            before.classes === turns.map(t => t.target.className).join('|') && document.activeElement === keeper && scrollRoot.scrollTop === 0 };
+        oldRoot.remove(); return row;
+      }));
     }, navigationVectors);
-    assert.ok(observed.frozen);
-    assert.equal(observed.foreign, null);
-    assert.ok(observed.targets.length > 0 && observed.targets.every(Boolean));
-    console.log(`  FUTURE T3 vectors: ${JSON.stringify(navigationVectors)}`);
+    assert.equal(rows.length, 22);
+    for (const row of rows) {
+      assert.ok(row.frozen, 'current Renderer index remains immutable');
+      assert.ok(row.sameKey, 'stale case really reuses the key');
+      if (row.vector.expectedOrdinal == null) {
+        assert.equal(row.ok, false, JSON.stringify(row));
+        assert.ok(row.unchanged); assert.equal(row.publications, 0); assert.deepEqual(row.effects, []);
+      } else {
+        assert.equal(row.ok, true, JSON.stringify(row));
+        assert.equal(row.context.selectedTurnIdx, row.vector.expectedOrdinal + 1);
+        assert.equal(row.context.selectedMessageId, row.expectedId);
+        assert.equal(row.context.sentinel, 'preserved');
+        assert.equal(row.publications, 1); assert.equal(row.selectedCount, 1);
+        assert.ok(row.selected && row.focused && row.noTabStop, JSON.stringify(row));
+        assert.deepEqual(row.effects, [['focus', { preventScroll: true }], 'scroll']);
+        assert.equal(row.scrollCalls.length, 1); assert.equal(row.scrollCalls[0].behavior, 'auto');
+      }
+    }
+    console.log('  22 navigation vectors PASS (canonical + rich); accepted transitions publish once; rejected transitions have no side effects.');
+  });
+  await check('current', 'T3: preserve-focus, opt-in smooth, reduced motion and Shell-only nearest scrolling', async () => {
+    for (const reducedMotion of ['no-preference', 'reduce']) {
+      await page.emulateMedia({ reducedMotion });
+      const rows = await page.evaluate(() => Object.values(readerSnapshots).flatMap(snap => [undefined, { preserveFocus: true }, { behavior: 'smooth' }].map(options => {
+        const root = readerFixture.mount(snap), nav = H2O.Studio.readerNavigation;
+        const turns = H2O.Studio.getReaderSemanticIndex(root).turns();
+        turns.forEach(t => { t.target.style.cssText = 'height:180px;margin:0'; });
+        const scrollRoot = document.querySelector('.wbMain'); scrollRoot.scrollTop = 0;
+        const keeper = document.querySelector('button'); keeper.focus();
+        const target = turns[1].target, bounds = target.getBoundingClientRect(), viewport = scrollRoot.getBoundingClientRect();
+        const expectedTop = bounds.bottom - viewport.top - scrollRoot.clientTop - scrollRoot.clientHeight;
+        const beforeWindow = window.scrollY, calls = [], scroll = scrollRoot.scrollTo;
+        scrollRoot.scrollTo = function(options) { calls.push(options); return scroll.call(this, options); };
+        const ok = nav.goTo(nav.targetForElement(target), options);
+        scrollRoot.scrollTo = scroll;
+        return { ok, options, calls, expectedTop, actualTop: scrollRoot.scrollTop,
+          preserve: document.activeElement === keeper, focused: document.activeElement === target,
+          noTabStop: target.tabIndex === -1, windowUnchanged: window.scrollY === beforeWindow };
+      })));
+      for (const row of rows) {
+        assert.ok(row.ok && row.noTabStop && row.windowUnchanged);
+        assert.equal(row.preserve, row.options?.preserveFocus === true);
+        assert.equal(row.focused, row.options?.preserveFocus !== true, JSON.stringify(row));
+        assert.equal(row.calls.length, 1);
+        const behavior = row.options?.behavior === 'smooth' && reducedMotion === 'no-preference' ? 'smooth' : 'auto';
+        assert.equal(row.calls[0].behavior, behavior);
+        assert.equal(row.calls[0].left, 0);
+        assert.ok(Math.abs(row.calls[0].top - row.expectedTop) < 1, JSON.stringify(row));
+        if (behavior === 'auto') assert.ok(Math.abs(row.actualTop - row.expectedTop) < 1, JSON.stringify(row));
+      }
+    }
+    console.log('  12 focus/motion vectors PASS; actual immediate scroll stays in the Shell container.');
+  });
+
+  await check('current', 'T3: temporary focus accommodation cleans up on blur, existing tabindex is preserved, discard clears selection', async () => {
+    const observed = await page.evaluate(() => {
+      const f = readerFixture, nav = H2O.Studio.readerNavigation;
+      const root = f.mount(readerSnapshots.canonical), turns = H2O.Studio.getReaderSemanticIndex(root).turns();
+      const target = nav.targetForElement(turns[0].target);
+      nav.goTo(target);
+      const focused = document.activeElement === turns[0].target && turns[0].target.getAttribute('tabindex') === '-1';
+      document.querySelector('button').focus();
+      const cleaned = !turns[0].target.hasAttribute('tabindex');
+      turns[1].target.setAttribute('tabindex', '-1');
+      nav.next(); // the clicked/navigated first remains the current semantic selection
+      document.querySelector('button').focus();
+      const preserved = turns[1].target.getAttribute('tabindex') === '-1';
+      const before = f.publications;
+      f.unmount('reader-m01-t3:leave');
+      const discarded = f.state.currentReaderNavigationTarget === null && !nav.goTo(target) && !nav.next() && !nav.previous() && f.publications === before;
+      const reopened = f.mount(readerSnapshots.canonical);
+      const next = nav.next() && H2O.Studio.ribbon.getContext().selectedTurnIdx === 1;
+      return { focused, cleaned, preserved, discarded, reopened: reopened !== root, next };
+    });
+    assert.ok(Object.values(observed).every(Boolean), JSON.stringify(observed));
   });
 
   await check('current', 'Reader browser fixture completes without uncaught script errors', () => assert.deepEqual(pageErrors, []));
@@ -422,27 +527,172 @@ try {
   });
   console.log('FUTURE POST-FIX EXPECTATION (T4; pending): visible collapsed affordance and focus indicator; pointer click and Tab/Enter/Space expand/collapse; accessible name; preserve all six modules and working engine. See companion contract for acceptance vectors.');
   await check('current', 'MiniMap control fixture completes without uncaught script errors', () => assert.deepEqual(minimapErrors, []));
-  // Keep the additional populated-content finding visible; it is not a T1 fix
-  // and must not be hidden behind the healthy control-only boot result.
-  const transcript = await page.evaluate(() => readerFixture.state.currentReaderRender.root.outerHTML);
-  const populated = await mmPage.evaluate(html => {
-    document.getElementById('viewReader').innerHTML = html;
+  // Populate the same real MiniMap fixture only after proving empty boot.
+  for (const rel of rendererScripts.slice(1)) await mmPage.addScriptTag({ path: path.join(STUDIO, rel) });
+  await mmPage.addScriptTag({ content: readerSeamsScript });
+  const snapshots = await page.evaluate(() => readerSnapshots);
+  const populated = await mmPage.evaluate(snapshots => {
+    window.readerSnapshots = snapshots;
+    document.getElementById('viewReader').className = 'wbReader';
     const diagnostics = H2O_MM_SHARED.diag.ensure().errors;
-    const before = diagnostics.length;
-    const result = H2O.MM.mnmp.api.core.rebuildNow('reader-m01-t1:populated');
-    return { result, errors: diagnostics.slice(before).map(e => `${e.msg}: ${String(e.where)}`) };
-  }, transcript);
-  await check('baseline', 'RDR-M01-T1-OBS-001: populated MiniMap rebuild encounters undeclared rt (separate from healthy boot/toggle)', () => {
-    assert.equal(populated.result?.status, 'error');
-    assert.equal(populated.result?.ok, false);
-    assert.match(populated.errors.join('\n'), /rt is not defined/);
-    console.log(`  RDR-M01-T1-OBS-001 observation: ${JSON.stringify(populated)}`);
+    return Object.entries(snapshots).map(([mode, snap]) => {
+      readerFixture.mount(snap);
+      const before = diagnostics.length;
+      const core = H2O.MM.mnmp.api.core;
+      const result = core.rebuildNow('reader-m01-t3:populated');
+      return { mode, result, turns: core.getTurnList().map(t => ({ turnId: t.turnId, answerId: t.answerId, index: t.index, keys: Object.keys(t) })),
+        errors: diagnostics.slice(before).map(e => `${e.msg}: ${String(e.where)}`) };
+    });
+  }, snapshots);
+  await check('current', 'RDR-M01-T1-OBS-001 resolved: populated real MiniMap Core rebuilding succeeds in both projections', () => {
+    for (const row of populated) {
+      assert.equal(row.result?.ok, true, JSON.stringify(row));
+      assert.notEqual(row.result?.status, 'error');
+      assert.ok(row.turns.length > 0); assert.deepEqual(row.errors, []);
+    }
+    console.log(`  Populated rebuild: ${JSON.stringify(populated)}`);
   });
+
+  await mmPage.addScriptTag({ path: path.join(STUDIO, 'S0A1a. 🎬 H2O Core - Studio.js') });
+  await check('current', 'MiniMap Engine API and real button dispatch use Reader navigation with current Core membership', async () => {
+    const rows = await mmPage.evaluate(async () => {
+      const rows = [];
+      for (const [mode, snap] of Object.entries(readerSnapshots)) {
+      await new Promise(resolve => setTimeout(resolve, 440)); // distinct user gestures, outside double-click suppression
+      const root = readerFixture.mount(snap), index = H2O.Studio.getReaderSemanticIndex(root);
+      H2O.index.refresh('reader-m01-t3');
+      const core = H2O.MM.mnmp.api.core, engine = H2O.MM.mnmp.api.rt;
+      core.rebuildNow('reader-m01-t3:engine');
+      const turn = core.getTurnList()[0], btn = core.getBtnById(turn.turnId);
+      const api = H2O.Studio.readerNavigation, calls = [];
+      H2O.Studio.readerNavigation = { ...api, goTo(target, options) {
+        calls.push({ current: target.currentRendererRoot === root, key: target.projectionKey, options });
+        return api.goTo(target, options);
+      } };
+      const before = readerFixture.publications;
+      const ok = engine.setActiveTurnId(turn.turnId);
+      const apiContext = H2O.Studio.ribbon.getContext();
+      const afterApi = readerFixture.publications;
+      btn.click();
+      const buttonContext = H2O.Studio.ribbon.getContext();
+      const afterButton = readerFixture.publications;
+      H2O.MM.mnmp.api.ui.setViewMode('qa'); core.rebuildNow('reader-m01-t3:qa');
+      const qBtn = document.querySelector('[data-cgxui="mnmp-qbtn"], [data-cgxui="mm-qbtn"]');
+      if (qBtn) {
+        qBtn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }));
+        qBtn.click();
+      }
+      const questionContext = H2O.Studio.ribbon.getContext();
+      H2O.Studio.readerNavigation = api;
+      rows.push({ mode, ok, calls, apiContext, buttonContext, apiPublications: afterApi - before,
+        buttonPublications: afterButton - afterApi, questionPublications: readerFixture.publications - afterButton, questionContext, qBtn: !!qBtn, expectedKey: index.turns()[1].projectionKey,
+        turn: { id: turn.turnId, keys: Object.keys(core.getTurnById(turn.turnId)), btn: btn.outerHTML },
+        focused: document.activeElement === index.turns()[0].target });
+      }
+      return rows;
+    });
+    for (const row of rows) {
+      assert.ok(row.ok, JSON.stringify(row));
+      assert.equal(row.calls.length, 3, JSON.stringify(row));
+      assert.ok(row.calls.every(c => c.current));
+      assert.ok(row.calls.slice(0, 2).every(c => c.key === row.expectedKey));
+      assert.equal(row.questionPublications, 1, JSON.stringify(row));
+      assert.ok(row.qBtn); assert.equal(row.questionContext.selectedMessageId, 'u-1');
+      assert.equal(row.questionContext.selectedTurnIdx, 1);
+      assert.equal(row.apiPublications, 1); assert.equal(row.buttonPublications, 1);
+      assert.equal(row.apiContext.selectedMessageId, 'a-1'); assert.equal(row.apiContext.selectedTurnIdx, 2);
+      assert.deepEqual(row.apiContext, row.buttonContext); assert.ok(row.focused);
+    }
+    console.log('  Real MiniMap Engine setActiveTurnId + answer click + question pointer/click: canonical/rich PASS, one Reader publication each.');
+  });
+
+  await check('current', 'MiniMap Core keeps true Q+A numbering across an unanswered turn via the real runtime', async () => {
+    const observed = await mmPage.evaluate(() => {
+      const snap = { snapshotId: 'snap-gaps', chatId: 'chat-gaps', messages: [
+        { role: 'user', messageId: 'q-gap', text: 'unanswered' },
+        { role: 'user', messageId: 'q-2', text: 'second question' },
+        { role: 'assistant', messageId: 'a-2', text: 'second answer' },
+        { role: 'user', messageId: 'q-3', text: 'third question' },
+        { role: 'assistant', messageId: 'a-3', text: 'third answer' },
+      ] };
+      readerFixture.mount(snap); H2O.index.refresh('reader-m01-t3:gaps');
+      const core = H2O.MM.mnmp.api.core, result = core.rebuildNow('reader-m01-t3:gaps');
+      return { result, turns: core.getTurnList().map(t => ({ answerId: t.answerId, index: t.index,
+        runtime: H2O.turnRuntime.getTurnRecordByTurnId(t.turnId)?.turnNo, button: Number(core.getBtnById(t.turnId)?.dataset?.turnIdx) })),
+        unanswered: H2O.turnRuntime.getTurnRecordByQId('q-gap')?.hasAssistant };
+    });
+    assert.ok(observed.result.ok, JSON.stringify(observed));
+    assert.deepEqual(observed.turns, [{ answerId: '', index: 1, runtime: 1, button: 1 }, { answerId: 'a-2', index: 2, runtime: 2, button: 2 }, { answerId: 'a-3', index: 3, runtime: 3, button: 3 }]);
+    assert.equal(observed.unanswered, false);
+  });
+
+  // Exercise the repaired priority branch directly with the actual runtime:
+  // the full Core may choose its shared-record fast path before this helper.
+  const coreSource = fs.readFileSync(path.join(STUDIO, 'S1A1b. 🎬 MiniMap Core - Studio.js'), 'utf8');
+  const coreSeams = ['getTurnRuntimeApi', 'normalizePaginationTurnId', 'normalizePaginationAnswerId', 'buildCanonicalTurnCollection']
+    .map(name => extract(name, false, coreSource)).join('\n');
+  await mmPage.addScriptTag({ content: `(() => {
+    const W = window, TOPW = window;
+    ${coreSeams}
+    window.readerCoreCollection = buildCanonicalTurnCollection;
+  })();` });
+  await check('current', 'Core canonical collection uses runtime pair numbers before pagination/row fallbacks; runtime unavailable stays safe', async () => {
+    const row = await mmPage.evaluate(() => {
+      const rows = [{ answerId: 'a-2', answerIndex: 22, turnNo: 42 }, { answerId: 'a-3', turnNo: 43 }];
+      const runtime = H2O.turnRuntime;
+      const linked = readerCoreCollection(rows).list.map(t => t.index);
+      let fallback;
+      try {
+        H2O.turnRuntime = null;
+        fallback = readerCoreCollection(rows).list.map(t => t.index);
+      } finally { H2O.turnRuntime = runtime; }
+      return { linked, fallback, empty: readerCoreCollection([]) };
+    });
+    assert.deepEqual(row, { linked: [2, 3], fallback: [22, 43], empty: null });
+  });
+
+  await check('current', 'MiniMap page divider uses the same Reader path; stale Core target cannot select the replacement render', async () => {
+    // Let the previous pointer gesture leave the existing double-click window.
+    await mmPage.waitForTimeout(440);
+    await mmPage.evaluate(() => {
+      const f = readerFixture, root = f.mount(readerSnapshots.rich);
+      H2O.index.refresh('reader-m01-t3:page');
+      const core = H2O.MM.mnmp.api.core;
+      core.rebuildNow('reader-m01-t3:page');
+      const api = H2O.Studio.readerNavigation;
+      window.mmPageCalls = [];
+      window.mmOriginalNavigation = api;
+      H2O.Studio.readerNavigation = { ...api, goTo(target, options) {
+        mmPageCalls.push({ current: target.currentRendererRoot === root, key: target.projectionKey });
+        return api.goTo(target, options);
+      } };
+      document.querySelector('.cgxui-mm-page-divider-label').click();
+    });
+    await mmPage.waitForFunction(() => readerFixture.publications === 1, null, { timeout: 3000 });
+    const row = await mmPage.evaluate(() => {
+      const f = readerFixture, core = H2O.MM.mnmp.api.core, engine = H2O.MM.mnmp.api.rt;
+      const context = H2O.Studio.ribbon.getContext(), calls = mmPageCalls.slice();
+      H2O.Studio.readerNavigation = mmOriginalNavigation;
+      const oldTurn = core.getTurnList()[0];
+      const root = f.mount(readerSnapshots.rich);
+      const before = H2O.Studio.ribbon.getContext(), active = document.activeElement;
+      const scrollRoot = document.querySelector('.wbMain'), scroll = scrollRoot.scrollTo, effects = [];
+      scrollRoot.scrollTo = (...args) => effects.push(args);
+      const ok = engine.setActiveTurnId(oldTurn.turnId);
+      scrollRoot.scrollTo = scroll;
+      return { context, calls, ok, unchanged: f.publications === 0 && before === H2O.Studio.ribbon.getContext() && document.activeElement === active && effects.length === 0,
+        newRoot: root !== oldTurn.el?.closest('.cgFrame') };
+    });
+    assert.equal(row.calls.length, 1); assert.ok(row.calls[0].current);
+    assert.equal(row.context.selectedMessageId, 'a-1'); assert.equal(row.context.selectedTurnIdx, 2);
+    assert.equal(row.ok, false); assert.ok(row.unchanged && row.newRoot, JSON.stringify(row));
+  });
+
 } catch (error) {
   results.failed += 1;
   console.error(`FAIL: required Chromium fixture unavailable or incomplete (never a SKIP/PASS)\n${error.stack || error}`);
 } finally {
   await browser?.close();
 }
-console.log(`\nREADER M01 T2: ${JSON.stringify(results)}; lifecycle counts reported above; future behavior is NOT counted as passing current behavior.`);
+console.log(`\nREADER M01 T3: ${JSON.stringify(results)}; lifecycle counts reported above; future behavior is NOT counted as passing current behavior.`);
 process.exitCode = results.failed ? 1 : 0;

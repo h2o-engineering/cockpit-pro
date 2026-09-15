@@ -2,8 +2,9 @@
 
 T1 baseline: Product `f2a434c8ad457f82136f0a3668e5ab5d82c2036c`.
 T1 checkpoint: `98f9782dc6231c9ec2c453126eadd8f307d34542` (contract/tests only).
-T2 promotes the selection identity regression to passing behavior. Navigation
-and MiniMap access remain future acceptance vectors; Mission acceptance is pending.
+T2 checkpoint: `5a8cf94a76550bedc1f378d771cd4fb037a08bbb` (selection identity).
+T3 implements common semantic navigation and repairs populated MiniMap rebuilding.
+MiniMap access remains a T4 baseline; Mission acceptance is pending.
 
 ## Run and interpret
 
@@ -44,7 +45,12 @@ and loads the real Renderer chain. It stubs host mount, Ribbon storage, overlay,
 top-offset and edit lookup collaborators, and spies on editor invocation without
 mounting the Authoring editor; it does not boot the full Studio app.
 MiniMap control coverage loads all six real modules in `studio.html` order in a
-separate empty Reader container; no MiniMap implementation is stubbed.
+separate empty Reader container, then mounts real canonical/rich Reader content.
+The runtime-unavailable rebuild is checked before loading the existing real
+`S0A1a` H2O Core for paired-turn and Engine integration checks. No MiniMap or
+turn-runtime implementation is stubbed. API wrappers observe calls and forward
+to the real Reader implementation. This is an isolated browser fixture, not a
+claim of full integrated New UI acceptance.
 
 ### RDR-LIVE-001 — T1 gap, repaired by T2
 
@@ -88,44 +94,97 @@ visible focus indicator, and expanded-state correspondence. Verify a clearly
 visible collapsed affordance in the current New UI without requiring hover.
 Do not reduce discoverability acceptance to a particular numeric opacity.
 
-### Additional T1 observation — RDR-M01-T1-OBS-001
+### RDR-M01-T1-OBS-001 — T1/T2 gap, repaired by T3
 
-Loading the real modules over populated Renderer content exposed `ReferenceError:
-rt is not defined` in MiniMap Core's `buildCanonicalTurnCollection` (the `if (rt
-&& answerId)` branch). The permanent diagnostic boots the healthy control fixture,
-inserts the real rich transcript, then reproduces the error through
-`core.rebuildNow()`. It reports `ok:false`, `status:"error"` and the `rt` diagnostic.
-This is distinct from RDR-LIVE-002. T1/T2 change no Core implementation. Accepted
-Management T1 evidence assigns this repair to existing T3, within the Reader
-MiniMap navigation substrate; it does not block T2. Boot/toggle PASS does not
-certify populated navigation or full live application health.
+T1/T2 reproduced `ReferenceError: rt is not defined` during populated
+`core.rebuildNow()` in `buildCanonicalTurnCollection`. T3 adds exactly one local
+binding: `const rt = getTurnRuntimeApi()`. That existing Core accessor obtains
+`H2O.turnRuntime`; no new runtime, membership authority or global fallback is added.
+The existing numbering priorities remain runtime `turnNo`, pagination
+`answerIndex`, then existing row/fallback fields.
 
-## Future T3 navigation contract — behavior pending
+Real populated canonical/rich rebuilding now returns `ok:true`, `status:"ok"`,
+with buttons built and no diagnostic errors, including with runtime unavailable.
+With the real H2O Core, an unanswered first turn remains turn/button 1 and the
+following true Q+A pairs remain 2 and 3. This preserves Core membership and
+numbering; Reader message positions still count each user/assistant separately.
 
-One Reader path accepts a current-render target `{ currentRendererRoot,
-projectionKey }`; `goTo`, `next` and `previous` all resolve through that path.
-Use the existing index's `turns()`, `getTurn()` and linked `getMessage()` records.
-There is no duplicate transcript index, new generic Anchor meaning, or durable
-reading-position persistence. Projection keys are valid only with their render.
+## T3 implemented Reader navigation contract
 
-The validator carries explicit two-turn vectors: go-to second, next first→second,
-previous second→first; with no selection, next starts at first and previous at
-last. Boundaries do not wrap. Missing keys, foreign/discarded roots and disconnected
-targets are no-ops with no selection, focus, scroll or notification side effects.
-T3 must execute these vectors against its real service, including a discarded
-root that reuses the same key. T1 only checks fixture references in the real index.
+The frozen `H2O.Studio.readerNavigation` API exposes:
 
-Proposed deterministic policy: default focus goes to the resolved target using
-`preventScroll`; explicit preserve-focus leaves the active element unchanged.
-Default scrolling is immediate (`auto`), with nearest block/inline alignment;
-smooth motion requires explicit opt-in and becomes immediate under reduced motion.
-Apply scrolling only within the Shell-supplied scroll root, with no structural
-changes to `.wbMain`, route containers, Ribbon or Dock. Test policies with focus,
-scroll and notification spies in T3, then verify them in the integrated New UI.
-Publish one coherent selection/session update per accepted transition; retain
-the current Reader accessors and refresh-event compatibility.
+```js
+const target = { currentRendererRoot, projectionKey }; // a turn key
+readerNavigation.goTo(target, { preserveFocus: true, behavior: 'smooth' });
+readerNavigation.next(options);
+readerNavigation.previous(options);
+readerNavigation.targetForElement(currentElement); // target or null
+```
 
-## Task write-sets (T3/T4 remain pending)
+`goTo`, `next` and `previous` return true on an accepted transition and false
+on a no-op. The optional element adapter resolves an element through the
+current index's turn targets/containment, without private Renderer selectors.
+It returns a frozen render-scoped target or null. T3 navigates **turn projections**;
+message/block/text keys are not accepted as turn keys. No generic Anchor API or
+durable reading-position meaning is introduced.
+
+Resolution requires the exact bound root, connected under the current Reader
+pane and matching the current Host mount/snapshot. `getReaderSemanticIndex(root)`
+resolves `getTurn(projectionKey)` and its linked `getMessage(messageKey)`; both
+connected targets must belong to that root and the message must link back to the
+turn. Missing keys, foreign/discarded roots, disconnected targets and mismatched
+indexes produce no selection, publication, focus or scroll. Reattaching an old
+root with the same source IDs and projection key cannot make it current.
+
+Order comes from the current immutable `index.turns()`. Successful clicks and
+navigation retain one current `{ currentRendererRoot, projectionKey }` selection.
+Binding a replacement and unmounting clear it; equivalent refresh keeps it.
+`next` starts at first when unselected; `previous` starts at last. Neither wraps.
+All accepted navigation enters `goToReaderTarget`, sharing selection publication
+with the delegated click handler. Reader position remains the existing 1-based
+`[data-turn]` position; identity remains linked `sourceRef.messageId` or null.
+Ribbon fields merge additively exactly once. Edit Mode keeps selection classes
+unchanged; delegated clicks still invoke the editor as before.
+
+Default focus uses `focus({preventScroll:true})` before Reader scrolling.
+`preserveFocus:true` leaves focus alone. Targets without `tabindex` receive a
+bounded `-1` while focused, removed on blur; they never become sequential tab
+stops. Existing `tabindex` is preserved. Immediate removal after focus was
+rejected by the browser regression because it loses activeElement.
+
+Shell owns `.wbMain`, the actual Reader scroll context in current `studio.css`.
+The Host bridge's transcript `data-scroll-root` marker is explicitly styled with
+visible overflow on Reader routes. Navigation consumes the enclosing `.wbMain`
+without changing structure/styles or discovering alternate ancestors. It computes
+nearest block/inline offsets and calls that container's `scrollTo` once. Default
+behavior is `auto`; `behavior:'smooth'` is explicit opt-in and reduced motion
+forces `auto`. Fully visible targets or targets covering the viewport do not
+shift that axis. No transcript `scrollIntoView` or window-scroll fallback occurs.
+
+### MiniMap integration
+
+Engine answer/question gestures, page-divider navigation and public
+`setActiveTurnId` enter the same Reader API when installed. Core remains the
+source of paired membership, live elements, buttons, numbering and page metadata.
+Retained Core elements must map to the current Reader index; stale elements are
+rejected even if source IDs repeat. Question resolution uses Core/runtime question
+references, or a source-ID lookup in the current Renderer index anchored by a
+proven current answer. No question/answer pairing is inferred by Reader ordinal.
+The Engine does not materialize, query or independently scroll transcript DOM on
+these paths. It retains MiniMap-local active state/centering after acceptance.
+The follow-up click from a handled Reader pointer gesture is suppressed to avoid
+two Reader publications. Collapse/expand and unrelated controls remain intact.
+
+Executable evidence includes both projections, 22 navigation transition/rejection
+vectors, 12 focus/motion vectors, temporary-focus cleanup/discard/reopen, every
+T2 selection regression, runtime-unavailable populated rebuilding, real paired
+numbering, direct runtime-over-pagination priority/fallback coverage, and real
+Engine API/button/page dispatch. The T3 focused checkpoint reports 19 current
+contract groups, 1 known baseline, 0 pending T3 fixtures and 0 failures, with the
+reused lifecycle suite separately reporting 19/19 PASS. RDR-LIVE-002 remains a named
+baseline diagnostic; no T4 access success is claimed.
+
+## Task write-sets (T3 implemented; T4 pending)
 
 Paths below are repository-relative. The validator and this contract remain
 Reader-owned and accompany each task's assertion/contract promotion.
@@ -139,9 +198,9 @@ Reader-owned and accompany each task's assertion/contract promotion.
 Each task also proposes exactly
 `tools/validation/studio/validate-studio-reader-session-navigation-m01.mjs` and
 `docs/contracts/studio-reader-session-navigation-m01.md` (Reader).
-MiniMap Core remains excluded from T2; its T3 addition records the canonical
-Supervisor disposition, not new T2 implementation scope. T2 adds no further
-T3/T4 write-set requirement.
+The T3 Core delta is one accessor binding. T3 adds no new runtime module and
+requires no Renderer, Shell, Runtime or Build lease. T4 still needs only its two
+control-local files plus the existing Reader validator and this document.
 
 Renderer M04 was clean at `efb0dcb0cd5901de04d1101bf0d99116fc7aa66b`, with seven
 Renderer-local implementation/documentation/validation files changed from this
@@ -158,3 +217,12 @@ and seven-file delta remained unchanged, with no `studio.js` mutation. No active
 overlapping writer was found; T2 uses no Renderer lease.
 No M04 delta is absorbed. RDR-LIVE-003 remains outside M01; Highlights, Product
 main, Management, PAL, Runtime admission, packaging and publication are untouched.
+
+T3 pre-mutation recheck: Product main `f2a434c8`, Management
+`f3ae7fcfce0a0d53022c88f7a46512dddf56a4bd`, Renderer branch `885355fe`.
+Renderer T3 is Complete; T4 remains Planned. EXT-READER-LEASE is HDA-authorized
+with its writer window inactive; EXT-APPEARANCE-LEASE is not obtained.
+The live Renderer worktree is clean and its branch has no `studio.js` delta.
+Reader takes only the bounded T3 navigation writer scope. The selection state
+reset added beside binding/unmount must be retained when later composing
+Renderer M04 integration; its profile/reuse/subscription behavior is not included.
