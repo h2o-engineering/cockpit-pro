@@ -1532,6 +1532,39 @@
     });
   }
 
+  // Reader navigation uses the current Semantic Index. Core still owns paired
+  // membership and button/page metadata; no transcript query or materialization
+  // is needed for the current, fully mounted Reader render.
+  function MINI_navigateReaderTarget(ctx, surface = 'answer', options = null) {
+    const studio = W.H2O?.Studio;
+    const navigation = studio?.readerNavigation;
+    if (!navigation) return null; // Reader API not installed (empty boot).
+    const root = W.H2O?.studioHost?.getReaderRoot?.();
+    const index = studio.getReaderSemanticIndex(root);
+    if (!root?.isConnected || !index) return false;
+    const core = getCoreSurface();
+    const turn = ctx?.turn || core?.getTurnById?.(ctx?.turnId || ctx?.id) || null;
+    const answerEl = turn?.el || turn?.primaryAEl || turn?.live?.primaryAEl;
+    // A retained Core record from another render must not acquire a new target
+    // just because that render reused the same source ID.
+    const answerTarget = navigation.targetForElement(answerEl);
+    if (answerEl && (!answerTarget || answerTarget.currentRendererRoot !== root)) return false;
+    let target = answerTarget;
+    if (surface === 'question') {
+      const paired = W.H2O?.turnRuntime?.getTurnRecordByAId?.(turn?.answerId || turn?.primaryAId);
+      const questionEl = turn?.questionEl || turn?.qEl || turn?.live?.qEl || paired?.live?.qEl;
+      const questionId = ctx?.questionId || turn?.questionId || turn?.qId || paired?.qId;
+      // An unanswered turn may supply only its authoritative question element.
+      // Source-ID lookup requires a proven current answer, never a stale element.
+      const message = !questionEl && answerTarget && questionId
+        ? index.messages().find(record => record.sourceRef?.messageId === questionId) : null;
+      target = navigation.targetForElement(questionEl || message?.target);
+    }
+    if (!target || target.currentRendererRoot !== root || !navigation.goTo(target, options)) return false;
+    setActiveTurnId(ctx?.turnId || ctx?.id || turn?.turnId, 'reader:' + surface, { skipPageScroll: true });
+    return true;
+  }
+
   function MINI_scrollToResolvedTarget(target, ctx, surface = 'answer') {
     if (!target) return false;
     scrollPageToTarget(target, true, 'center');
@@ -1896,6 +1929,14 @@
       const turn = canonical?.turn || core?.getTurnList?.()?.[firstTurnIdx - 1] || null;
       const targetId = String(canonical?.answerId || canonical?.turnId || turn?.answerId || turn?.turnId || '').trim();
       if (!targetId) return false;
+      const readerResult = MINI_navigateReaderTarget({ id: targetId, turnId: turn?.turnId, turn }, 'answer');
+      if (readerResult !== null) {
+        if (readerResult) {
+          core?.centerOnPageDivider?.(num, { smooth: false });
+          S.lastActivePageNum = num;
+        }
+        return readerResult;
+      }
 
       const finishSmoothScroll = async () => {
         const ctx = {
@@ -2005,7 +2046,7 @@
       const paginationTurn = turnIdx > 0 ? getPaginationCanonicalTurnByIndex(turnIdx) : null;
       const turnId = String(paginationTurn?.turnId || btn?.dataset?.id || btn?.dataset?.turnId || '').trim();
       const answerId = String(paginationTurn?.answerId || btn?.dataset?.primaryAId || '').trim();
-      const questionId = String(paginationTurn?.questionId || '').trim();
+      const questionId = String(paginationTurn?.questionId || btn?.dataset?.questionId || '').trim();
       const id = surfaceRole === 'question'
         ? (questionId || turnId || answerId)
         : (answerId || turnId || questionId);
@@ -2031,6 +2072,8 @@
 
     const turnActions = {
       answer: (ctx) => {
+        const readerResult = MINI_navigateReaderTarget(ctx, 'answer');
+        if (readerResult !== null) return readerResult;
         if (!ctx?.id) return false;
         MM.program = true;
         MINI_navigateTurnTarget(ctx, 'answer').then(({ ctx: nextCtx, target }) => {
@@ -2044,6 +2087,8 @@
         return true;
       },
       question: (ctx) => {
+        const readerResult = MINI_navigateReaderTarget(ctx, 'question');
+        if (readerResult !== null) return readerResult;
         if (!ctx?.id) return false;
         MM.program = true;
         MINI_navigateTurnTarget(ctx, 'question').then(({ ctx: nextCtx, target }) => {
@@ -2258,7 +2303,10 @@
           runTurnGesture(btn, 'dblclick', e);
           return;
         }
-        runTurnGesture(btn, 'click', e);
+        const handled = runTurnGesture(btn, 'click', e);
+        if (handled && W.H2O?.Studio?.readerNavigation && activePointerPerf?.actionType === 'jumpOrScroll') {
+          suppressClickUntil = now + 360; // the following click is the same Reader transition
+        }
       } finally {
         const perfBucket = pointerPerfState();
         const totalMs = perfNow() - perfT0;
@@ -2444,6 +2492,10 @@
   function setActiveTurnId(id, source = 'api', opts = {}) {
     const key = normalizeNavId(id);
     if (!key) return false;
+    if (!opts?.skipPageScroll) {
+      const readerResult = MINI_navigateReaderTarget({ id: key, turnId: key }, 'answer', opts);
+      if (readerResult !== null) return readerResult;
+    }
 
     const core = getCoreSurface();
     if (!core) {
