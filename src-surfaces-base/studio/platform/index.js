@@ -29,6 +29,22 @@
       return Promise.reject(new Error('H2O.Studio.platform.' + name + ' unavailable (no adapter bound)'));
     };
   }
+  function resolveAssetAgainstDocument(path) {
+    var raw = String(path == null ? '' : path).trim();
+    if (!raw) return '';
+    try {
+      var base = '';
+      if (global.document && typeof global.document.baseURI === 'string') {
+        base = global.document.baseURI;
+      } else if (global.location && typeof global.location.href === 'string') {
+        base = global.location.href;
+      }
+      if (base && typeof global.URL === 'function') {
+        return new global.URL(raw, base).href;
+      }
+    } catch (_) { /* preserve the caller-supplied path below */ }
+    return raw;
+  }
   function inferenceUnavailableStatus() {
     return {
       ok: true,
@@ -111,6 +127,10 @@
       set: unavailableAsync('storage.set'),
       remove: unavailableAsync('storage.remove'),
     },
+    runtime: {
+      resolveAsset: resolveAssetAgainstDocument,
+      openUrl: unavailableAsync('runtime.openUrl'),
+    },
     files: { available: false },
     capture: { available: false },
     auth: { available: false },
@@ -143,14 +163,27 @@
     }
     current = Object.assign({}, fallback, impl);
     current.env = Object.assign({}, fallback.env, impl.env || {});
+    current.runtime = Object.assign({}, fallback.runtime, impl.runtime || {});
+    /* STAB-03 D1 compatibility normalization. Older Tauri adapters expose
+     * openUrl at the adapter top level; promote that existing capability into
+     * the canonical runtime provider until caller migration retires the alias. */
+    if ((!impl.runtime || typeof impl.runtime.openUrl !== 'function') &&
+        typeof impl.openUrl === 'function') {
+      current.runtime.openUrl = impl.openUrl;
+    }
     /* Re-bind the public surface so existing references keep working. */
     platform.env = current.env;
     platform.messaging = current.messaging;
     platform.broadcast = current.broadcast;
     platform.storage = current.storage;
+    platform.runtime = current.runtime;
     platform.files = current.files;
     platform.capture = current.capture;
     platform.auth = current.auth;
+    /* STAB-03 D1 temporary compatibility alias. runtime.openUrl is the
+     * canonical contract; this top-level alias exists only for pre-migration
+     * callers and must not become a second durable feature-facing namespace. */
+    platform.openUrl = current.runtime.openUrl;
     /* Phase 3d-A — passive AI inference contract. Defaults to unavailable
      * and never performs network/provider work unless a future adapter
      * explicitly replaces this surface. */
@@ -158,12 +191,6 @@
     /* Phase 1b — clipboard contract. Defaults to the fallback rejecter
      * if the adapter doesn't expose its own clipboard. */
     platform.clipboard = current.clipboard || fallback.clipboard;
-    /* Tauri-specific extension: openUrl. Mirror onto the public surface
-     * when the adapter provides it so feature code can feature-detect
-     * via `platform.openUrl`. Pre-existing precedent in studio.js
-     * (line 4301) already feature-detects this; the assignment here
-     * just makes it discoverable on the public object too. */
-    if (typeof current.openUrl === 'function') platform.openUrl = current.openUrl;
     /* Tauri-specific extension: window namespace (setAlwaysOnTop, future
      * window operations). Same conditional-mirror pattern as openUrl so the
      * appearance store's feature-detect via `platform.window?.setAlwaysOnTop`
@@ -228,6 +255,9 @@
     messaging: fallback.messaging,
     broadcast: fallback.broadcast,
     storage: fallback.storage,
+    runtime: fallback.runtime,
+    /* Temporary D1 compatibility alias; canonical callers use runtime.openUrl. */
+    openUrl: fallback.runtime.openUrl,
     files: fallback.files,
     capture: fallback.capture,
     auth: fallback.auth,

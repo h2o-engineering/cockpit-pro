@@ -238,6 +238,52 @@
     });
   }
 
+  /* ───────────────────────── runtime URL / navigation (STAB-03 D1) ── */
+
+  function runtimeResolveAsset(path) {
+    var raw = String(path == null ? '' : path).trim();
+    if (!raw) return '';
+    if (!hasRuntime || !chromeApi.runtime || typeof chromeApi.runtime.getURL !== 'function') {
+      return raw;
+    }
+    try {
+      return chromeApi.runtime.getURL(raw.replace(/^\/+/, ''));
+    } catch (_) {
+      return raw;
+    }
+  }
+
+  function runtimeOpenUrl(url, opts) {
+    var safeUrl = String(url == null ? '' : url).trim();
+    if (!safeUrl) {
+      return Promise.reject(new Error('platform.runtime.openUrl: empty url'));
+    }
+    var options = (opts && typeof opts === 'object') ? opts : {};
+    var tabs = chromeApi && chromeApi.tabs;
+    if (tabs && typeof tabs.create === 'function') {
+      return new Promise(function (resolve, reject) {
+        try {
+          tabs.create({ url: safeUrl, active: options.active !== false }, function (tab) {
+            var err = chromeApi.runtime && chromeApi.runtime.lastError;
+            if (err) return reject(new Error(err.message || String(err)));
+            resolve(tab || { ok: true, url: safeUrl });
+          });
+        } catch (e) {
+          reject(e);
+        }
+      });
+    }
+    try {
+      if (typeof global.open === 'function') {
+        var opened = global.open(safeUrl, options.target || '_blank', 'noopener,noreferrer');
+        if (opened) return Promise.resolve(opened);
+      }
+    } catch (e) {
+      return Promise.reject(e);
+    }
+    return Promise.reject(new Error('platform.runtime.openUrl: MV3/browser open primitive unavailable'));
+  }
+
   /* ───────────────────────── files (Phase 3a) ─────────────────────────
    * exportBlob downloads a Blob via the standard browser Blob +
    * URL.createObjectURL + <a download> dance. Mirrors the long-standing
@@ -354,6 +400,7 @@
       onAnyChange: broadcastOnAnyChange,
     },
     storage: { get: storageGet, set: storageSet, remove: storageRemove },
+    runtime: { resolveAsset: runtimeResolveAsset, openUrl: runtimeOpenUrl },
     files: files,
     capture: capture,
     auth: auth,
