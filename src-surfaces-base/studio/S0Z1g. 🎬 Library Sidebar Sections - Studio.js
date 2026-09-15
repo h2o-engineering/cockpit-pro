@@ -3,10 +3,10 @@
 // @name               S0Z1g. 🎬 Library Sidebar Sections - Studio
 // @namespace          H2O.Premium.CGX.library_sidebar_sections.studio
 // @author             HumamDev
-// @version            1.0.0
+// @version            1.1.0
 // @revision           001
-// @build              260511-000060
-// @description        Studio Library sidebar sections: populates Labels, Categories, and Projects sections in the Studio sidebar from H2O.LibraryWorkspace / H2O.LibraryIndex data. Each section heading is collapsible and the state persists per-session. Items link into the Library page's detail routes (#/library/label/<id>, /category/<id>, /project/<id>). Strictly additive — does not change S0Z1f's single Library button, does not touch native ChatGPT scripts.
+// @build              260915-030001
+// @description        Studio Library sidebar sections. STAB-P0 T03 publishes Folder rows/actions through the Shell-owned contribution seam and routes Folder business intent through the Library FolderCommands authority; Labels/Categories/Projects remain owner-local.
 // @match              https://chatgpt.com/*
 // @run-at             document-idle
 // @grant              none
@@ -168,6 +168,102 @@
   function getRouteSvc()  { return getCore()?.getService?.('route') || null; }
   function getChatListSvc() {
     return getCore()?.getService?.('chat-list') || H2O.Library?.LibrarySurfaceHost?.chatListService || null;
+  }
+
+  // STAB-P0 T03 — one Library Folder business-command authority plus the
+  // Shell-owned contribution seam. Sync/Host adapters remain behind these
+  // boundaries and are not re-owned here.
+  const FOLDER_COMMAND_CONTRACT = 'h2o.library.folder-commands.v1';
+  const FOLDER_COMMAND_OWNER = 'L-COCKPIT-LIBRARY';
+  const FOLDER_CONTRIBUTION_CONTRACT = 'h2o.studio.folder-sidebar-contribution.v1';
+  const FOLDER_CONTRIBUTION_OWNER = 'L-STUDIO-APPLICATION-SHELL';
+
+  function folderCommandAuthority() {
+    try {
+      const commands = H2O.Library?.FolderCommands || null;
+      if (!commands || commands.contract !== FOLDER_COMMAND_CONTRACT) return null;
+      if (commands.owner !== FOLDER_COMMAND_OWNER) return null;
+      return typeof commands.execute === 'function' ? commands : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function folderSidebarContribution() {
+    try {
+      const service = H2O.Studio?.FolderSidebarContribution || null;
+      if (!service || service.contract !== FOLDER_CONTRIBUTION_CONTRACT) return null;
+      if (service.owner !== FOLDER_CONTRIBUTION_OWNER) return null;
+      if (service.contributor !== FOLDER_COMMAND_OWNER) return null;
+      return typeof service.setContribution === 'function' ? service : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function folderContributionAction(item = {}, command = '') {
+    const wanted = String(command || '').trim();
+    const actions = Array.isArray(item?.folderContributionActions) ? item.folderContributionActions : [];
+    return actions.find((action) => String(action?.command || '').trim() === wanted && typeof action?.execute === 'function') || null;
+  }
+
+  function folderCommandPayload(item = {}, extra = {}) {
+    const row = item && typeof item === 'object' ? item : {};
+    const patch = extra && typeof extra === 'object' ? extra : {};
+    const folderId = String(patch.folderId || patch.id || row.folderId || row.id || '').trim();
+    const name = String(patch.name || patch.folderName || row.name || row.folderName || row.label || row.title || '').trim();
+    const color = normalizeHexColor(patch.color || patch.iconColor || row.color || row.iconColor || '');
+    return {
+      ...(folderId ? { id: folderId, folderId } : {}),
+      ...(name ? { name, folderName: name } : {}),
+      ...(color ? { color, iconColor: color } : (Object.prototype.hasOwnProperty.call(patch, 'color') ? { color: '', iconColor: '' } : {})),
+      source: String(patch.source || row.source || '').trim(),
+      stateSource: String(patch.stateSource || row.stateSource || '').trim(),
+      sourceKind: String(patch.sourceKind || row.sourceKind || '').trim(),
+      isCanonical: patch.isCanonical === true || row.isCanonical === true,
+      materializedUserFolder: patch.materializedUserFolder === true || row.materializedUserFolder === true,
+      trustedFolderDisplay: patch.trustedFolderDisplay === true || row.trustedFolderDisplay === true,
+      protectedCanonicalFallback: patch.protectedCanonicalFallback === true || row.protectedCanonicalFallback === true,
+      shownInNormalMode: patch.shownInNormalMode === true || row.shownInNormalMode === true,
+      ...patch,
+    };
+  }
+
+  async function executeFolderBusinessCommand(command, input = {}, item = null) {
+    const action = item ? folderContributionAction(item, command) : null;
+    const payload = folderCommandPayload(item || {}, { ...(action?.input || {}), ...(input || {}) });
+    try {
+      if (action) return await action.execute(payload);
+      const authority = folderCommandAuthority();
+      if (!authority) {
+        return {
+          ok: false,
+          status: 'folder-command-contract-unavailable',
+          contract: FOLDER_COMMAND_CONTRACT,
+          owner: FOLDER_COMMAND_OWNER,
+        };
+      }
+      return await authority.execute(command, payload);
+    } catch (e) {
+      err(`folderCommand.${String(command || 'unknown')}`, e);
+      return {
+        ok: false,
+        status: 'folder-command-execution-threw',
+        reason: String(e?.message || e || 'folder command failed'),
+        contract: FOLDER_COMMAND_CONTRACT,
+        owner: FOLDER_COMMAND_OWNER,
+      };
+    }
+  }
+
+  function shouldUseLegacyFolderAdapter(result) {
+    const status = String(result?.status || result?.reason || '').trim();
+    return [
+      'tauri-only',
+      'surface-adapter-unavailable',
+      'actions-unavailable',
+      'native-context-required',
+    ].includes(status);
   }
 
   // ── Tiny DOM helper ────────────────────────────────────────────────────────
@@ -1038,8 +1134,7 @@
   }
 
   function canUseDesktopFolderEditor(mode = '') {
-    if (!studioIsTauri()) return false;
-    if (!desktopFolderEditor()) return false;
+    if (!studioIsTauri() || !folderCommandAuthority()) return false;
     const actions = desktopFolderActions();
     const m = String(mode || '').trim();
     if (m === 'create') return typeof actions?.create === 'function';
@@ -1049,7 +1144,7 @@
   }
 
   function canUseDesktopFolderSoftDelete() {
-    if (!studioIsTauri()) return false;
+    if (!studioIsTauri() || !folderCommandAuthority()) return false;
     const actions = desktopFolderActions();
     return typeof actions?.delete === 'function' || typeof actions?.remove === 'function';
   }
@@ -1068,10 +1163,9 @@
   }
 
   function canUseDesktopFolderRestore() {
-    if (!studioIsTauri()) return false;
-    const store = desktopFolderStore();
-    return typeof store?.restoreTombstonedFolder === 'function' ||
-      typeof store?.restoreFolder === 'function';
+    if (!studioIsTauri() || !folderCommandAuthority()) return false;
+    const actions = desktopFolderActions();
+    return typeof actions?.restore === 'function' || typeof actions?.restoreTombstonedFolder === 'function';
   }
 
   function canUseDesktopFolderPurge() {
@@ -1097,7 +1191,7 @@
   }
 
   function canUseChromeFolderDeleteRequest() {
-    if (studioPlatformAdapter() !== 'mv3') return false;
+    if (studioPlatformAdapter() !== 'mv3' || !folderCommandAuthority()) return false;
     const actions = chromeFolderDeleteRequestActions();
     if (actions && typeof actions.requestDelete === 'function') return true;
     try {
@@ -1117,6 +1211,7 @@
   function canRequestNativeCanonicalFolderColor(item) {
     return item?.isCanonical === true
       && studioPlatformAdapter() === 'mv3'
+      && !!folderCommandAuthority()
       && !!folderMetadataOperationRequest();
   }
 
@@ -1127,6 +1222,7 @@
   function canRequestNativeCanonicalFolderRename(item) {
     return item?.isCanonical === true
       && studioPlatformAdapter() === 'mv3'
+      && !!folderCommandAuthority()
       && !!folderMetadataOperationRequest();
   }
 
@@ -1135,7 +1231,7 @@
   }
 
   function canRequestCanonicalFolderCreate() {
-    return (studioPlatformAdapter() === 'mv3' && !!folderMetadataOperationRequest())
+    return (studioPlatformAdapter() === 'mv3' && !!folderCommandAuthority() && !!folderMetadataOperationRequest())
       || canUseDesktopFolderEditor('create');
   }
 
@@ -1592,27 +1688,31 @@
       return { ok: false, status: blocker, blockers: [blocker] };
     }
     const folderId = String(item?.id || item?.folderId || '').trim();
-    const actions = chromeFolderDeleteRequestActions();
-    const store = W.H2O?.Studio?.store?.tombstoneReviews;
-    const requestFn = typeof actions?.requestDelete === 'function'
-      ? actions.requestDelete.bind(actions)
-      : (typeof store?.requestFolderDelete === 'function' ? store.requestFolderDelete.bind(store) : null);
-    if (!requestFn) {
-      setStatus('Blocked: tombstone-review-store-unavailable', 'blocked');
-      return { ok: false, status: 'tombstone-review-store-unavailable', blockers: ['tombstone-review-store-unavailable'] };
-    }
     setStatus('Requesting Desktop review...', 'pending');
     let result = null;
     try {
-      result = await requestFn({
-        ...item,
+      const commandPayload = folderCommandPayload(item, {
         folderId,
         folderName: String(item?.name || item?.title || '').trim(),
         sourceSurface: 'chrome-studio',
-      }, {
-        sourceSurface: 'chrome-studio',
         reason: 'user-requested-folder-delete',
       });
+      result = await executeFolderBusinessCommand('delete', commandPayload, item);
+      if (shouldUseLegacyFolderAdapter(result)) {
+        const actions = chromeFolderDeleteRequestActions();
+        const store = W.H2O?.Studio?.store?.tombstoneReviews;
+        const requestFn = typeof actions?.requestDelete === 'function'
+          ? actions.requestDelete.bind(actions)
+          : (typeof store?.requestFolderDelete === 'function' ? store.requestFolderDelete.bind(store) : null);
+        if (!requestFn) {
+          setStatus('Blocked: tombstone-review-store-unavailable', 'blocked');
+          return { ok: false, status: 'tombstone-review-store-unavailable', blockers: ['tombstone-review-store-unavailable'] };
+        }
+        result = await requestFn(commandPayload, {
+          sourceSurface: 'chrome-studio',
+          reason: 'user-requested-folder-delete',
+        });
+      }
     } catch (e) {
       err('folderDeleteRequest.request', e);
       setStatus(`Blocked: ${String(e?.message || e || 'request-failed')}`, 'blocked');
@@ -1786,7 +1886,7 @@
       }
       const nextColor = normalizeHexColor(color || '');
       setStatus('Applying...', 'pending');
-      const result = await requestDesktopFolderEditor('color', item, { color: nextColor, iconColor: nextColor });
+      const result = await executeFolderBusinessCommand('color', folderCommandPayload(item, { folderId, color: nextColor, iconColor: nextColor }), item);
       if (result?.ok) {
         const confirmation = await confirmFreshCanonicalFolderColor(folderId, nextColor);
         if (confirmation.ok) {
@@ -1819,6 +1919,22 @@
     }
 
     const nextColor = normalizeHexColor(color || '');
+    const commandAttempt = await executeFolderBusinessCommand('color', folderCommandPayload(item, { folderId, color: nextColor, iconColor: nextColor }), item);
+    if (!shouldUseLegacyFolderAdapter(commandAttempt)) {
+      if (!commandAttempt?.ok) {
+        setStatus(`Blocked: ${String(commandAttempt?.status || commandAttempt?.reason || 'folder-color-command-failed')}`, 'blocked');
+        return commandAttempt;
+      }
+      refreshAfterNativeFolderColorApply();
+      const confirmation = await confirmFreshCanonicalFolderColor(folderId, nextColor);
+      if (confirmation.ok) {
+        setStatus(nextColor ? 'Color updated' : 'Color cleared', 'ok');
+        return { ...commandAttempt, applied: true, displayConfirmation: confirmation };
+      }
+      setStatus(`Blocked: ${confirmation.status || 'display-color-not-confirmed'}`, 'blocked');
+      return { ...commandAttempt, ok: false, applied: false, status: confirmation.status || 'display-color-not-confirmed', displayConfirmation: confirmation };
+    }
+    // Current MV3 physical apply remains the existing Sync/Host adapter until T04.
     const operation = buildFolderColorOperation(item, nextColor);
     setStatus('Previewing...', 'pending');
     let preview = null;
@@ -1907,7 +2023,7 @@
         lastError: '',
       });
       setStatus('Creating...', 'pending');
-      const result = await requestDesktopFolderEditor('create', {}, { name: nextName });
+      const result = await executeFolderBusinessCommand('create', { name: nextName });
       recordFolderCreateFlow(result?.ok ? 'desktop-created' : 'desktop-create-blocked', {
         lastStatus: result?.ok ? 'created' : String(result?.status || 'desktop-create-blocked'),
         lastApply: result && typeof result === 'object' ? { ok: result.ok === true, status: String(result.status || ''), folderId: String(result.folderId || '') } : null,
@@ -1925,6 +2041,22 @@
       return { ok: false, blockers: [{ code: 'native-owner-bridge-unavailable' }] };
     }
 
+    const commandAttempt = await executeFolderBusinessCommand('create', { name: nextName });
+    if (!shouldUseLegacyFolderAdapter(commandAttempt)) {
+      recordFolderCreateFlow(commandAttempt?.ok ? 'created' : 'command-blocked', {
+        lastName: nextName,
+        lastStatus: String(commandAttempt?.status || (commandAttempt?.ok ? 'created' : 'folder-create-command-failed')),
+        lastApply: commandAttempt && typeof commandAttempt === 'object' ? { ok: commandAttempt.ok === true, status: String(commandAttempt.status || ''), folderId: String(commandAttempt.folderId || '') } : null,
+      });
+      if (commandAttempt?.ok) {
+        setStatus('Folder created', 'ok');
+        refreshAfterNativeFolderMetadataApply('folder-create-command');
+        return { ...commandAttempt, applied: commandAttempt.applied !== false };
+      }
+      setStatus(`Blocked: ${String(commandAttempt?.status || commandAttempt?.reason || 'folder-create-command-failed')}`, 'blocked');
+      return commandAttempt;
+    }
+    // Current MV3 physical apply remains the existing Sync/Host adapter until T04.
     const operation = buildFolderCreateOperation(nextName);
     recordFolderCreateFlow('preview-start', {
       lastName: nextName,
@@ -2111,7 +2243,7 @@
     }
     if (canUseDesktopFolderEditor('rename')) {
       setStatus('Renaming...', 'pending');
-      const result = await requestDesktopFolderEditor('rename', item, { name: nextName });
+      const result = await executeFolderBusinessCommand('rename', folderCommandPayload(item, { folderId, name: nextName }), item);
       if (result?.ok) {
         setStatus('Folder renamed', 'ok');
         return { ...result, applied: true, after: { folderId, name: result.name || nextName } };
@@ -2132,6 +2264,17 @@
       return { ok: true, applied: false, noMutation: true, warnings: [{ code: 'no-op-name-unchanged' }] };
     }
 
+    const commandAttempt = await executeFolderBusinessCommand('rename', folderCommandPayload(requestItem, { folderId, name: nextName }), item);
+    if (!shouldUseLegacyFolderAdapter(commandAttempt)) {
+      if (commandAttempt?.ok) {
+        setStatus('Folder renamed', 'ok');
+        refreshAfterNativeFolderMetadataApply('folder-rename-command');
+        return { ...commandAttempt, applied: commandAttempt.applied !== false, after: { ...(commandAttempt.after || {}), folderId, name: commandAttempt.name || nextName } };
+      }
+      setStatus(`Blocked: ${String(commandAttempt?.status || commandAttempt?.reason || 'folder-rename-command-failed')}`, 'blocked');
+      return commandAttempt;
+    }
+    // Current MV3 physical apply remains the existing Sync/Host adapter until T04.
     const operation = buildFolderRenameOperation(requestItem, nextName);
     setStatus('Previewing...', 'pending');
     let preview = null;
@@ -2325,18 +2468,14 @@
       setStatus(`Blocked: ${uiBlocker}`, 'blocked');
       return { ok: false, blockers: [uiBlocker], status: uiBlocker };
     }
-    const actions = desktopFolderActions();
-    const fn = typeof actions?.delete === 'function'
-      ? actions.delete
-      : (typeof actions?.remove === 'function' ? actions.remove : null);
-    if (!fn) {
-      setStatus('Blocked: tombstone-store-unavailable', 'blocked');
-      return { ok: false, blockers: ['tombstone-store-unavailable'], status: 'tombstone-store-unavailable' };
+    if (!folderCommandAuthority()) {
+      setStatus('Blocked: folder-command-contract-unavailable', 'blocked');
+      return { ok: false, blockers: ['folder-command-contract-unavailable'], status: 'folder-command-contract-unavailable' };
     }
     setStatus('Moving...', 'pending');
     let result = null;
     try {
-      result = await fn.call(actions, folderId);
+      result = await executeFolderBusinessCommand('delete', folderCommandPayload(item, { folderId }), item);
     } catch (e) {
       err('desktopFolderSoftDelete.apply', e);
       setStatus(`Blocked: ${String(e?.message || e || 'folder-soft-delete-failed')}`, 'blocked');
@@ -2417,13 +2556,9 @@
       setStatus('Blocked: folder identity missing', 'blocked');
       return { ok: false, status: 'folder-identity-missing', blockers: ['folder-identity-missing'] };
     }
-    const store = desktopFolderStore();
-    const fn = typeof store?.restoreTombstonedFolder === 'function'
-      ? store.restoreTombstonedFolder
-      : (typeof store?.restoreFolder === 'function' ? store.restoreFolder : null);
-    if (!fn) {
-      setStatus('Restore deferred: safe restore API unavailable', 'blocked');
-      return { ok: false, status: 'restore-api-unavailable', blockers: ['restore-api-unavailable'] };
+    if (!folderCommandAuthority()) {
+      setStatus('Restore deferred: Folder command authority unavailable', 'blocked');
+      return { ok: false, status: 'folder-command-contract-unavailable', blockers: ['folder-command-contract-unavailable'] };
     }
     const name = recentlyDeletedText(row?.folderName || row?.name || row?.folderId, 'this folder');
     const confirmed = W.confirm?.(`Restore "${name}" from Recently Deleted?\n\nThis restores the folder metadata and eligible bindings. It does not purge, hard-delete, or delete chats.`);
@@ -2433,7 +2568,7 @@
     }
     setStatus('Restoring...', 'pending');
     try {
-      const result = await fn.call(store, target, { source: 'desktop-recently-deleted-ui' });
+      const result = await executeFolderBusinessCommand('restore', { tombstoneId: target, folderId: String(row?.folderId || row?.id || '').trim(), source: 'desktop-recently-deleted-ui' }, row);
       if (result?.ok === true) {
         setStatus('Folder restored', 'ok');
         refreshAfterNativeFolderMetadataApply('folder-recently-deleted-restore');
@@ -5378,10 +5513,16 @@
   async function renderFolders() {
     const ws = getWorkspace();
     if (!ws) return;
-    const host = D.getElementById('folderList');
-    if (!host) return;
     ensureFolderCreateButton();
     ensureFolderCountToggle();
+
+    const seam = folderSidebarContribution();
+    if (!seam) {
+      err('renderFolders.contribution', 'h2o.studio.folder-sidebar-contribution.v1 unavailable');
+      step('renderFolders.contribution', 'unavailable');
+      return;
+    }
+
     let model = null;
     try {
       model = await H2O.Library?.FolderParity?.getDisplayModel?.({ fresh: true });
@@ -5390,20 +5531,11 @@
     const canonicalRows = Array.isArray(model?.canonicalRows) ? model.canonicalRows : [];
     const localReviewRows = Array.isArray(model?.localReviewRows) ? model.localReviewRows : [];
     const showLocalReview = folderLocalReviewUiEnabled();
-    const fallbackUsed = !!model?.fallbackUsed;
-    const displayModelAvailable = canonicalRows.length > 0 || model?.displayModelAvailable === true;
-    const folderCatalogReady = model?.folderCatalogReady === true;
-    const renderBlockedReason = displayModelAvailable ? '' : String(model?.renderBlockedReason || 'folder-display-model-empty');
-    host.dataset.h2oFolderLocalReview = showLocalReview ? 'operator' : 'hidden';
-    host.dataset.h2oFolderHiddenReviewRows = showLocalReview ? '0' : String(localReviewRows.length);
-    host.dataset.h2oFolderCatalogReady = folderCatalogReady ? 'true' : 'false';
-    host.dataset.h2oFolderDisplayModelAvailable = displayModelAvailable ? 'true' : 'false';
-    host.dataset.h2oFolderRenderBlockedReason = renderBlockedReason;
     const pendingDeleteRequestIds = await loadPendingChromeFolderDeleteRequestIds();
     const chromePendingDeleteHiddenRows = await loadChromePendingDeleteHiddenRows();
     const chromePendingDeleteHiddenIds = chromePendingDeleteHiddenIdsFromRows(chromePendingDeleteHiddenRows);
 
-    const toSidebarItem = (row) => {
+    const toSidebarItem = (row, review = false) => {
       const id = String(row?.folderId || row?.id || '').trim();
       if (!id) return null;
       const name = String(row?.name || id).trim();
@@ -5413,16 +5545,22 @@
         folderId: id,
         name,
         kind: 'folders',
-        section: 'folders',
+        section: review ? 'review' : 'folders',
       });
       const nativeCount = Number(row?.nativeMembershipCount ?? row?.canonicalCount ?? 0) || 0;
       const badges = Array.isArray(row?.badges) ? row.badges.slice() : [];
       const deleteRequestPending = pendingDeleteRequestIds.has(id);
       if (deleteRequestPending && !badges.includes('delete-requested')) badges.push('delete-requested');
       return {
+        ...row,
         id,
         folderId: id,
         name: appearance.name || name || id,
+        label: appearance.name || name || id,
+        kind: 'folders',
+        section: review ? 'review' : 'folders',
+        review,
+        localReview: review,
         count: nativeCount,
         displayCountLabel: String(row?.displayCountLabel || '').trim(),
         canonicalCount: Number(row?.canonicalCount || 0),
@@ -5433,14 +5571,26 @@
         linkedCount: Number(row?.linkedCount || 0),
         orphanCount: Number(row?.orphanCount || 0),
         localBindingCount: Number(row?.localBindingCount || 0),
-        badges: badges,
-        deleteRequestPending: deleteRequestPending,
+        badges,
+        deleteRequestPending,
         isCanonical: row?.isCanonical === true,
         isExtra: row?.isExtra === true,
         isTestCandidate: row?.isTestCandidate === true,
         isConflict: row?.isConflict === true,
         reviewBucket: row?.reviewBucket || null,
+        source: String(row?.source || '').trim(),
+        stateSource: String(row?.stateSource || '').trim(),
+        sourceKind: String(row?.sourceKind || '').trim(),
+        materializedUserFolder: row?.materializedUserFolder === true,
+        trustedFolderDisplay: row?.trustedFolderDisplay === true,
+        protectedCanonicalFallback: row?.protectedCanonicalFallback === true,
+        shownInNormalMode: row?.shownInNormalMode === true,
+        folderKind: String(row?.folderKind || row?.kind || '').trim(),
+        href: folderHrefForId(id),
         color: row?.isCanonical === true
+          ? normalizeHexColor(row?.iconColor || row?.color || '')
+          : (appearance.color || normalizeHexColor(row?.color || row?.iconColor || '')),
+        iconColor: row?.isCanonical === true
           ? normalizeHexColor(row?.iconColor || row?.color || '')
           : (appearance.color || normalizeHexColor(row?.color || row?.iconColor || '')),
         colorSource: String(row?.colorSource || '').trim(),
@@ -5454,70 +5604,40 @@
       };
     };
 
-    const mainItems = [buildUnfiledSidebarItem()];
+    const unfiled = {
+      ...buildUnfiledSidebarItem(),
+      kind: 'folders',
+      section: 'folders',
+      review: false,
+      localReview: false,
+    };
     const normalCanonicalRows = studioPlatformAdapter() === 'mv3'
       ? canonicalRows.filter((row) => {
         const id = String(row?.folderId || row?.id || '').trim();
         return id && !chromePendingDeleteHiddenIds.has(id) && !pendingDeleteRequestIds.has(id);
       })
       : canonicalRows;
-    mainItems.push(...normalCanonicalRows
-      .map(toSidebarItem)
-      .filter((item) => item && item.id !== FOLDER_FILTER_NONE));
-    const reviewItems = showLocalReview ? localReviewRows.map(toSidebarItem).filter(Boolean) : [];
+    const canonicalItems = normalCanonicalRows
+      .map((row) => toSidebarItem(row, false))
+      .filter((item) => item && item.id !== FOLDER_FILTER_NONE);
+    const reviewItems = showLocalReview
+      ? localReviewRows.map((row) => toSidebarItem(row, true)).filter(Boolean)
+      : [];
+    const rows = [unfiled, ...canonicalItems, ...reviewItems];
+    const actions = canonicalItems.flatMap((item) => [
+      { command: 'rename', input: folderCommandPayload(item) },
+      { command: 'color', input: folderCommandPayload(item) },
+      { command: 'delete', input: folderCommandPayload(item) },
+    ]);
 
-    const mainEmptyText = fallbackUsed
-      ? 'Folder catalog is loading from native ChatGPT.'
-      : 'Canonical folder catalog unavailable. Open chatgpt.com to broadcast folders.';
-    renderSectionList(host, 'folders', mainItems, {
-      emptyText: mainEmptyText,
-      limit: Math.max(mainItems.length, ITEM_LIMIT_DEFAULT),
-      moreHref: '#/library/folders',
-      moreLabel: 'More',
-    });
-
-    if (reviewItems.length > 0) {
-      const persistKey = 'h2o:prm:cgx:library-sidebar:local-review:expanded:v1';
-      let expandedPref = false;
-      try { expandedPref = W.localStorage.getItem(persistKey) === '1'; } catch {}
-      const details = el('details', { class: 'wbSidebarSection--localReview' });
-      details.open = expandedPref;
-      const summary = el('summary', {
-        class: 'wbSidebarLocalReviewSummary',
-        style: 'cursor:pointer;padding:6px 10px;margin-top:6px;font-size:11px;color:rgba(255,255,255,.5);letter-spacing:.04em;text-transform:uppercase;border-top:1px solid rgba(255,255,255,.06)',
-      }, `Local Review · ${formatNumber(reviewItems.length)}`);
-      details.appendChild(summary);
-      details.appendChild(el('div', {
-        class: 'wbSidebarLocalReviewExplanation',
-        style: 'padding:0 10px 4px;color:rgba(255,255,255,.56);font-size:10.5px;line-height:1.35',
-      }, LOCAL_REVIEW_EXPLANATION));
-      const reviewHost = el('div', {
-        class: 'wbSidebarLocalReviewList',
-        style: 'opacity:0.84;padding-top:4px',
-      });
-      details.appendChild(reviewHost);
-      renderSectionList(reviewHost, 'folders', reviewItems, {
-        emptyText: 'No items in Local Review',
-        limit: Math.max(reviewItems.length, 1),
-        review: true,
-        disableMenu: true,
-      });
-      reviewHost.querySelectorAll('.wbSidebarSectionItem').forEach((node) => {
-        node.classList.add('wbSidebarSectionItem--review');
-      });
-      details.addEventListener('toggle', () => {
-        try { W.localStorage.setItem(persistKey, details.open ? '1' : '0'); } catch {}
-      });
-      host.appendChild(details);
+    const result = seam.setContribution({ rows, actions });
+    if (!result?.ok) {
+      err('renderFolders.contribution', result?.status || 'contribution-rejected');
     }
-
-    try {
-      await renderRecentlyDeletedFoldersSidebarEntry(host);
-    } catch (e) {
-      err('renderRecentlyDeletedFoldersSidebarEntry', e);
-    }
-
-    step('renderFolders.parity', `canonical=${mainItems.length} review=${reviewItems.length}`);
+    step(
+      'renderFolders.contribution',
+      `status=${String(result?.status || '')} canonical=${canonicalItems.length + 1} review=${reviewItems.length} actions=${actions.length} model=${model?.displayModelAvailable === true || canonicalRows.length > 0 ? 'ready' : 'fallback'}`
+    );
   }
 
   async function renderLabels() {
@@ -6226,6 +6346,7 @@
 
   function folderActionCapabilitySummary(item = {}) {
     const canonicalItem = { ...item, isCanonical: true, kind: 'folders', section: 'folders' };
+    const commandReady = !!folderCommandAuthority();
     const createDesktop = canUseDesktopFolderEditor('create');
     const renameDesktop = canUseDesktopFolderEditor('rename');
     const colorDesktop = canUseDesktopFolderEditor('color');
@@ -6233,22 +6354,22 @@
     return {
       create: {
         available: canRequestCanonicalFolderCreate(),
-        path: nativeRequest ? 'mv3-native-owner-bridge' : (createDesktop ? 'desktop-organization-modals' : 'unavailable'),
+        path: nativeRequest ? 'library-folder-commands->mv3-native-owner-bridge' : (createDesktop ? 'library-folder-commands' : 'unavailable'),
         reason: canRequestCanonicalFolderCreate() ? '' : 'folder-create-handler-unavailable',
       },
       rename: {
         available: canRequestCanonicalFolderRename(canonicalItem),
-        path: canRequestNativeCanonicalFolderRename(canonicalItem) ? 'mv3-native-owner-bridge' : (renameDesktop ? 'desktop-inline-organization-modals' : 'unavailable'),
+        path: canRequestNativeCanonicalFolderRename(canonicalItem) ? 'library-folder-commands->mv3-native-owner-bridge' : (renameDesktop ? 'library-folder-commands' : 'unavailable'),
         reason: canRequestCanonicalFolderRename(canonicalItem) ? '' : 'folder-rename-handler-unavailable',
       },
       color: {
         available: canRequestCanonicalFolderColor(canonicalItem),
-        path: canRequestNativeCanonicalFolderColor(canonicalItem) ? 'mv3-folder-mutation-resolver' : (colorDesktop ? 'desktop-inline-organization-modals' : 'unavailable'),
+        path: canRequestNativeCanonicalFolderColor(canonicalItem) ? 'library-folder-commands->mv3-folder-mutation-resolver' : (colorDesktop ? 'library-folder-commands' : 'unavailable'),
         reason: canRequestCanonicalFolderColor(canonicalItem) ? '' : 'folder-color-handler-unavailable',
       },
       delete: {
         available: canRequestCanonicalFolderDeletePreview(canonicalItem),
-        path: canRequestCanonicalFolderDeletePreview(canonicalItem) ? 'mv3-native-owner-bridge-operator-only' : 'operator-gated',
+        path: commandReady ? 'library-folder-commands' : 'unavailable',
         reason: folderDestructiveActionsEnabled() ? 'delete-preview-handler-unavailable' : 'folder-operator-mode-required',
       },
     };
@@ -6438,7 +6559,7 @@
     const core = getCore();
     if (!core || typeof core.registerOwner !== 'function') return false;
     try {
-      core.registerOwner('library-sidebar-sections', { surface: 'studio', version: '1.0.0' }, { replace: true });
+      core.registerOwner('library-sidebar-sections', { surface: 'studio', version: '1.1.0' }, { replace: true });
       step('register-on-core');
       return true;
     } catch (e) { err('register-on-core', e); return false; }
@@ -6454,7 +6575,7 @@
   // Public API for diagnostics
   H2O.Library.SidebarSections = {
     surface: 'studio',
-    version: '1.0.0',
+    version: '1.1.0',
     refresh: renderAllSections,
     openRowMenu,
     closeRowMenu,
@@ -6466,7 +6587,12 @@
     diagnose() {
       return {
         surface: 'studio',
-        version: '1.0.0',
+        version: '1.1.0',
+        folderCommandContract: FOLDER_COMMAND_CONTRACT,
+        folderCommandOwner: FOLDER_COMMAND_OWNER,
+        folderContributionContract: FOLDER_CONTRIBUTION_CONTRACT,
+        folderContributionOwner: FOLDER_CONTRIBUTION_OWNER,
+        contributionReady: !!folderSidebarContribution(),
         labelsRendered:    D.getElementById('labelList')?.children.length || 0,
         categoriesRendered: D.getElementById('categoryList')?.children.length || 0,
         projectsRendered:  D.getElementById('projectList')?.children.length || 0,
