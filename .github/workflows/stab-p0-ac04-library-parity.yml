@@ -29,11 +29,21 @@ jobs:
           from pathlib import Path
           p = Path('tools/validation/studio/validate-stab-p0-ac04-library-catalog-fanout.mjs')
           s = p.read_text()
-          old = "const shellSubscribe = between(shell, 'function subscribeLibraryIndexToWorkbenchCache(attempt = 0){', '\\n\\n// ── Library Workspace facade integration');"
-          new = "const shellSubscribe = shell;"
-          if old not in s:
-              raise SystemExit('AC04 validator shell subscription anchor missing')
-          p.write_text(s.replace(old, new, 1))
+          replacements = [
+              (
+                  "const shellSubscribe = between(shell, 'function subscribeLibraryIndexToWorkbenchCache(attempt = 0){', '\\n\\n// ── Library Workspace facade integration');",
+                  "const shellSubscribe = shell;",
+              ),
+              (
+                  "check(commands.includes(\"const FOLDER_COMMAND_CONTRACT = 'h2o.library.folder-commands.v1'\"), 'FolderCommands contract changed');",
+                  "check(commands.includes(\"const FOLDER_COMMAND_CONTRACT_ID = 'h2o.library.folder-commands.v1';\"), 'FolderCommands contract changed');",
+              ),
+          ]
+          for old, new in replacements:
+              if old not in s:
+                  raise SystemExit(f'AC04 validator patch anchor missing: {old}')
+              s = s.replace(old, new, 1)
+          p.write_text(s)
           PY
           node --check "src-surfaces-base/studio/S0F1c. 🎬 Library Index - Studio.js"
           node --check tools/validation/studio/validate-stab-p0-ac04-library-catalog-fanout.mjs
