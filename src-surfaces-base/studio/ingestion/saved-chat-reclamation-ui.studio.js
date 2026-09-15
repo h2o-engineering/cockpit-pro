@@ -474,10 +474,12 @@
       recovered: num('recovered', 'recovered'),
       residueQuarantined:
         (residue.generation_staging_quarantined || residue.generationStagingQuarantined || 0)
-        + (residue.durable_temp_quarantined || residue.durableTempQuarantined || 0),
+        + (residue.durable_temp_quarantined || residue.durableTempQuarantined || 0)
+        + (residue.capability_probe_quarantined || residue.capabilityProbeQuarantined || 0),
       residuePurged:
         (residue.generation_staging_purged || residue.generationStagingPurged || 0)
-        + (residue.durable_temp_purged || residue.durableTempPurged || 0),
+        + (residue.durable_temp_purged || residue.durableTempPurged || 0)
+        + (residue.capability_probe_purged || residue.capabilityProbePurged || 0),
       blockers: asArray(o.blockers).map(cleanString).filter(Boolean),
     };
   }

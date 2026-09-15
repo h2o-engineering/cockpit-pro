@@ -30,7 +30,7 @@
 //!
 //! This module adds no command, no renderer input and no authority.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use crate::archive_durable_write::confined::{self, LinkByHandleSpelling, ObjectIdentity};
@@ -230,6 +230,57 @@ pub fn receipt_requirements() -> &'static [Capability] {
 }
 
 static CACHE: Mutex<BTreeMap<ObjectIdentity, CapabilityReport>> = Mutex::new(BTreeMap::new());
+
+/// RC-T02-03: the CAP-CLONE proven-pair cache, keyed by the ORDERED pair of
+/// admitted root identities `(staging, final)` — both roots, by identity,
+/// never by pathname. Only `Proven` is ever stored (contract §10 rule 2: a
+/// failed probe is re-run on the next admission and never becomes a sticky
+/// positive), so a hit is exactly "this process proved this pair".
+///
+/// A value type rather than bare statics so a test can hold its own instance
+/// and stay independent of every other test's order.
+pub(crate) struct ClonePairCache(Mutex<BTreeSet<(ObjectIdentity, ObjectIdentity)>>);
+
+impl ClonePairCache {
+    pub(crate) const fn new() -> Self {
+        ClonePairCache(Mutex::new(BTreeSet::new()))
+    }
+
+    /// The verdict for this ordered pair: a remembered proof, or else a fresh
+    /// `probe` whose `Proven` result is kept for the process lifetime and
+    /// whose every other result is returned as-is and forgotten. A root whose
+    /// identity cannot be read is never looked up and never stored — it is
+    /// refused, fail-closed.
+    pub(crate) fn capability(
+        &self,
+        staging: &confined::Dir,
+        final_dir: &confined::Dir,
+        probe: impl FnOnce(&confined::Dir, &confined::Dir) -> CapabilityState,
+    ) -> CapabilityState {
+        let key = match (staging.identity(), final_dir.identity()) {
+            (Ok(staging), Ok(final_dir)) => (staging, final_dir),
+            (Err(err), _) | (_, Err(err)) => {
+                return CapabilityState::Absent(format!(
+                    "clone-pair-root-identity-unavailable:{err}"
+                ))
+            }
+        };
+        if let Ok(cache) = self.0.lock() {
+            if cache.contains(&key) {
+                return CapabilityState::Proven;
+            }
+        }
+        let state = probe(staging, final_dir);
+        if matches!(state, CapabilityState::Proven) {
+            if let Ok(mut cache) = self.0.lock() {
+                cache.insert(key);
+            }
+        }
+        state
+    }
+}
+
+static CLONE_PAIR_CACHE: ClonePairCache = ClonePairCache::new();
 
 fn probe_name(n: u64) -> Vec<u8> {
     format!("{PROBE_PREFIX}{}-{n}", std::process::id()).into_bytes()
@@ -554,6 +605,19 @@ pub fn probe_clone_pair(staging: &confined::Dir, final_dir: &confined::Dir) -> C
     state
 }
 
+/// macOS CAP-CLONE for the ordered `(staging, final)` root-identity pair,
+/// probed at most once per pair per process (RC-T02-03): the first admission
+/// of a pair runs `probe_clone_pair`; a proven pair is reused for the process
+/// lifetime; an absent or unproven result is returned and re-probed on the
+/// next admission; a different staging OR final identity is a different pair.
+/// Fail-closed exactly as the uncached probe: nothing is ever inferred.
+pub fn clone_pair_capability(staging: &confined::Dir, final_dir: &confined::Dir) -> CapabilityState {
+    if !cfg!(target_os = "macos") {
+        return CapabilityState::NotApplicable;
+    }
+    CLONE_PAIR_CACHE.capability(staging, final_dir, probe_clone_pair)
+}
+
 /// TEST-ONLY: forgets every cached report so a test can observe a fresh probe.
 #[cfg(test)]
 pub(crate) fn clear_cache_for_test() {
@@ -675,5 +739,235 @@ mod tests {
         };
         assert_eq!(refusal.detail_text(), "CAP-XRENAME:EINVAL");
         assert!(!refusal.is_root_not_writable());
+    }
+
+    // ── RC-T02-03 — CAP-CLONE per (staging, final) root-identity pair ─────
+
+    /// Two admitted roots under one scratch base, as the ZIP publisher holds
+    /// them: a named staging sibling and the final destination directory.
+    fn pair(base: &std::path::Path, staging: &str, final_dir: &str) -> (confined::Dir, confined::Dir) {
+        (
+            confined::Dir::open_root(&base.join(staging)).expect("staging root"),
+            confined::Dir::open_root(&base.join(final_dir)).expect("final root"),
+        )
+    }
+
+    /// A probe stand-in that counts its executions and answers from a script,
+    /// so each property below is proven by an exact execution count rather
+    /// than by timing. The cache under test is a PRIVATE instance per test.
+    struct Scripted {
+        calls: std::cell::Cell<usize>,
+        answers: std::cell::RefCell<Vec<CapabilityState>>,
+    }
+    impl Scripted {
+        fn new(answers: Vec<CapabilityState>) -> Scripted {
+            Scripted {
+                calls: std::cell::Cell::new(0),
+                answers: std::cell::RefCell::new(answers),
+            }
+        }
+        fn probe(&self) -> impl FnOnce(&confined::Dir, &confined::Dir) -> CapabilityState + '_ {
+            move |_, _| {
+                self.calls.set(self.calls.get() + 1);
+                let mut answers = self.answers.borrow_mut();
+                if answers.is_empty() {
+                    CapabilityState::Proven
+                } else {
+                    answers.remove(0)
+                }
+            }
+        }
+    }
+
+    /// (RC-03 H.1)(H.2)(B) the first admission of a pair executes the probe;
+    /// the second admission of the SAME two identities — even through freshly
+    /// opened descriptors — reuses the proven result without a second probe.
+    #[test]
+    fn a_proven_clone_pair_is_probed_once_and_reused_by_identity() {
+        let base = scratch("clone-pair-reuse");
+        let cache = ClonePairCache::new();
+        let scripted = Scripted::new(vec![]);
+        let (staging, final_dir) = pair(&base, "stage", "final");
+
+        assert_eq!(cache.capability(&staging, &final_dir, scripted.probe()), CapabilityState::Proven);
+        assert_eq!(scripted.calls.get(), 1, "the first admission probes");
+        assert_eq!(cache.capability(&staging, &final_dir, scripted.probe()), CapabilityState::Proven);
+        assert_eq!(scripted.calls.get(), 1, "the same pair is not probed again");
+        // Identity, not descriptor: new handles to the same two objects hit.
+        let (again_staging, again_final) = pair(&base, "stage", "final");
+        assert_eq!(cache.capability(&again_staging, &again_final, scripted.probe()), CapabilityState::Proven);
+        assert_eq!(scripted.calls.get(), 1, "reopened descriptors of the same identities reuse");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// (RC-03 H.3)(H.4)(D) a different staging identity OR a different final
+    /// identity is a different pair and probes afresh; the original pair's
+    /// proof survives beside them.
+    #[test]
+    fn a_different_staging_or_final_identity_is_a_fresh_pair() {
+        let base = scratch("clone-pair-distinct");
+        let cache = ClonePairCache::new();
+        let scripted = Scripted::new(vec![]);
+        let (staging, final_dir) = pair(&base, "stage", "final");
+        let (other_staging, other_final) = pair(&base, "stage-2", "final-2");
+
+        assert_eq!(cache.capability(&staging, &final_dir, scripted.probe()), CapabilityState::Proven);
+        assert_eq!(scripted.calls.get(), 1);
+        // Different source, same destination.
+        assert_eq!(cache.capability(&other_staging, &final_dir, scripted.probe()), CapabilityState::Proven);
+        assert_eq!(scripted.calls.get(), 2, "a different staging identity re-probes");
+        // Same source, different destination.
+        assert_eq!(cache.capability(&staging, &other_final, scripted.probe()), CapabilityState::Proven);
+        assert_eq!(scripted.calls.get(), 3, "a different final identity re-probes");
+        // Each of the three proven pairs is now remembered on its own.
+        assert_eq!(cache.capability(&staging, &final_dir, scripted.probe()), CapabilityState::Proven);
+        assert_eq!(cache.capability(&other_staging, &final_dir, scripted.probe()), CapabilityState::Proven);
+        assert_eq!(cache.capability(&staging, &other_final, scripted.probe()), CapabilityState::Proven);
+        assert_eq!(scripted.calls.get(), 3, "no proven pair was forgotten or re-probed");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// (RC-03 H.5)(C)(E) an absent or unproven result is returned as-is, is
+    /// NOT stored, and the next admission of the same pair probes again; only
+    /// a later proof is kept.
+    #[test]
+    fn a_failed_clone_probe_is_never_sticky_and_is_retried_on_the_next_admission() {
+        let base = scratch("clone-pair-retry");
+        let cache = ClonePairCache::new();
+        let scripted = Scripted::new(vec![
+            CapabilityState::Absent("volume-does-not-declare-clone".into()),
+            CapabilityState::Absent("ENOTSUP".into()),
+            CapabilityState::NotApplicable,
+            CapabilityState::Proven,
+        ]);
+        let (staging, final_dir) = pair(&base, "stage", "final");
+
+        assert_eq!(
+            cache.capability(&staging, &final_dir, scripted.probe()),
+            CapabilityState::Absent("volume-does-not-declare-clone".into()),
+            "the refusal is reported, not inferred away"
+        );
+        assert_eq!(
+            cache.capability(&staging, &final_dir, scripted.probe()),
+            CapabilityState::Absent("ENOTSUP".into()),
+            "re-probed: the earlier failure was not remembered as anything"
+        );
+        assert_eq!(cache.capability(&staging, &final_dir, scripted.probe()), CapabilityState::NotApplicable);
+        assert_eq!(scripted.calls.get(), 3, "every non-proven admission probed");
+        assert_eq!(cache.capability(&staging, &final_dir, scripted.probe()), CapabilityState::Proven);
+        assert_eq!(scripted.calls.get(), 4);
+        assert_eq!(cache.capability(&staging, &final_dir, scripted.probe()), CapabilityState::Proven);
+        assert_eq!(scripted.calls.get(), 4, "only the proof is remembered");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// (RC-03 H.6)(A)(E) a proof for pair (A, B) answers nothing else: the
+    /// reversed pair (B, A), (A, C) and (C, B) each probe, and when that probe
+    /// refuses, the refusal is what is returned — never the stale success.
+    #[test]
+    fn no_success_is_returned_from_a_stale_or_mismatched_pair_entry() {
+        let base = scratch("clone-pair-mismatch");
+        let cache = ClonePairCache::new();
+        let (a, b) = pair(&base, "a", "b");
+        let c = confined::Dir::open_root(&base.join("c")).expect("c");
+
+        let first = Scripted::new(vec![]);
+        assert_eq!(cache.capability(&a, &b, first.probe()), CapabilityState::Proven);
+        assert_eq!(first.calls.get(), 1);
+
+        let refusing = Scripted::new(vec![
+            CapabilityState::Absent("EXDEV".into()),
+            CapabilityState::Absent("EXDEV".into()),
+            CapabilityState::Absent("EXDEV".into()),
+        ]);
+        assert_eq!(cache.capability(&b, &a, refusing.probe()), CapabilityState::Absent("EXDEV".into()), "order matters");
+        assert_eq!(cache.capability(&a, &c, refusing.probe()), CapabilityState::Absent("EXDEV".into()));
+        assert_eq!(cache.capability(&c, &b, refusing.probe()), CapabilityState::Absent("EXDEV".into()));
+        assert_eq!(refusing.calls.get(), 3, "each mismatched pair probed for itself");
+        // The genuine pair is still the only one remembered.
+        let untouched = Scripted::new(vec![]);
+        assert_eq!(cache.capability(&a, &b, untouched.probe()), CapabilityState::Proven);
+        assert_eq!(untouched.calls.get(), 0);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// (RC-03 A)(E)(F) the REAL macOS probe through the process cache: the
+    /// first admission of a pair on this host probes with real inodes and
+    /// leaves nothing behind in either root; a second admission creates no
+    /// artifact at all, because the pair is answered from the cache; and the
+    /// result is a platform-shaped verdict, never an inference.
+    #[test]
+    fn the_real_clone_pair_probe_is_cached_and_leaves_no_artifact() {
+        let base = scratch("clone-pair-real");
+        let (staging, final_dir) = pair(&base, "stage", "final");
+        let listing = |name: &str| -> Vec<std::ffi::OsString> {
+            let mut names: Vec<_> = std::fs::read_dir(base.join(name))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+
+        let first = clone_pair_capability(&staging, &final_dir);
+        assert!(listing("stage").is_empty(), "staging residue: {:?}", listing("stage"));
+        assert!(listing("final").is_empty(), "final residue: {:?}", listing("final"));
+        if cfg!(target_os = "macos") {
+            assert!(matches!(first, CapabilityState::Proven | CapabilityState::Absent(_)), "{first:?}");
+        } else {
+            assert_eq!(first, CapabilityState::NotApplicable);
+        }
+        // A sentinel proves whether the second admission touched the roots at
+        // all: a real probe would mint new `.h2o-probe-*` names beside it.
+        let key = (staging.identity().unwrap(), final_dir.identity().unwrap());
+        let remembered = CLONE_PAIR_CACHE.0.lock().unwrap().contains(&key);
+        assert_eq!(
+            remembered,
+            first == CapabilityState::Proven,
+            "exactly a proof is remembered in the process cache: {first:?}"
+        );
+        std::fs::write(base.join("stage").join("sentinel"), b"").unwrap();
+        let second = clone_pair_capability(&staging, &final_dir);
+        assert_eq!(second, first, "the same pair answers identically");
+        assert_eq!(listing("stage"), vec![std::ffi::OsString::from("sentinel")]);
+        assert!(listing("final").is_empty());
+        // The reversed pair is a different key: never answered by this proof.
+        let reversed = (key.1, key.0);
+        assert!(!CLONE_PAIR_CACHE.0.lock().unwrap().contains(&reversed));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// (RC-03 G) the portable ZIP publisher reaches CAP-CLONE ONLY through the
+    /// pair cache, the cache stores nothing but `Proven`, and the uncached
+    /// probe remains the single behavioural authority beneath it.
+    #[test]
+    fn the_zip_publisher_uses_the_pair_cache_and_only_proof_is_stored() {
+        let zip = include_str!("saved_chat_zip_publish.rs");
+        let zip_code: String = zip
+            .lines()
+            .map(str::trim_start)
+            .filter(|l| !l.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(zip_code.matches("clone_pair_capability(").count(), 1, "one admission call");
+        assert_eq!(zip_code.matches("probe_clone_pair(").count(), 0, "never the uncached probe");
+
+        let here = include_str!("archive_filesystem_capability.rs");
+        let code: String = here
+            .lines()
+            .map(str::trim_start)
+            .filter(|l| !l.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let at = code.find("pub(crate) fn capability(").expect("the cache method");
+        let body = &code[at..at + code[at..].find("\nstate\n}").expect("returns the probe state")];
+        assert!(body.contains("(staging.identity(), final_dir.identity())"), "keyed by BOTH identities");
+        assert!(body.contains("matches!(state, CapabilityState::Proven)"), "only proof is stored");
+        assert_eq!(body.matches("cache.insert(key)").count(), 1);
+        assert!(!body.contains("Absent(") || body.contains("clone-pair-root-identity-unavailable"), "no refusal is stored");
+        assert!(body.contains("cache.contains(&key)"), "a hit answers only the exact ordered pair");
+        let wrapper = code.find("pub fn clone_pair_capability(").expect("the public wrapper");
+        let wrapper = &code[wrapper..wrapper + 300];
+        assert!(wrapper.contains("CLONE_PAIR_CACHE.capability(staging, final_dir, probe_clone_pair)"));
     }
 }

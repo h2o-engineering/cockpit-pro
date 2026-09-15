@@ -573,9 +573,23 @@ fn residue_identity_uses_no_time_authority() {
     ] {
         assert!(!tokens.contains(forbidden), "no time authority: {forbidden}");
     }
-    /* The only stat fields consulted are the TYPE bits. */
-    assert!(code.contains("st_mode & libc::S_IFMT"));
-    assert_eq!(code.matches("st_mode").count(), 1);
+    /* RC-T02-01 (HDA-authorized assertion amendment, 2026-09-15): entry-type
+       classification lives behind the confined `EntryStat` facade, so the
+       former literal pin on `st_mode & libc::S_IFMT` no longer describes this
+       module. The accepted invariant is preserved and asserted directly: the
+       ONLY thing this module consumes from a no-follow inspection is the
+       entry's TYPE — no raw stat metadata, no object identity, no size and no
+       libc authority. `kind` stays allowed because `std::io::Error::kind` is
+       error classification, not metadata authority. */
+    assert!(code.contains("stat_child_nofollow"), "type comes from the no-follow inspection");
+    assert!(code.contains("is_directory()"), "type is read through the facade");
+    for forbidden in [
+        "libc", "stat", "fstat", "statfs", "metadata", "st_mode", "st_size", "st_dev",
+        "st_ino", "st_nlink", "st_uid", "st_gid", "st_blocks", "identity", "size",
+        "ObjectIdentity", "file_identity", "available_bytes", "name_max",
+    ] {
+        assert!(!tokens.contains(forbidden), "no metadata authority: {forbidden}");
+    }
 }
 
 /// (C) the destructive scan is not a command and takes no renderer input.
@@ -605,4 +619,301 @@ fn the_trusted_scan_is_not_a_registered_command() {
     }
     let lib = include_str!("../lib.rs");
     assert!(!lib.contains("scan_trusted_residue_within"), "not registered");
+}
+
+// ── T02 RC-T02-02 — capability-probe residue (contract §10 rule 1, C24) ─────
+
+/// (RC-02 I.1)(I.2)(I.6)(H) valid probe residue in BOTH archive-owned probe
+/// locations — directly under the admitted root and under `packages`, the two
+/// places the capability layer actually writes — is discovered as the typed
+/// third family, with both entry types a probe can leave; canonical content,
+/// reserved infrastructure and the two established families are untouched.
+#[test]
+fn capability_probe_residue_is_found_in_both_archive_owned_probe_locations() {
+    let root = temp_root("rc02-found");
+    let pkgs = packages(&root);
+    // A crashed exclusive-create / link / clone probe leaves a regular file; a
+    // crashed no-replace-rename probe leaves a directory.
+    fs::write(root.join(".h2o-probe-4242-1"), b"probe").unwrap();
+    fs::create_dir_all(root.join(".h2o-probe-4242-0")).unwrap();
+    fs::create_dir_all(pkgs.join(".h2o-probe-4242-2")).unwrap();
+    fs::write(pkgs.join(".h2o-probe-77-0"), b"probe").unwrap();
+    // The established families still report exactly as before.
+    fs::create_dir_all(pkgs.join(".h2o-genstage-00ff01")).unwrap();
+    let ab = shard(&root, "ab");
+    fs::write(ab.join(".h2o-durable-9-0.tmp"), b"t").unwrap();
+    // (I.6) canonical Saved-Chat content and reserved infrastructure are never
+    // probe residue: a generation, a legacy package, an occupant, a CAS body,
+    // the presence lock, the quarantine namespace, an unrelated dotfile.
+    fs::create_dir_all(pkgs.join(format!("chat_a.g{}.h2ochat", "ab".repeat(32)))).unwrap();
+    fs::create_dir_all(pkgs.join("chat_a.h2ochat")).unwrap();
+    fs::write(pkgs.join("corrupt.h2ochat"), b"junk").unwrap();
+    fs::write(ab.join(format!("sha256-{}", "ab".repeat(32))), b"body").unwrap();
+    fs::write(root.join(".h2o-archive.lock"), b"").unwrap();
+    fs::create_dir_all(root.join(".h2o-reclaim").join("run-1")).unwrap();
+    fs::write(root.join(".DS_Store"), b"x").unwrap();
+    // No probe ever runs inside a CAS shard or inside the quarantine
+    // namespace, so a probe-shaped name there is not this family's residue.
+    fs::write(ab.join(".h2o-probe-4242-3"), b"x").unwrap();
+    fs::write(root.join(".h2o-reclaim").join("run-1").join(".h2o-probe-4242-4"), b"x").unwrap();
+
+    let scan = scan_trusted_residue_within(&root);
+    assert!(scan.complete, "{:?}", scan.blockers);
+    assert!(scan.indeterminate.is_empty(), "{:?}", scan.indeterminate);
+    assert_eq!(
+        ids(&scan),
+        vec![
+            "generation-staging|archive/packages/.h2o-genstage-00ff01",
+            "durable-temp|archive/assets/ab/.h2o-durable-9-0.tmp",
+            "capability-probe|archive/.h2o-probe-4242-0",
+            "capability-probe|archive/.h2o-probe-4242-1",
+            "capability-probe|archive/packages/.h2o-probe-4242-2",
+            "capability-probe|archive/packages/.h2o-probe-77-0",
+        ]
+    );
+    assert_eq!(scan.count_of(ResidueFamily::CapabilityProbe), 4);
+    assert_eq!(scan.count_of(ResidueFamily::GenerationStaging), 1);
+    assert_eq!(scan.count_of(ResidueFamily::DurableTemp), 1);
+    /* (I.2) the typed set: family, kind, tag and a TYPED location, no shard. */
+    let probes: Vec<&TrustedResidueItem> = scan
+        .items
+        .iter()
+        .filter(|i| i.family() == ResidueFamily::CapabilityProbe)
+        .collect();
+    assert_eq!(probes.len(), 4);
+    assert!(probes.iter().all(|i| i.family().kind() == CAPABILITY_PROBE_KIND));
+    assert!(probes.iter().all(|i| i.family().tag() == "probe"));
+    assert!(probes.iter().all(|i| i.shard().is_none()));
+    assert_eq!(
+        probes.iter().map(|i| i.probe_location()).collect::<Vec<_>>(),
+        vec![
+            Some(ProbeLocation::ArchiveRoot),
+            Some(ProbeLocation::ArchiveRoot),
+            Some(ProbeLocation::Packages),
+            Some(ProbeLocation::Packages),
+        ]
+    );
+    assert!(scan.items.iter().filter(|i| i.family() != ResidueFamily::CapabilityProbe).all(|i| i.probe_location().is_none()));
+    /* The shard and quarantine lookalikes were neither classified nor touched. */
+    assert!(ab.join(".h2o-probe-4242-3").exists());
+    assert!(root.join(".h2o-reclaim").join("run-1").join(".h2o-probe-4242-4").exists());
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// (RC-02 I.4)(B)(C) the family is recognized by the exact minted grammar
+/// `.h2o-probe-<digits>-<digits>` and nothing wider: a reserved-prefix name
+/// that deviates is INDETERMINATE (reported, never actionable), an entry of a
+/// type no probe creates is indeterminate, and names outside the reserved
+/// prefix are simply unrelated.
+#[test]
+fn capability_probe_lookalikes_are_indeterminate_or_unrelated_never_actionable() {
+    let root = temp_root("rc02-lookalike");
+    let pkgs = packages(&root);
+    let malformed = [
+        ".h2o-probe-x",
+        ".h2o-probe-1",
+        ".h2o-probe-1-2-3",
+        ".h2o-probe--2",
+        ".h2o-probe-1-",
+        ".h2o-probe-1-2a",
+        ".h2o-probe-1-٢",
+        ".h2o-probe-",
+    ];
+    for name in malformed {
+        fs::write(root.join(name), b"x").unwrap();
+    }
+    fs::create_dir_all(pkgs.join(".h2o-probe-1-2-3")).unwrap();
+    // Over the bounded name length, even with the right digit grammar.
+    let long = format!(".h2o-probe-1-{}", "9".repeat(MAX_RESIDUE_NAME));
+    fs::write(root.join(&long), b"x").unwrap();
+    // Outside the reserved prefix: unrelated, not even indeterminate.
+    for name in ["h2o-probe-1-2", ".h2o-prob-1-2", ".h2o-probe", ".h2o_probe-1-2", ".H2O-PROBE-1-2"] {
+        fs::write(root.join(name), b"x").unwrap();
+    }
+    // An entry type no probe creates: a FIFO under a well-formed name.
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let fifo = std::ffi::CString::new(root.join(".h2o-probe-5-5").as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0, "fixture fifo");
+    }
+
+    let scan = scan_trusted_residue_within(&root);
+    assert!(scan.complete, "{:?}", scan.blockers);
+    assert!(ids(&scan).is_empty(), "nothing here is actionable: {:?}", ids(&scan));
+    assert_eq!(scan.count_of(ResidueFamily::CapabilityProbe), 0);
+    let mut expected: Vec<(String, &str)> = malformed
+        .iter()
+        .map(|n| (format!("archive/{n}"), reasons::NAME_SHAPE))
+        .collect();
+    expected.push((format!("archive/{long}"), reasons::NAME_SHAPE));
+    expected.push(("archive/packages/.h2o-probe-1-2-3".to_string(), reasons::NAME_SHAPE));
+    #[cfg(unix)]
+    expected.push(("archive/.h2o-probe-5-5".to_string(), reasons::PROBE_ENTRY_TYPE));
+    expected.sort();
+    let mut reported: Vec<(String, &str)> = scan
+        .indeterminate
+        .iter()
+        .map(|i| (i.path.clone(), i.reason))
+        .collect();
+    reported.sort();
+    assert_eq!(reported, expected);
+    assert!(scan.indeterminate.iter().all(|i| i.kind == CAPABILITY_PROBE_KIND));
+    /* The grammar itself, directly. */
+    assert!(is_capability_probe_residue(b".h2o-probe-1-0"));
+    assert!(is_capability_probe_residue(b".h2o-probe-4294967295-18446744073709551615"));
+    for bad in malformed {
+        assert!(!is_capability_probe_residue(bad.as_bytes()), "{bad}");
+    }
+    assert!(!is_capability_probe_residue(long.as_bytes()));
+    assert!(!is_capability_probe_residue(b"h2o-probe-1-0"));
+    assert!(!is_capability_probe_residue(b".h2o-probe-1-0/x"));
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// (RC-02 I.5)(C) a symlink wearing a well-formed probe name is never followed:
+/// it is indeterminate in either location, and whatever it points at — a
+/// canonical directory, a canonical file, a target outside the archive — is
+/// neither classified nor inspected through it.
+#[cfg(unix)]
+#[test]
+fn capability_probe_symlink_lookalikes_are_never_followed() {
+    let root = temp_root("rc02-symlink");
+    let pkgs = packages(&root);
+    let generation = pkgs.join(format!("chat_a.g{}.h2ochat", "ab".repeat(32)));
+    fs::create_dir_all(&generation).unwrap();
+    fs::write(generation.join("manifest.json"), b"{}").unwrap();
+    let outside = root.parent().unwrap().join("rc02-outside-target");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("secret"), b"outside").unwrap();
+    // Root: a link to a canonical directory; packages: links to a canonical
+    // file and to a directory outside the archive entirely.
+    std::os::unix::fs::symlink(&generation, root.join(".h2o-probe-8-0")).unwrap();
+    std::os::unix::fs::symlink(generation.join("manifest.json"), pkgs.join(".h2o-probe-8-1")).unwrap();
+    std::os::unix::fs::symlink(&outside, pkgs.join(".h2o-probe-8-2")).unwrap();
+    // A dangling link: still a link, still never followed.
+    std::os::unix::fs::symlink(root.join("nowhere"), root.join(".h2o-probe-8-3")).unwrap();
+    // One genuine item beside them, so the walk demonstrably continued.
+    fs::write(root.join(".h2o-probe-9-0"), b"probe").unwrap();
+
+    let scan = scan_trusted_residue_within(&root);
+    assert!(scan.complete, "{:?}", scan.blockers);
+    assert_eq!(ids(&scan), vec!["capability-probe|archive/.h2o-probe-9-0"]);
+    let mut links: Vec<(String, &str)> = scan
+        .indeterminate
+        .iter()
+        .map(|i| (i.path.clone(), i.reason))
+        .collect();
+    links.sort();
+    assert_eq!(
+        links,
+        vec![
+            ("archive/.h2o-probe-8-0".to_string(), reasons::SYMLINK),
+            ("archive/.h2o-probe-8-3".to_string(), reasons::SYMLINK),
+            ("archive/packages/.h2o-probe-8-1".to_string(), reasons::SYMLINK),
+            ("archive/packages/.h2o-probe-8-2".to_string(), reasons::SYMLINK),
+        ]
+    );
+    assert!(generation.join("manifest.json").exists(), "the canonical target is untouched");
+    assert!(outside.join("secret").exists(), "the outside target is untouched");
+    assert!(root.join(".h2o-probe-8-0").symlink_metadata().unwrap().file_type().is_symlink());
+
+    let _ = fs::remove_dir_all(&outside);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// (RC-02 I.7)(F) the family ranks after the two established families and,
+/// within it, by trusted archive identity: creation order never reaches the
+/// action order, and a re-scan is stable.
+#[test]
+fn capability_probe_order_is_deterministic_not_filesystem_order() {
+    let names = [".h2o-probe-1-0", ".h2o-probe-1-1", ".h2o-probe-10-0", ".h2o-probe-2-0"];
+
+    let forward = temp_root("rc02-order-f");
+    let fp = packages(&forward);
+    for n in names {
+        fs::write(forward.join(n), b"p").unwrap();
+        fs::create_dir_all(fp.join(n)).unwrap();
+    }
+    fs::create_dir_all(fp.join(".h2o-genstage-00ff01")).unwrap();
+    fs::write(shard(&forward, "ab").join(".h2o-durable-5-0.tmp"), b"t").unwrap();
+
+    let reverse = temp_root("rc02-order-r");
+    let rp = packages(&reverse);
+    fs::write(shard(&reverse, "ab").join(".h2o-durable-5-0.tmp"), b"t").unwrap();
+    fs::create_dir_all(rp.join(".h2o-genstage-00ff01")).unwrap();
+    for n in names.iter().rev() {
+        fs::create_dir_all(rp.join(n)).unwrap();
+        fs::write(reverse.join(n), b"p").unwrap();
+    }
+
+    let a = scan_trusted_residue_within(&forward);
+    let b = scan_trusted_residue_within(&reverse);
+    assert_eq!(ids(&a), ids(&b), "insertion order must not reach action order");
+    assert_eq!(
+        ids(&a),
+        vec![
+            "generation-staging|archive/packages/.h2o-genstage-00ff01",
+            "durable-temp|archive/assets/ab/.h2o-durable-5-0.tmp",
+            "capability-probe|archive/.h2o-probe-1-0",
+            "capability-probe|archive/.h2o-probe-1-1",
+            "capability-probe|archive/.h2o-probe-10-0",
+            "capability-probe|archive/.h2o-probe-2-0",
+            "capability-probe|archive/packages/.h2o-probe-1-0",
+            "capability-probe|archive/packages/.h2o-probe-1-1",
+            "capability-probe|archive/packages/.h2o-probe-10-0",
+            "capability-probe|archive/packages/.h2o-probe-2-0",
+        ],
+        "family rank, then trusted archive identity"
+    );
+    assert_eq!(ids(&scan_trusted_residue_within(&forward)), ids(&a));
+
+    let _ = fs::remove_dir_all(&forward);
+    let _ = fs::remove_dir_all(&reverse);
+}
+
+/// (RC-02 I.8)(D)(E) the family extends the ONE scanner and ONE grammar
+/// authority — no second scanner, no command, no destructive capability: the
+/// probe walk is private, unregistered, and can only read.
+#[test]
+fn the_capability_probe_family_adds_no_command_and_no_destructive_capability() {
+    let source = include_str!("../archive_residue_probe.rs");
+    let code: String = source
+        .lines()
+        .map(str::trim_start)
+        .filter(|l| !l.starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(code.matches("#[tauri::command]").count(), 1, "no command was added");
+    assert!(code.contains("fn scan_capability_probe_within("));
+    assert!(!code.contains("pub fn scan_capability_probe_within("), "not reachable outside");
+    assert!(!code.contains("pub(crate) fn scan_capability_probe_within("));
+    /* Exactly one trusted scan entry point folds all three families. */
+    let at = code.find("pub fn scan_trusted_residue_within").expect("the one authority");
+    let body = &code[at..at + code[at..].find("\n}").unwrap()];
+    assert!(body.contains("scan_generation_staging_within(archive_root, &mut out)"));
+    assert!(body.contains("scan_durable_temp_within(archive_root, &mut out)"));
+    assert!(body.contains("scan_capability_probe_within(archive_root, &mut out)"));
+    /* The probe walk reads only: no unlink, rename, move, create or write. */
+    let at = code.find("fn scan_capability_probe_in(").expect("the probe walk");
+    let end = code.find("fn is_dir_stat(").expect("the following item");
+    let walk = &code[at..end];
+    for forbidden in [
+        "unlink", "remove", "rename", "move_exclusive_into", "promote", "create_new_child",
+        "mkdir", "write", "purge", "quarantine", "std::fs::", "open_child_nofollow(",
+    ] {
+        assert!(!walk.contains(forbidden), "the probe walk must not {forbidden}");
+    }
+    assert!(walk.contains("stat_child_nofollow"), "no-follow inspection only");
+    assert!(walk.contains("reasons::SYMLINK"), "links are reported, never followed");
+    assert!(walk.contains("reasons::PROBE_ENTRY_TYPE"), "foreign entry types are reported");
+    assert!(walk.contains("reasons::NAME_SHAPE"), "malformed lookalikes are reported");
+    /* The grammar is the capability layer's own reserved prefix, not a
+       second literal that could drift from it. */
+    assert!(code.contains("use crate::archive_filesystem_capability::PROBE_PREFIX;"));
+    assert_eq!(code.matches("\".h2o-probe-").count(), 0, "no second probe-prefix literal");
+    let lib = include_str!("../lib.rs");
+    assert!(!lib.contains("scan_capability_probe"), "not registered");
 }

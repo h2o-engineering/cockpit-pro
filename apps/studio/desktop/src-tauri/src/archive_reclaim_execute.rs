@@ -71,7 +71,9 @@ use crate::archive_reclaim::{
     QuarantineKind, QuarantineRunId, QuarantineTarget, ReceiptsDir, ReclaimRoot, RunDir,
 };
 use crate::archive_reclamation_preview::PreviewRequest;
-use crate::archive_residue_probe::{ResidueFamily, TrustedResidueItem, TrustedResidueScan};
+use crate::archive_residue_probe::{
+    ProbeLocation, ResidueFamily, TrustedResidueItem, TrustedResidueScan,
+};
 use crate::archive_retention_plan::{Decision, ReclamationPlan, RetentionInputs};
 
 pub const RUN_SCHEMA: &str = "h2o.m06.reclamationRun";
@@ -164,15 +166,18 @@ pub struct ActedResidue {
     pub blocker: Option<String>,
 }
 
-/// Acted and purged counts BY FAMILY. Generation staging and durable temp are
-/// different source classes with different safety arguments, so a run reports
-/// them separately rather than as one residue total.
+/// Acted and purged counts BY FAMILY. Generation staging, durable temp and
+/// capability-probe residue are different source classes with different safety
+/// arguments, so a run reports them separately rather than as one residue
+/// total.
 #[derive(serde::Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ResidueCounts {
     pub generation_staging_quarantined: usize,
     pub generation_staging_purged: usize,
     pub durable_temp_quarantined: usize,
     pub durable_temp_purged: usize,
+    pub capability_probe_quarantined: usize,
+    pub capability_probe_purged: usize,
 }
 
 impl ResidueCounts {
@@ -185,6 +190,10 @@ impl ResidueCounts {
             ResidueFamily::DurableTemp => {
                 self.durable_temp_quarantined += usize::from(quarantined);
                 self.durable_temp_purged += usize::from(purged);
+            }
+            ResidueFamily::CapabilityProbe => {
+                self.capability_probe_quarantined += usize::from(quarantined);
+                self.capability_probe_purged += usize::from(purged);
             }
         }
     }
@@ -322,9 +331,17 @@ struct ResidueAction<'a> {
 /// case be refused by `RENAME_EXCL` rather than replaced.
 fn residue_target_component(item: &TrustedResidueItem) -> Result<QuarantineComponent, String> {
     let tag = item.family().tag();
-    let raw = match (item.family(), item.shard()) {
-        (ResidueFamily::GenerationStaging, None) => format!("{tag}.{}", item.name()),
-        (ResidueFamily::DurableTemp, Some(shard)) => format!("{tag}.{shard}.{}", item.name()),
+    let raw = match (item.family(), item.shard(), item.probe_location()) {
+        (ResidueFamily::GenerationStaging, None, None) => format!("{tag}.{}", item.name()),
+        (ResidueFamily::DurableTemp, Some(shard), None) => {
+            format!("{tag}.{shard}.{}", item.name())
+        }
+        // RC-T02-02: the typed location is part of the identity, so one probe
+        // name standing both at the root and under packages yields two
+        // distinct, non-colliding quarantine items.
+        (ResidueFamily::CapabilityProbe, None, Some(location)) => {
+            format!("{tag}.{}.{}", location.tag(), item.name())
+        }
         // A pairing the trusted scan cannot produce.
         _ => return Err(codes::RESIDUE_IDENTITY_INVALID.to_string()),
     };
@@ -379,6 +396,7 @@ fn plan_evidence(
             "sourceBlockers": residue.blockers,
             "generationStagingFound": residue.count_of(ResidueFamily::GenerationStaging),
             "durableTempFound": residue.count_of(ResidueFamily::DurableTemp),
+            "capabilityProbeFound": residue.count_of(ResidueFamily::CapabilityProbe),
             "indeterminate": residue.indeterminate,
             "actions": residue_actions
                 .iter()
@@ -665,9 +683,11 @@ fn run_internal(
     // packages directory at all must not be refused for a descriptor it never
     // uses.
     let needs_packages = !candidates.is_empty()
-        || residue_actions
-            .iter()
-            .any(|a| a.planned.family == ResidueFamily::GenerationStaging);
+        || residue_actions.iter().any(|a| {
+            a.planned.family == ResidueFamily::GenerationStaging
+                || (a.planned.family == ResidueFamily::CapabilityProbe
+                    && a.item.probe_location() == Some(ProbeLocation::Packages))
+        });
     let packages = if needs_packages {
         match crate::archive_reclaim::open_packages_dir(exclusive, archive_root) {
             Ok(dir) => Some(dir),
@@ -928,8 +948,9 @@ fn run_residue_stage(
         let mut acted = action.planned.clone();
 
         // The rename SOURCE, derived from the item's own trusted family and its
-        // validated shard component. No caller path and no renderer value
-        // participates, and no archive-relative string is parsed back apart.
+        // validated shard component or typed probe location. No caller path and
+        // no renderer value participates, and no archive-relative string is
+        // parsed back apart.
         let shard_dir = match (acted.family, action.item.shard()) {
             (ResidueFamily::DurableTemp, Some(shard)) => {
                 match crate::archive_reclaim::open_cas_shard_dir(exclusive, archive_root, shard) {
@@ -947,9 +968,22 @@ fn run_residue_stage(
             }
             _ => None,
         };
-        let source_dir = match (acted.family, shard_dir.as_ref(), packages) {
+        // RC-T02-02: probe residue leaves the admitted archive root or the
+        // packages directory — the two locations the probe layer writes —
+        // selected by the item's TYPED location, never by parsing its path.
+        // Every other family keeps the packages directory here.
+        let located = match (acted.family, action.item.probe_location()) {
+            (ResidueFamily::CapabilityProbe, Some(ProbeLocation::ArchiveRoot)) => {
+                Some(reclaim.archive_dir())
+            }
+            (ResidueFamily::CapabilityProbe, Some(ProbeLocation::Packages)) => packages,
+            (ResidueFamily::CapabilityProbe, None) => None,
+            _ => packages,
+        };
+        let source_dir = match (acted.family, shard_dir.as_ref(), located) {
             (ResidueFamily::DurableTemp, Some(dir), _) => dir,
             (ResidueFamily::GenerationStaging, _, Some(dir)) => dir,
+            (ResidueFamily::CapabilityProbe, _, Some(dir)) => dir,
             _ => {
                 acted.blocker = Some(codes::RESIDUE_SHARD_UNAVAILABLE.to_string());
                 outcome.residue_acted.push(acted);

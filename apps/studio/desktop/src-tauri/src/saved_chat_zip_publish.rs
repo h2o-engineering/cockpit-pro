@@ -312,7 +312,7 @@ fn require_publication_capabilities(
             if cfg!(target_os = "macos") {
                 capability::require(final_dir, &[capability::Capability::DirectoryFence])
                     .map_err(|err| refusal(err, "publish-failed"))?;
-                match capability::probe_clone_pair(staging, final_dir) {
+                match capability::clone_pair_capability(staging, final_dir) {
                     capability::CapabilityState::Proven => Ok(()),
                     capability::CapabilityState::Absent(_) => {
                         Err("unsupported-filesystem-capability")

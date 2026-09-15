@@ -77,6 +77,7 @@ fn attribute(item: &QuarantineComponent) -> Option<QuarantineKind> {
     for family in [
         crate::archive_residue_probe::ResidueFamily::GenerationStaging,
         crate::archive_residue_probe::ResidueFamily::DurableTemp,
+        crate::archive_residue_probe::ResidueFamily::CapabilityProbe,
     ] {
         if name.starts_with(&format!("{}.", family.tag())) {
             return Some(QuarantineKind::StagingTemp);

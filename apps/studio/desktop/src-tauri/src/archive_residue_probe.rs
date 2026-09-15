@@ -19,6 +19,7 @@ use std::path::Path;
 use crate::archive_durable_write::{
     confined, ARCHIVE_ROOT, CAS_DIR, GENERATION_STAGING_PREFIX, TEMP_PREFIX, TEMP_SUFFIX,
 };
+use crate::archive_filesystem_capability::PROBE_PREFIX;
 
 /// The residue family this probe owns. The generation-staging family stays
 /// with the JS inventory that can already see it.
@@ -38,6 +39,9 @@ pub mod codes {
     /// T3.3: the canonical packages directory could not be walked, and it was
     /// not simply absent. An incomplete walk, never an empty one.
     pub const PACKAGES_UNREADABLE: &str = "residue-probe-packages-unreadable";
+    /// RC-T02-02: the archive root itself could not be walked for probe
+    /// residue, and it was not simply absent.
+    pub const ROOT_UNREADABLE: &str = "residue-probe-root-unreadable";
 }
 
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
@@ -226,6 +230,14 @@ pub async fn h2o_archive_durable_temp_residue(
 /// staging tree, directly under the canonical packages directory.
 pub const GENERATION_STAGING_KIND: &str = "generation-staging";
 
+/// T02 RC-T02-02: the capability-probe residue family — a `.h2o-probe-*`
+/// artifact a crashed class O probe left behind (contract §10 rule 1: residue
+/// under the archive root is stale staging under I11, reclaimable by OP-11).
+/// The probe layer creates these in exactly two archive-owned locations:
+/// directly under the admitted archive root (durable-write and reclamation
+/// admission) and under `packages` (generation publication admission).
+pub const CAPABILITY_PROBE_KIND: &str = "capability-probe";
+
 /// The canonical packages component. Named locally rather than widening a
 /// preserved module's private constant for one string; `archive_reclaim`
 /// already names the same component the same way.
@@ -240,6 +252,9 @@ const PACKAGES_DIR: &str = "packages";
 const MAX_RESIDUE_NAME: usize = 120;
 
 pub mod reasons {
+    /// A `.h2o-probe-*` name that is neither a regular file nor a directory
+    /// (the only two entry types a probe creates).
+    pub const PROBE_ENTRY_TYPE: &str = "residue-probe-entry-type-rejected";
     /// A `.h2o-genstage-*` name that is not a real directory.
     pub const NOT_A_DIRECTORY: &str = "residue-staging-not-a-directory";
     /// A `.h2o-durable-*.tmp` name that is not a real regular file.
@@ -261,6 +276,7 @@ pub mod reasons {
 pub enum ResidueFamily {
     GenerationStaging,
     DurableTemp,
+    CapabilityProbe,
 }
 
 impl ResidueFamily {
@@ -268,6 +284,7 @@ impl ResidueFamily {
         match self {
             ResidueFamily::GenerationStaging => GENERATION_STAGING_KIND,
             ResidueFamily::DurableTemp => DURABLE_TEMP_KIND,
+            ResidueFamily::CapabilityProbe => CAPABILITY_PROBE_KIND,
         }
     }
 
@@ -278,6 +295,32 @@ impl ResidueFamily {
         match self {
             ResidueFamily::GenerationStaging => "genstage",
             ResidueFamily::DurableTemp => "durtmp",
+            ResidueFamily::CapabilityProbe => "probe",
+        }
+    }
+}
+
+/// Where a capability-probe residue item stands — the two archive-owned
+/// locations the probe layer can actually write. TYPED, so the reclamation
+/// stage derives the rename SOURCE from the family and location alone and
+/// never parses an archive-relative string back apart.
+#[derive(serde::Serialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProbeLocation {
+    /// Directly under the admitted archive root.
+    ArchiveRoot,
+    /// Directly under `archive/packages`.
+    Packages,
+}
+
+impl ProbeLocation {
+    /// The fixed, separator-free segment this location contributes to a
+    /// quarantine identity, so one probe name in both locations yields two
+    /// distinct quarantine items.
+    pub fn tag(self) -> &'static str {
+        match self {
+            ProbeLocation::ArchiveRoot => "root",
+            ProbeLocation::Packages => "packages",
         }
     }
 }
@@ -294,6 +337,9 @@ pub struct TrustedResidueItem {
     family: ResidueFamily,
     /// The validated two-hex shard component. `Some` only for durable temp.
     shard: Option<String>,
+    /// The archive-owned location of a probe artifact. `Some` only for the
+    /// capability-probe family.
+    probe_location: Option<ProbeLocation>,
     name: String,
     path: String,
 }
@@ -304,6 +350,9 @@ impl TrustedResidueItem {
     }
     pub fn shard(&self) -> Option<&str> {
         self.shard.as_deref()
+    }
+    pub fn probe_location(&self) -> Option<ProbeLocation> {
+        self.probe_location
     }
     pub fn name(&self) -> &str {
         &self.name
@@ -452,6 +501,7 @@ fn scan_generation_staging_within(archive_root: &Path, out: &mut TrustedResidueS
         out.items.push(TrustedResidueItem {
             family: ResidueFamily::GenerationStaging,
             shard: None,
+            probe_location: None,
             name: text,
             path,
         });
@@ -519,9 +569,125 @@ fn scan_durable_temp_within(archive_root: &Path, out: &mut TrustedResidueScan) {
         out.items.push(TrustedResidueItem {
             family: ResidueFamily::DurableTemp,
             shard: Some(entry.shard.clone()),
+            probe_location: None,
             name: entry.name.clone(),
             path: entry.path.clone(),
         });
+    }
+}
+
+/// The exact trusted probe-residue grammar: `.h2o-probe-<pid>-<counter>` with
+/// both fields non-empty ASCII digits — precisely what
+/// `archive_filesystem_capability` mints, and nothing else. A reserved-prefix
+/// name that deviates (`.h2o-probe-x`, `.h2o-probe-1`, `.h2o-probe-1-2-3`) is
+/// a lookalike: evidence, never a target.
+pub(crate) fn is_capability_probe_residue(name: &[u8]) -> bool {
+    let Some(rest) = name.strip_prefix(PROBE_PREFIX.as_bytes()) else {
+        return false;
+    };
+    let mut parts = rest.split(|b| *b == b'-');
+    let (Some(pid), Some(counter), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    !pid.is_empty()
+        && !counter.is_empty()
+        && pid.iter().all(u8::is_ascii_digit)
+        && counter.iter().all(u8::is_ascii_digit)
+        && residue_name_shape_ok(name)
+}
+
+/// Walks ONE archive-owned probe location for `.h2o-probe-*` residue.
+///
+/// A probe creates regular files (exclusive-create, link and clone probes) and
+/// directories (no-replace-rename probes), so both entry types are genuine;
+/// anything else under the reserved prefix is recorded as indeterminate. A
+/// symlink is never followed. Any other name — a canonical generation, a CAS
+/// body, the lock file, `.h2o-reclaim`, an unrelated dotfile — is skipped
+/// without inspection: it is not probe residue and this walk has no authority
+/// over it.
+fn scan_capability_probe_in(
+    dir: &confined::Dir,
+    location: ProbeLocation,
+    relative_parent: &str,
+    unreadable: &str,
+    out: &mut TrustedResidueScan,
+) {
+    let names = match dir.read_entry_names() {
+        Ok(names) => names,
+        Err(_) => {
+            out.fail(unreadable);
+            return;
+        }
+    };
+    for name in names {
+        if !name.starts_with(PROBE_PREFIX.as_bytes()) {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(&name).map(str::to_string) else {
+            out.fail(codes::NAME_UNREPRESENTABLE);
+            continue;
+        };
+        let path = format!("{relative_parent}/{text}");
+        if !is_capability_probe_residue(&name) {
+            out.indeterminate(path, CAPABILITY_PROBE_KIND, reasons::NAME_SHAPE);
+            continue;
+        }
+        let st = match dir.stat_child_nofollow(&name) {
+            Ok(Some(st)) => st,
+            // Raced away between listing and stat: nothing to act on, and
+            // nothing was skipped.
+            Ok(None) => continue,
+            Err(_) => {
+                out.indeterminate(path, CAPABILITY_PROBE_KIND, reasons::UNREADABLE);
+                continue;
+            }
+        };
+        if confined::is_symlink(&st) {
+            out.indeterminate(path, CAPABILITY_PROBE_KIND, reasons::SYMLINK);
+            continue;
+        }
+        if !confined::is_regular(&st) && !st.is_directory() {
+            out.indeterminate(path, CAPABILITY_PROBE_KIND, reasons::PROBE_ENTRY_TYPE);
+            continue;
+        }
+        out.items.push(TrustedResidueItem {
+            family: ResidueFamily::CapabilityProbe,
+            shard: None,
+            probe_location: Some(location),
+            name: text,
+            path,
+        });
+    }
+}
+
+/// Walks both archive-owned probe locations: the archive root itself and
+/// `archive/packages`. Nothing is created — an absent root or packages
+/// directory is a proven absence of that location's residue.
+fn scan_capability_probe_within(archive_root: &Path, out: &mut TrustedResidueScan) {
+    match confined::Dir::open_existing_nofollow(archive_root) {
+        Ok(root) => scan_capability_probe_in(
+            &root,
+            ProbeLocation::ArchiveRoot,
+            ARCHIVE_ROOT,
+            codes::ROOT_UNREADABLE,
+            out,
+        ),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+        Err(_) => {
+            out.fail(codes::ROOT_UNREADABLE);
+            return;
+        }
+    }
+    match confined::Dir::open_existing_nofollow(&archive_root.join(PACKAGES_DIR)) {
+        Ok(packages) => scan_capability_probe_in(
+            &packages,
+            ProbeLocation::Packages,
+            &format!("{ARCHIVE_ROOT}/{PACKAGES_DIR}"),
+            codes::PACKAGES_UNREADABLE,
+            out,
+        ),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => out.fail(codes::PACKAGES_UNREADABLE),
     }
 }
 
@@ -536,7 +702,8 @@ fn is_dir_stat(st: &crate::archive_durable_write::confined::EntryStat) -> bool {
     st.is_directory()
 }
 
-/// The complete trusted residue authority for BOTH established families.
+/// The complete trusted residue authority for all three families: generation
+/// staging, durable temp and (RC-T02-02) capability-probe residue.
 ///
 /// Takes an archive root rather than a caller path: the destructive caller
 /// derives that root from the canonical app authority under exclusive
@@ -547,6 +714,7 @@ pub fn scan_trusted_residue_within(archive_root: &Path) -> TrustedResidueScan {
     let mut out = TrustedResidueScan::new();
     scan_generation_staging_within(archive_root, &mut out);
     scan_durable_temp_within(archive_root, &mut out);
+    scan_capability_probe_within(archive_root, &mut out);
     out.seal()
 }
 

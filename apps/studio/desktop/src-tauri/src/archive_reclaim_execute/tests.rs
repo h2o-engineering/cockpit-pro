@@ -3597,3 +3597,281 @@ fn the_activated_request_cannot_smuggle_authority_through_extra_fields() {
     assert_eq!(fields.matches("pub ").count(), 2, "exactly two request fields");
     assert!(fields.contains("chat_scope") && fields.contains("projections"));
 }
+
+// ── T02 RC-T02-02 — capability-probe residue through the governed run ───────
+
+/// (RC-02 I.1)(I.3)(F)(H) a governed run admits probe residue from BOTH
+/// archive-owned probe locations to the existing no-replace quarantine path,
+/// with a collision-free identity per location, and every other family, every
+/// canonical package and the reserved infrastructure beside them untouched.
+#[test]
+fn a_governed_run_reclaims_probe_residue_from_both_archive_owned_locations() {
+    let root = scratch("rc02-run");
+    let hashes = five(&root, "chat_a");
+    let owner = Owner::acquire(&root);
+
+    // The same probe name in both locations: a crashed exclusive-create probe
+    // (regular file) at the root, a crashed no-replace-rename probe
+    // (directory) under packages, plus one more of each family.
+    std::fs::write(root.join(".h2o-probe-31-0"), b"root-probe").unwrap();
+    std::fs::create_dir_all(root.join("packages").join(".h2o-probe-31-0")).unwrap();
+    std::fs::write(root.join("packages").join(".h2o-probe-31-0").join("x"), b"in").unwrap();
+    std::fs::create_dir_all(root.join(".h2o-probe-31-1")).unwrap();
+    std::fs::write(root.join("packages").join(".h2o-probe-32-0"), b"pkg-probe").unwrap();
+    let staging = orphan_staging(&root, "chat_b");
+    plant_temp(&root, "ab", ".h2o-durable-3-0.tmp", b"residue");
+    let packages_before: Vec<String> = pkg_names(&root)
+        .into_iter()
+        .filter(|n| !n.starts_with(".h2o-"))
+        .collect();
+    let lock_before = std::fs::symlink_metadata(root.join(".h2o-archive.lock")).is_ok();
+
+    let ex = owner.exclusive();
+    let outcome = run(&root, &ex, &db(vec![]), &request("chat_a", "ok", &hashes[4]));
+    assert_eq!(outcome.state, RunState::Complete, "{:?}", outcome.blockers);
+
+    // (I.3) all four probe items were quarantined AND purged, through the same
+    // stage and the same counts model as the two established families.
+    assert_eq!(outcome.residue.capability_probe_quarantined, 4);
+    assert_eq!(outcome.residue.capability_probe_purged, 4);
+    assert_eq!(outcome.residue.generation_staging_purged, 1);
+    assert_eq!(outcome.residue.durable_temp_purged, 1);
+    assert_eq!(outcome.residue_indeterminate, 0);
+    assert_eq!(
+        residue_ids(&outcome),
+        vec![
+            "generation-staging|archive/packages/".to_string() + &staging,
+            "durable-temp|archive/assets/ab/.h2o-durable-3-0.tmp".to_string(),
+            "capability-probe|archive/.h2o-probe-31-0".to_string(),
+            "capability-probe|archive/.h2o-probe-31-1".to_string(),
+            "capability-probe|archive/packages/.h2o-probe-31-0".to_string(),
+            "capability-probe|archive/packages/.h2o-probe-32-0".to_string(),
+        ],
+        "family rank, then trusted archive identity"
+    );
+    // (F) the typed location is part of the quarantine identity, so the one
+    // name standing in both locations became two distinct items.
+    let items: Vec<&str> = outcome
+        .residue_acted
+        .iter()
+        .filter(|r| r.family == ResidueFamily::CapabilityProbe)
+        .map(|r| r.quarantine_item.as_str())
+        .collect();
+    assert_eq!(
+        items,
+        vec![
+            "probe.root..h2o-probe-31-0",
+            "probe.root..h2o-probe-31-1",
+            "probe.packages..h2o-probe-31-0",
+            "probe.packages..h2o-probe-32-0",
+        ]
+    );
+    let receipts = receipt_names(&root);
+    for item in &items {
+        assert!(receipts.iter().any(|n| n.contains(item)), "receipts for {item}: {receipts:?}");
+    }
+    let run_id = outcome.run_id.clone().unwrap();
+    let plan = receipt_json(&root, &format!("{run_id}.plan.json"));
+    assert_eq!(plan["residue"]["capabilityProbeFound"], serde_json::json!(4));
+    assert_eq!(plan["residue"]["generationStagingFound"], serde_json::json!(1));
+    assert_eq!(plan["residue"]["durableTempFound"], serde_json::json!(1));
+    assert_eq!(plan["residue"]["actions"].as_array().unwrap().len(), 6);
+
+    // Nothing probe-shaped remains in either location — including anything
+    // the run's own admission probe minted, which it removed itself.
+    for dir in [root.clone(), root.join("packages")] {
+        let leftover: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(".h2o-probe-"))
+            .collect();
+        assert!(leftover.is_empty(), "{dir:?} still holds {leftover:?}");
+    }
+    assert!(!root.join("packages").join(&staging).exists());
+    assert!(!root.join("assets").join("ab").join(".h2o-durable-3-0.tmp").exists());
+    // (H) the canonical packages and the reserved infrastructure are intact.
+    let packages_after: Vec<String> = pkg_names(&root)
+        .into_iter()
+        .filter(|n| !n.starts_with(".h2o-"))
+        .collect();
+    let mut expected = packages_before.clone();
+    expected.retain(|n| !n.contains(&hashes[0]) && !n.contains(&hashes[1]));
+    assert_eq!(packages_after, expected, "only the two beyond-floor generations left");
+    assert_eq!(std::fs::symlink_metadata(root.join(".h2o-archive.lock")).is_ok(), lock_before);
+    assert!(root.join(".h2o-reclaim").is_dir());
+
+    let _ = ex.release();
+    let _ = std::fs::remove_dir_all(root.parent().unwrap());
+}
+
+/// (RC-02 I.5)(C) a symlink wearing a probe name is reported indeterminate by
+/// the run and never acted on: the link and its canonical target both survive
+/// a run that demonstrably reclaimed the genuine residue beside it.
+#[cfg(unix)]
+#[test]
+fn a_symlink_probe_lookalike_is_never_acted_on_by_a_governed_run() {
+    let root = scratch("rc02-symlink");
+    let hashes = five(&root, "chat_a");
+    let owner = Owner::acquire(&root);
+    // The link target is the NEWEST generation — protected by the retention
+    // floor, so its survival is attributable to the link never being followed.
+    let newest = pkg_names(&root).into_iter().find(|n| n.contains(&hashes[4])).unwrap();
+    let target = root.join("packages").join(newest);
+    assert!(target.is_dir(), "a real canonical generation as the link target");
+    std::os::unix::fs::symlink(&target, root.join(".h2o-probe-6-0")).unwrap();
+    std::os::unix::fs::symlink(&target, root.join("packages").join(".h2o-probe-6-1")).unwrap();
+    std::fs::write(root.join(".h2o-probe-6-2"), b"genuine").unwrap();
+    let target_before = census(&target);
+
+    let ex = owner.exclusive();
+    let outcome = run(&root, &ex, &db(vec![]), &request("chat_a", "ok", &hashes[4]));
+    assert_eq!(outcome.state, RunState::Complete, "{:?}", outcome.blockers);
+    assert_eq!(outcome.residue.capability_probe_purged, 1, "the genuine item was reclaimed");
+    assert_eq!(outcome.residue_indeterminate, 2, "both links were reported, not acted on");
+    assert_eq!(residue_ids(&outcome), vec!["capability-probe|archive/.h2o-probe-6-2"]);
+    assert!(root.join(".h2o-probe-6-0").symlink_metadata().unwrap().file_type().is_symlink());
+    assert!(root.join("packages").join(".h2o-probe-6-1").symlink_metadata().unwrap().file_type().is_symlink());
+    assert_eq!(census(&target), target_before, "the canonical target was never touched");
+    assert!(!root.join(".h2o-probe-6-2").exists());
+
+    let _ = ex.release();
+    let _ = std::fs::remove_dir_all(root.parent().unwrap());
+}
+
+/// (RC-02 E)(I.3)(I.8) the archive root is a RENAME SOURCE only: the residue
+/// move accepts a proven probe name from it through the same no-replace
+/// primitive, refuses both reserved exact infrastructure components before any
+/// syscall, and refuses every canonical name — and no new primitive exists.
+#[test]
+fn the_archive_root_is_a_rename_source_only_for_probe_residue() {
+    let root = scratch("rc02-source");
+    let _hashes = five(&root, "chat_a");
+    let owner = Owner::acquire(&root);
+    std::fs::write(root.join(".h2o-probe-2-0"), b"probe").unwrap();
+    let ex = owner.exclusive();
+    let reclaim = crate::archive_reclaim::open_reclaim_root_for_run(&ex, &root).unwrap();
+    let run_id = crate::archive_reclaim::QuarantineRunId::parse("rc02").unwrap();
+    let run_dir = reclaim.create_run(&ex, &run_id).unwrap();
+    let source = reclaim.archive_dir();
+    let item = QuarantineComponent::parse("probe.root..h2o-probe-2-0").unwrap();
+
+    // Reserved EXACT infrastructure: refused by name, before any syscall.
+    for infra in [".h2o-archive.lock", ".h2o-reclaim"] {
+        let name = QuarantineComponent::parse(infra).unwrap();
+        assert_eq!(
+            quarantine_residue(&ex, source, &run_dir, &name, &item),
+            Err(crate::archive_reclaim::codes::RESIDUE_SOURCE_INFRASTRUCTURE.to_string()),
+            "{infra}"
+        );
+    }
+    assert!(root.join(".h2o-archive.lock").exists(), "the presence lock is untouched");
+    assert!(root.join(".h2o-reclaim").is_dir(), "the quarantine namespace is untouched");
+    // Canonical names: not reserved, therefore inexpressible as a source.
+    for canonical in ["packages", "assets", "chat_a.h2ochat"] {
+        let name = QuarantineComponent::parse(canonical).unwrap();
+        assert_eq!(
+            quarantine_residue(&ex, source, &run_dir, &name, &item),
+            Err(crate::archive_reclaim::codes::RESIDUE_NOT_RESERVED.to_string()),
+            "{canonical}"
+        );
+    }
+    assert!(root.join("packages").is_dir());
+    // The proven probe name moves through the SAME no-replace primitive …
+    let name = QuarantineComponent::parse(".h2o-probe-2-0").unwrap();
+    assert_eq!(quarantine_residue(&ex, source, &run_dir, &name, &item), Ok(true));
+    assert!(!root.join(".h2o-probe-2-0").exists());
+    assert_eq!(
+        std::fs::read(root.join(".h2o-reclaim").join("run-rc02").join(item.as_str())).unwrap(),
+        b"probe"
+    );
+    // … and a second item aimed at the occupied destination fails closed.
+    std::fs::write(root.join(".h2o-probe-2-0"), b"second").unwrap();
+    assert_eq!(quarantine_residue(&ex, source, &run_dir, &name, &item), Ok(false));
+    assert_eq!(
+        std::fs::read(root.join(".h2o-reclaim").join("run-rc02").join(item.as_str())).unwrap(),
+        b"probe",
+        "the first item was never replaced"
+    );
+
+    /* (I.8) no delete primitive and no path-taking seam was added for this:
+       the source descriptor comes from the admitted root the namespace was
+       derived beneath, and the module's path-taking inventory is unchanged
+       (pinned separately by `archive_reclaim::tests`). */
+    let reclaim_src = include_str!("../archive_reclaim.rs");
+    let code: String = reclaim_src
+        .lines()
+        .map(str::trim_start)
+        .filter(|l| !l.starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(code.contains("pub(crate) fn archive_dir(&self) -> &confined::Dir"));
+    assert!(!code.contains("fn open_archive_root"), "no new path-taking seam");
+    let at = reclaim_src.find("pub fn quarantine_residue").unwrap();
+    let body = &reclaim_src[at..at + reclaim_src[at..].find("\n}").unwrap()];
+    assert!(body.contains("RESERVED_EXACT_COMPONENTS"), "the infrastructure guard is in the residue move");
+    assert!(body.contains("RESIDUE_SOURCE_INFRASTRUCTURE"));
+    assert!(body.contains("quarantine_into_run(source_dir, run, source, item)"), "same primitive");
+
+    let _ = ex.release();
+    let _ = std::fs::remove_dir_all(root.parent().unwrap());
+}
+
+/// (RC-02 G)(A) probe residue OUTSIDE the archive-owned probe locations is
+/// inert: a probe-shaped name inside a CAS shard (no probe ever runs there)
+/// and one under a sibling export-style root (contract §10 rule 1: inert,
+/// operator-removed) survive a run that reclaimed the archive-owned residue.
+#[test]
+fn probe_residue_outside_the_archive_owned_probe_locations_is_inert() {
+    let root = scratch("rc02-inert");
+    let hashes = five(&root, "chat_a");
+    let owner = Owner::acquire(&root);
+    let shard = root.join("assets").join("ab");
+    std::fs::create_dir_all(&shard).unwrap();
+    std::fs::write(shard.join(".h2o-probe-1-0"), b"not-ours").unwrap();
+    std::fs::write(shard.join(format!("sha256-{}", "ab".repeat(32))), b"body").unwrap();
+    let exports = root.parent().unwrap().join("H2O Studio Exports");
+    std::fs::create_dir_all(&exports).unwrap();
+    std::fs::write(exports.join(".h2o-probe-1-0"), b"export-root-residue").unwrap();
+    std::fs::write(root.join(".h2o-probe-1-0"), b"ours").unwrap();
+
+    let ex = owner.exclusive();
+    let outcome = run(&root, &ex, &db(vec![]), &request("chat_a", "ok", &hashes[4]));
+    assert_eq!(outcome.state, RunState::Complete, "{:?}", outcome.blockers);
+    assert_eq!(outcome.residue.capability_probe_purged, 1);
+    assert_eq!(residue_ids(&outcome), vec!["capability-probe|archive/.h2o-probe-1-0"]);
+    assert_eq!(outcome.residue_indeterminate, 0, "a non-probe location is not even reported");
+    assert!(shard.join(".h2o-probe-1-0").exists(), "the CAS shard entry is inert");
+    assert!(shard.join(format!("sha256-{}", "ab".repeat(32))).exists());
+    assert!(exports.join(".h2o-probe-1-0").exists(), "the export-root entry is inert");
+    assert!(!root.join(".h2o-probe-1-0").exists());
+
+    let _ = ex.release();
+    let _ = std::fs::remove_dir_all(root.parent().unwrap());
+}
+
+/// (RC-02 E) a probe quarantine left by an EARLIER, crashed run is attributed
+/// by recovery through the family tag and converged, exactly like the two
+/// established families — so admitting the family never strands a run.
+#[test]
+fn a_later_run_converges_a_prior_probe_quarantine() {
+    let root = scratch("rc02-recover");
+    let hashes = five(&root, "chat_a");
+    let prior = root.join(".h2o-reclaim").join("run-prior02");
+    std::fs::create_dir_all(prior.join("probe.packages..h2o-probe-9-0")).unwrap();
+    std::fs::write(prior.join("probe.root..h2o-probe-9-1"), b"stale").unwrap();
+    std::fs::create_dir_all(root.join(".h2o-reclaim").join("receipts")).unwrap();
+
+    let owner = Owner::acquire(&root);
+    let ex = owner.exclusive();
+    let outcome = run(&root, &ex, &db(vec![]), &request("chat_a", "ok", &hashes[4]));
+    assert_eq!(outcome.state, RunState::Complete, "{:?}", outcome.blockers);
+    assert_eq!(outcome.recovered, 2, "both stale probe quarantines converged");
+    assert!(!prior.join("probe.packages..h2o-probe-9-0").exists());
+    assert!(!prior.join("probe.root..h2o-probe-9-1").exists());
+    assert!(prior.is_dir(), "the prior run namespace is left as evidence");
+    let recovery = receipt_names(&root).into_iter().filter(|n| n.contains("recovery")).count();
+    assert_eq!(recovery, 1);
+
+    let _ = ex.release();
+    let _ = std::fs::remove_dir_all(root.parent().unwrap());
+}

@@ -82,6 +82,10 @@ pub mod codes {
     /// T3.3: a residue quarantine was asked to move a source name that is not a
     /// reserved trusted-writer component. The structural CAS barrier.
     pub const RESIDUE_NOT_RESERVED: &str = "reclaim-residue-source-not-reserved";
+    /// T02 RC-T02-02: a residue quarantine was asked to move a reserved EXACT
+    /// infrastructure component — the presence lock or the quarantine
+    /// namespace itself. Reserved, but never residue.
+    pub const RESIDUE_SOURCE_INFRASTRUCTURE: &str = "reclaim-residue-source-infrastructure";
     /// T3.3: the named CAS shard could not be opened as a rename source.
     pub const SHARD_UNAVAILABLE: &str = "reclaim-shard-unavailable";
     /// T3.5: an entry inside the reclaim root is not a recognizable run
@@ -235,6 +239,24 @@ impl QuarantineTarget {
 /// trusted archive root while exclusive ownership was held.
 pub struct ReclaimRoot {
     dir: confined::Dir,
+    /// The admitted archive root the namespace was derived beneath — retained
+    /// as the RENAME SOURCE for capability-probe residue (RC-T02-02). Never
+    /// re-derived from a path after admission.
+    archive: confined::Dir,
+}
+
+impl ReclaimRoot {
+    /// The admitted archive root as a rename SOURCE for `.h2o-probe-*` residue
+    /// standing directly beneath it.
+    ///
+    /// Read/rename-source only, exactly like `open_packages_dir`: the only
+    /// operation that consumes it is `quarantine_residue`, which refuses every
+    /// non-reserved source name and both reserved exact infrastructure
+    /// components (the presence lock and the quarantine namespace itself), so
+    /// nothing canonical and nothing structural is nameable through it.
+    pub(crate) fn archive_dir(&self) -> &confined::Dir {
+        &self.archive
+    }
 }
 
 /// Opens the canonical quarantine namespace.
@@ -268,13 +290,30 @@ fn open_reclaim_root_within(
 ) -> Result<ReclaimRoot, String> {
     let root = confined::Dir::open_existing_nofollow(archive_root)
         .map_err(|_| codes::ROOT_UNAVAILABLE.to_string())?;
+    // Class O for class M: the no-replace move and the namespace fence must be
+    // PROVEN on the ADMITTED archive root before the quarantine namespace is
+    // even created. Contract §10 rule 1 runs the probe directly under the
+    // governed root — so a probe that crashes leaves `.h2o-probe-*` where the
+    // trusted residue scan reclaims it (RC-T02-02), never inside a run
+    // namespace whose every entry recovery must be able to attribute. A root
+    // this process cannot write is an infrastructure fault, not a verdict.
+    match crate::archive_filesystem_capability::require(
+        &root,
+        crate::archive_filesystem_capability::move_requirements(),
+    ) {
+        Ok(_) => {}
+        Err(refusal) if refusal.is_root_not_writable() => {
+            return Err(codes::ROOT_UNAVAILABLE.to_string())
+        }
+        Err(_) => return Err(codes::QUARANTINE_CAPABILITY_UNPROVEN.to_string()),
+    }
     let name = RECLAIM_NAMESPACE_COMPONENT.as_bytes();
     root.mkdir_child(name)
         .map_err(|_| codes::ROOT_UNAVAILABLE.to_string())?;
     let dir = root
         .open_child_nofollow(name)
         .map_err(|_| codes::ROOT_UNAVAILABLE.to_string())?;
-    Ok(ReclaimRoot { dir })
+    Ok(ReclaimRoot { dir, archive: root })
 }
 
 /// Opens the quarantine namespace WITHOUT creating it.
@@ -293,7 +332,7 @@ pub(crate) fn open_reclaim_root_if_present(
         Err(_) => return Err(codes::ROOT_UNAVAILABLE.to_string()),
     };
     match root.open_child_nofollow(RECLAIM_NAMESPACE_COMPONENT.as_bytes()) {
-        Ok(dir) => Ok(Some(ReclaimRoot { dir })),
+        Ok(dir) => Ok(Some(ReclaimRoot { dir, archive: root })),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err(codes::ROOT_UNAVAILABLE.to_string()),
     }
@@ -593,8 +632,10 @@ pub fn quarantine_generation(
 /// The source entry is opened no-follow and retained across the move so the
 /// object that arrives under the quarantine name can be proven to be that
 /// object (class H′); on divergence the foreign occupant is left alone and a
-/// distinct refusal is reported. An unproven move capability refuses before
-/// the syscall (`reclaim-quarantine-capability-unproven`).
+/// distinct refusal is reported. The move capability was proven on the
+/// admitted archive root when the quarantine namespace was opened
+/// (`reclaim-quarantine-capability-unproven` refuses there, before anything
+/// exists); a use-time capability refusal is still honoured below.
 fn quarantine_into_run(
     source_dir: &confined::Dir,
     run: &RunDir,
@@ -603,16 +644,6 @@ fn quarantine_into_run(
 ) -> Result<bool, String> {
     let from = source.as_str().as_bytes();
     let to = item.as_str().as_bytes();
-    match crate::archive_filesystem_capability::require(
-        &run.dir,
-        crate::archive_filesystem_capability::move_requirements(),
-    ) {
-        Ok(_) => {}
-        Err(refusal) if refusal.is_root_not_writable() => {
-            return Err(codes::QUARANTINE_RENAME_FAILED.to_string())
-        }
-        Err(_) => return Err(codes::QUARANTINE_CAPABILITY_UNPROVEN.to_string()),
-    }
     // Retain the source object across the move: a directory descriptor
     // admitted no-follow, a no-follow read handle for a durable-temp file, or
     // — for an entry that cannot be opened without following it (a symlink
@@ -691,6 +722,17 @@ pub fn quarantine_residue(
 ) -> Result<bool, String> {
     if !crate::archive_durable_write::is_reserved_component(source.as_str()) {
         return Err(codes::RESIDUE_NOT_RESERVED.to_string());
+    }
+    // RC-T02-02: the archive root itself is now a rename source (probe
+    // residue stands directly beneath it), and its two reserved EXACT
+    // components — the presence lock and the quarantine namespace — are
+    // infrastructure, never residue. Refused before any syscall, whatever
+    // descriptor the caller holds.
+    if crate::archive_durable_write::RESERVED_EXACT_COMPONENTS
+        .iter()
+        .any(|exact| *exact == source.as_str())
+    {
+        return Err(codes::RESIDUE_SOURCE_INFRASTRUCTURE.to_string());
     }
     quarantine_into_run(source_dir, run, source, item)
 }
