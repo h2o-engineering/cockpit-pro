@@ -60,6 +60,36 @@ percent-encoding = "2"
 # `parsing` feature is requested. Preferred over hand-rolling calendar
 # arithmetic inside a security-sensitive ordering primitive.
 time = { version = "0.3", features = ["parsing"] }
+# T02 (cross-platform Saved-Chat filesystem safety): platform-neutral OS
+# entropy for the generation-session token seed and the reclamation run id
+# (`getentropy` on macOS, `getrandom(2)` on Linux, `ProcessPrng` on Windows).
+# `getrandom` 0.3 is ALREADY resolved in this crate's lockfile; naming it
+# directly adds no new crate to the graph.
+getrandom = "0.3"
+
+# T02 (cross-platform Saved-Chat filesystem safety), contract §16 D4: the
+# Windows arm of `archive_durable_write::confined` binds the documented NT /
+# Win32 file-object APIs through the already-locked `windows-sys 0.59` line,
+# with exactly the features the frozen contract names. No new crate enters the
+# dependency graph; nothing here is compiled on any other target.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Kernel",
+    "Win32_System_WindowsProgramming",
+] }
+
+# T02: the bounded Saved-Chat primitive compile harness
+# (`harness/saved-chat-fs-primitives`) includes the primitive modules by
+# `#[path]` with this cfg set, which excludes their Tauri command layer. The
+# main crate never sets it; declaring it keeps `unexpected_cfgs` silent.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(h2o_saved_chat_primitive_harness)'] }
 
 [profile.release]
 panic = "abort"

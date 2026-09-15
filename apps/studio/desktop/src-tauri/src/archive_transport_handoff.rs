@@ -8,7 +8,9 @@
 //! the handles. No remote, outbox, ledger, sequence, export-id, credential,
 //! path, delete, rename, write, or retention authority exists here.
 
-#![cfg(unix)]
+// T02: read-only and descriptor-relative throughout, so it compiles on every
+// platform through the `confined` facade (contract I16: a platform that cannot
+// publish still reads). No module-level platform gate.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};

@@ -2,23 +2,43 @@
 //!
 //! The renderer supplies verified ZIP bytes plus an expected SHA-256/length,
 //! one governed final leaf, and a 128-bit lowercase-hex operation token. This
-//! module resolves both the immutable governed export root and a fixed native-only
-//! sibling staging root, derives the staging leaf, exclusively creates it,
-//! retains the created handle through write/sync/readback, and atomically
-//! creates the final name from that verified descriptor with `fclonefileat`.
+//! module resolves both the immutable governed export root and a fixed
+//! native-only sibling staging root, stages the bytes exclusively, retains the
+//! created handle through write/sync/readback, and creates the final name
+//! from that verified handle — never from the staging pathname.
+//!
+//! Platform realization (T02, frozen contract §11.1 class D3):
+//! * macOS — named exclusive stage in the sibling staging root, published by
+//!   `fclonefileat` (an atomic clone of the object the retained descriptor
+//!   selects; `CAP-CLONE` probed per (staging root, final root) pair);
+//! * Linux — an anonymous `O_TMPFILE` inode created IN the final directory,
+//!   published by descriptor-bound `linkat` (no staging pathname exists);
+//! * Windows — named exclusive stage in the sibling staging root, published
+//!   by a handle-bound `ReplaceIfExists = FALSE` rename into the final
+//!   directory, then re-identified under the final name (class H′).
 //!
 //! No renderer-callable operation accepts a pre-existing staged pathname. The
 //! publication syscall never resolves the staging pathname, so a post-check
 //! substitution cannot redirect the published bytes. Cleanup touches the
-//! staging pathname only while it still identifies the owned inode.
+//! staging pathname only while it still identifies the owned object.
+//! Publication into a root whose filesystem cannot prove the required
+//! primitives is refused before staging (`capability-unproven`); a volume that
+//! cannot clone (macOS) or that is not the staging volume (Windows) reports
+//! the filesystem condition (`unsupported-filesystem-capability`), and a
+//! platform without a compiled arm reports `unsupported-platform`.
 
 use serde::Serialize;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
+
 #[cfg(test)]
 use std::path::PathBuf;
+
+use crate::archive_durable_write::confined::{self, ObjectIdentity};
+use crate::archive_filesystem_capability as capability;
 
 const FINAL_SUFFIX: &str = ".h2ochat.zip";
 const TEMP_SUFFIX_PREFIX: &str = ".tmp-";
@@ -47,6 +67,9 @@ pub struct SavedChatZipPublishResult {
     durability_complete: bool,
     byte_length: u64,
     sha256: String,
+    /// True only when the macOS `F_FULLFSYNC` media fence succeeded. On Linux
+    /// and Windows this stays `false` while the platform's documented fence
+    /// was issued; durability is carried by `committed` / `durabilityComplete`.
     full_fsync: bool,
 }
 
@@ -86,24 +109,14 @@ impl SavedChatZipPublishResult {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct FileIdentity {
-    device: u64,
-    inode: u64,
-}
-
-impl FileIdentity {
-    fn from_stat(stat: &libc::stat) -> Self {
-        Self {
-            device: stat.st_dev as u64,
-            inode: stat.st_ino as u64,
-        }
-    }
-}
-
+/// Governed ASCII leaf admission (contract §12): trimmed, no separators, no
+/// drive prefix, no `..`, ASCII `[A-Za-z0-9._ -]`, no leading `.`, and no
+/// Windows reserved device stem (whole stem or the segment before the first
+/// `.`) on ANY platform. Nothing is normalized, case-folded or trimmed to fit.
 fn is_safe_ascii_leaf(name: &str) -> bool {
     if name.is_empty()
         || name != name.trim()
+        || name.starts_with('.')
         || name.contains('/')
         || name.contains('\\')
         || name.contains("..")
@@ -113,6 +126,9 @@ fn is_safe_ascii_leaf(name: &str) -> bool {
     }
     let bytes = name.as_bytes();
     if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return false;
+    }
+    if crate::archive_durable_write::has_reserved_device_stem(name) {
         return false;
     }
     bytes
@@ -147,6 +163,9 @@ fn stage_name(final_name: &str, token: &str) -> String {
     format!("{final_name}{TEMP_SUFFIX_PREFIX}{token}")
 }
 
+/// Unix identity of the retained staging descriptor: `fstat` on the
+/// descriptor itself (`st_dev` + `st_ino`) — the accepted macOS mechanism.
+#[cfg(unix)]
 fn fstat(fd: RawFd) -> io::Result<libc::stat> {
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     let rc = unsafe { libc::fstat(fd, &mut stat) };
@@ -156,8 +175,26 @@ fn fstat(fd: RawFd) -> io::Result<libc::stat> {
     Ok(stat)
 }
 
-fn staged_is_regular(stat: &libc::stat) -> bool {
-    (stat.st_mode & libc::S_IFMT) == libc::S_IFREG
+/// Identity and regular-file-ness of the object the retained handle selects.
+#[cfg(unix)]
+fn owned_identity(handle: &File) -> io::Result<Option<ObjectIdentity>> {
+    let stat = fstat(handle.as_raw_fd())?;
+    if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG {
+        return Ok(None);
+    }
+    Ok(Some(ObjectIdentity {
+        device: stat.st_dev as u64,
+        object: stat.st_ino as u128,
+    }))
+}
+
+#[cfg(not(unix))]
+fn owned_identity(handle: &File) -> io::Result<Option<ObjectIdentity>> {
+    confined::file_identity(handle).map(Some)
+}
+
+fn staged_is_regular(stat: &confined::EntryStat) -> bool {
+    stat.is_regular()
 }
 
 fn hash_owned_file(handle: &mut File) -> io::Result<(u64, String)> {
@@ -181,24 +218,20 @@ fn hash_owned_file(handle: &mut File) -> io::Result<(u64, String)> {
 }
 
 fn path_still_names_owned_file(
-    dir: &crate::archive_durable_write::confined::Dir,
+    dir: &confined::Dir,
     staged_name: &[u8],
-    owned: FileIdentity,
+    owned: ObjectIdentity,
 ) -> io::Result<bool> {
     let Some(stat) = dir.stat_child_nofollow(staged_name)? else {
         return Ok(false);
     };
-    Ok(staged_is_regular(&stat) && FileIdentity::from_stat(&stat) == owned)
+    Ok(staged_is_regular(&stat) && stat.identity() == owned)
 }
 
-/// Removes the staging pathname only while it still names the inode this
+/// Removes the staging pathname only while it still names the object this
 /// transaction exclusively created. A missing path is already clean; a
 /// substituted path is foreign and deliberately left untouched.
-fn cleanup_owned_stage(
-    dir: &crate::archive_durable_write::confined::Dir,
-    staged_name: &[u8],
-    owned: FileIdentity,
-) -> bool {
+fn cleanup_owned_stage(dir: &confined::Dir, staged_name: &[u8], owned: ObjectIdentity) -> bool {
     match path_still_names_owned_file(dir, staged_name, owned) {
         Ok(false) => matches!(dir.stat_child_nofollow(staged_name), Ok(None)),
         Err(_) => false,
@@ -211,10 +244,96 @@ fn cleanup_owned_stage(
     }
 }
 
+/// Compile-time arm absent (contract §10: `…-unsupported-platform`).
 fn publication_is_unsupported(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::Unsupported
-        || error.raw_os_error() == Some(libc::ENOTSUP)
-        || error.raw_os_error() == Some(libc::EXDEV)
+}
+
+/// The volume lacks the publication primitive (macOS: no clone capability or
+/// a foreign volume, `ENOTSUP` / `EXDEV`; Windows: not the same volume,
+/// `STATUS_NOT_SAME_DEVICE`): a FILESYSTEM condition, no longer misreported
+/// as a platform one.
+fn publication_is_filesystem_refusal(error: &io::Error) -> bool {
+    !publication_is_unsupported(error) && confined::is_capability_absent(error)
+}
+
+/// Where this platform stages the bytes before publication.
+enum StagePlacement {
+    /// Named exclusive stage in the sibling staging root (macOS, Windows).
+    SiblingNamed,
+    /// Anonymous inode in the final directory (Linux).
+    AnonymousInFinal,
+}
+
+fn stage_placement() -> StagePlacement {
+    if cfg!(target_os = "linux") {
+        StagePlacement::AnonymousInFinal
+    } else {
+        StagePlacement::SiblingNamed
+    }
+}
+
+/// Explicit NAME_MAX admission on the admitted directory object (contract
+/// §12): the longer staged name is admitted where it is created, the final
+/// name where it is published.
+fn name_fits(dir: &confined::Dir, name: &str) -> Result<(), &'static str> {
+    match dir.name_max() {
+        Ok(limit) if name.len() as u64 <= limit => Ok(()),
+        Ok(_) => Err("name-exceeds-filesystem-limit"),
+        Err(_) => Err("name-limit-indeterminate"),
+    }
+}
+
+/// Proves the capabilities this platform's publication relies on, on the
+/// roots it uses, BEFORE any staging exists.
+fn require_publication_capabilities(
+    final_dir: &confined::Dir,
+    staging_dir: Option<&confined::Dir>,
+) -> Result<(), &'static str> {
+    // A root this process cannot write is a permission condition, reported
+    // with the accepted infrastructure codes, never as a capability verdict.
+    fn refusal(err: capability::CapabilityRefusal, infrastructure: &'static str) -> &'static str {
+        if err.is_root_not_writable() {
+            infrastructure
+        } else {
+            "capability-unproven"
+        }
+    }
+    match stage_placement() {
+        StagePlacement::AnonymousInFinal => {
+            capability::require(final_dir, capability::file_publication_requirements())
+                .map(|_| ())
+                .map_err(|err| refusal(err, "stage-create-failed"))
+        }
+        StagePlacement::SiblingNamed => {
+            let staging = staging_dir.ok_or("capability-unproven")?;
+            capability::require(staging, &[capability::Capability::Exclusive])
+                .map_err(|err| refusal(err, "stage-create-failed"))?;
+            if cfg!(target_os = "macos") {
+                capability::require(final_dir, &[capability::Capability::DirectoryFence])
+                    .map_err(|err| refusal(err, "publish-failed"))?;
+                match capability::probe_clone_pair(staging, final_dir) {
+                    capability::CapabilityState::Proven => Ok(()),
+                    capability::CapabilityState::Absent(_) => {
+                        Err("unsupported-filesystem-capability")
+                    }
+                    capability::CapabilityState::NotApplicable => Err("unsupported-platform"),
+                }
+            } else {
+                capability::require(final_dir, capability::directory_publication_requirements())
+                    .map(|_| ())
+                    .map_err(|err| refusal(err, "publish-failed"))
+            }
+        }
+    }
+}
+
+/// The retained staging object of one transaction.
+struct Stage {
+    handle: File,
+    /// `None` for an anonymous inode (nothing to clean, nothing to swap).
+    named: Option<(confined::Dir, Vec<u8>)>,
+    owned: ObjectIdentity,
 }
 
 fn publish_bytes_within_roots_with<B, P, S>(
@@ -227,9 +346,9 @@ fn publish_bytes_within_roots_with<B, P, S>(
     sync_final_parent: S,
 ) -> SavedChatZipPublishResult
 where
-    B: FnOnce(&crate::archive_durable_write::confined::Dir, &[u8]) -> io::Result<()>,
-    P: FnOnce(&crate::archive_durable_write::confined::Dir, &File, &[u8]) -> io::Result<bool>,
-    S: FnOnce(&crate::archive_durable_write::confined::Dir) -> io::Result<()>,
+    B: FnOnce(&confined::Dir, &[u8]) -> io::Result<()>,
+    P: FnOnce(&confined::Dir, &File, &[u8]) -> io::Result<bool>,
+    S: FnOnce(&confined::Dir) -> io::Result<()>,
 {
     if !final_name_is_governed(&options.final_name) {
         return SavedChatZipPublishResult::refused("invalid-name", false);
@@ -243,50 +362,92 @@ where
     if options.expected_byte_length == 0 || options.expected_byte_length > usize::MAX as u64 {
         return SavedChatZipPublishResult::refused("invalid-expected-length", false);
     }
-
-    let final_dir = match crate::archive_durable_write::confined::Dir::open_root(final_root) {
+    let final_dir = match confined::Dir::open_root(final_root) {
         Ok(dir) => dir,
+        Err(err) if publication_is_unsupported(&err) => {
+            return SavedChatZipPublishResult::refused("unsupported-platform", false)
+        }
         Err(_) => return SavedChatZipPublishResult::refused("publish-root-unavailable", false),
     };
-    let staging_dir = match crate::archive_durable_write::confined::Dir::open_root(staging_root) {
-        Ok(dir) => dir,
-        Err(_) => return SavedChatZipPublishResult::refused("stage-create-failed", false),
-    };
+    if let Err(status) = name_fits(&final_dir, &options.final_name) {
+        return SavedChatZipPublishResult::refused(status, false);
+    }
     let staged_name = stage_name(&options.final_name, &options.token);
     let staged_bytes = staged_name.as_bytes();
-    let mut handle = match staging_dir.create_new_child(staged_bytes) {
-        Ok(file) => file,
-        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-            return SavedChatZipPublishResult::refused("stage-exists", false);
+
+    let staging_dir = match stage_placement() {
+        StagePlacement::SiblingNamed => match confined::Dir::open_root(staging_root) {
+            Ok(dir) => Some(dir),
+            Err(_) => return SavedChatZipPublishResult::refused("stage-create-failed", false),
+        },
+        StagePlacement::AnonymousInFinal => None,
+    };
+    if let Err(status) = require_publication_capabilities(&final_dir, staging_dir.as_ref()) {
+        return SavedChatZipPublishResult::refused(status, false);
+    }
+
+    let mut stage = match stage_placement() {
+        StagePlacement::SiblingNamed => {
+            let staging_dir = staging_dir.expect("sibling placement opened its root");
+            if let Err(status) = name_fits(&staging_dir, &staged_name) {
+                return SavedChatZipPublishResult::refused(status, false);
+            }
+            let handle = match staging_dir.create_new_child(staged_bytes) {
+                Ok(file) => file,
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                    return SavedChatZipPublishResult::refused("stage-exists", false);
+                }
+                Err(_) => return SavedChatZipPublishResult::refused("stage-create-failed", false),
+            };
+            let owned = match owned_identity(&handle) {
+                Ok(Some(owned)) => owned,
+                _ => {
+                    drop(handle);
+                    let _ = staging_dir.unlink_child(staged_bytes);
+                    return SavedChatZipPublishResult::refused("staged-not-regular", false);
+                }
+            };
+            Stage {
+                handle,
+                named: Some((staging_dir, staged_bytes.to_vec())),
+                owned,
+            }
         }
-        Err(_) => return SavedChatZipPublishResult::refused("stage-create-failed", false),
+        StagePlacement::AnonymousInFinal => {
+            let handle = match final_dir.create_anonymous_child() {
+                Ok(file) => file,
+                Err(err) if publication_is_unsupported(&err) => {
+                    return SavedChatZipPublishResult::refused("unsupported-platform", false)
+                }
+                Err(_) => return SavedChatZipPublishResult::refused("stage-create-failed", false),
+            };
+            let owned = match owned_identity(&handle) {
+                Ok(Some(owned)) => owned,
+                _ => return SavedChatZipPublishResult::refused("staged-not-regular", false),
+            };
+            Stage {
+                handle,
+                named: None,
+                owned,
+            }
+        }
     };
 
-    let owned_stat = match fstat(handle.as_raw_fd()) {
-        Ok(stat) if staged_is_regular(&stat) => stat,
-        _ => {
-            return SavedChatZipPublishResult::refused("staged-not-regular", false);
-        }
-    };
-    let owned = FileIdentity::from_stat(&owned_stat);
-
-    let full_fsync = match handle
+    let full_fsync = match stage
+        .handle
         .write_all(bytes)
-        .and_then(|_| crate::archive_durable_write::sync_file_contents(&handle))
+        .and_then(|_| crate::archive_durable_write::sync_file_contents(&stage.handle))
     {
         Ok(full_fsync) => full_fsync,
         Err(_) => {
-            drop(handle);
-            let removed = cleanup_owned_stage(&staging_dir, staged_bytes, owned);
+            let removed = release_and_cleanup(stage);
             return SavedChatZipPublishResult::refused("stage-write-failed", removed);
         }
     };
-
-    let (staged_length, staged_sha256) = match hash_owned_file(&mut handle) {
+    let (staged_length, staged_sha256) = match hash_owned_file(&mut stage.handle) {
         Ok(identity) => identity,
         Err(_) => {
-            drop(handle);
-            let removed = cleanup_owned_stage(&staging_dir, staged_bytes, owned);
+            let removed = release_and_cleanup(stage);
             return SavedChatZipPublishResult::refused("stage-readback-failed", removed);
         }
     };
@@ -295,64 +456,87 @@ where
         crate::archive_durable_write::sha256_hex(bytes)
     );
     if staged_length != bytes.len() as u64 || staged_sha256 != received_sha256 {
-        drop(handle);
-        let removed = cleanup_owned_stage(&staging_dir, staged_bytes, owned);
+        let removed = release_and_cleanup(stage);
         return SavedChatZipPublishResult::refused("staged-bytes-mismatch", removed);
     }
     if staged_length != options.expected_byte_length {
-        drop(handle);
-        let removed = cleanup_owned_stage(&staging_dir, staged_bytes, owned);
+        let removed = release_and_cleanup(stage);
         return SavedChatZipPublishResult::refused("staged-length-mismatch", removed);
     }
     if staged_sha256 != options.expected_sha256 {
-        drop(handle);
-        let removed = cleanup_owned_stage(&staging_dir, staged_bytes, owned);
+        let removed = release_and_cleanup(stage);
         return SavedChatZipPublishResult::refused("staged-hash-mismatch", removed);
     }
-
-    // This check remains useful for refusing an already-displaced stage, but
-    // it is deliberately NOT publication authority. The deterministic seam
-    // runs after this check: even if the path is replaced at the former
-    // Prompt-132 race point, the following syscall selects `handle` itself.
-    if !matches!(
-        path_still_names_owned_file(&staging_dir, staged_bytes, owned),
-        Ok(true)
-    ) {
-        drop(handle);
-        let removed = cleanup_owned_stage(&staging_dir, staged_bytes, owned);
-        return SavedChatZipPublishResult::refused("staging-identity-mismatch", removed);
+    if let Some((staging_dir, name)) = stage.named.as_ref() {
+        // This check remains useful for refusing an already-displaced stage,
+        // but it is deliberately NOT publication authority: the following
+        // syscall selects `handle` itself, so a path replaced after this
+        // point cannot redirect what is published.
+        if !matches!(
+            path_still_names_owned_file(staging_dir, name, stage.owned),
+            Ok(true)
+        ) {
+            let removed = release_and_cleanup(stage);
+            return SavedChatZipPublishResult::refused("staging-identity-mismatch", removed);
+        }
+        if after_path_check_before_publish(staging_dir, name).is_err() {
+            let removed = release_and_cleanup(stage);
+            return SavedChatZipPublishResult::refused("pre-publication-failed", removed);
+        }
     }
-    if after_path_check_before_publish(&staging_dir, staged_bytes).is_err() {
-        drop(handle);
-        let removed = cleanup_owned_stage(&staging_dir, staged_bytes, owned);
-        return SavedChatZipPublishResult::refused("pre-publication-failed", removed);
-    }
 
-    // Class A commit point: Darwin atomically clones the exact vnode selected
-    // by this retained descriptor into an absent final name. The staging path
-    // is not an input and cannot redirect the namespace mutation.
-    match publish(&final_dir, &handle, options.final_name.as_bytes()) {
+    // Commit point (class H): the platform inserts the exact object selected
+    // by the retained handle under an absent final name. The staging path is
+    // not an input and cannot redirect the namespace mutation.
+    match publish(&final_dir, &stage.handle, options.final_name.as_bytes()) {
         Ok(false) => {
-            drop(handle);
-            let removed = cleanup_owned_stage(&staging_dir, staged_bytes, owned);
+            let removed = release_and_cleanup(stage);
             SavedChatZipPublishResult::refused("destination-exists", removed)
         }
         Err(error) => {
-            drop(handle);
-            let removed = cleanup_owned_stage(&staging_dir, staged_bytes, owned);
             let status = if publication_is_unsupported(&error) {
                 "unsupported-platform"
+            } else if publication_is_filesystem_refusal(&error) {
+                "unsupported-filesystem-capability"
             } else {
                 "publish-failed"
             };
+            let removed = release_and_cleanup(stage);
             SavedChatZipPublishResult::refused(status, removed)
         }
         Ok(true) => {
+            // Class H′ on the handle-renamed arm: the object under the final
+            // name must be the retained object. The staging handle is released
+            // first (Windows staging handles share nothing). macOS publishes a
+            // clone (a new object by construction) and Linux links the
+            // anonymous inode by descriptor, so identity is theirs by
+            // construction and only the namespace fence remains.
+            let owned = stage.owned;
+            let named = stage.named.take();
+            drop(stage.handle);
+            if cfg!(windows) {
+                let verified = match final_dir.stat_child_nofollow(options.final_name.as_bytes()) {
+                    Ok(Some(st)) => st.is_regular() && st.identity() == owned,
+                    _ => false,
+                };
+                if !verified {
+                    let removed = match named.as_ref() {
+                        Some((dir, name)) => cleanup_owned_stage(dir, name, owned),
+                        None => true,
+                    };
+                    return SavedChatZipPublishResult::refused(
+                        "publication-identity-mismatch",
+                        removed,
+                    );
+                }
+            }
             // Publication is already committed. A parent fence failure is
             // reported separately and never rewritten as "nothing happened".
             let durability_complete = sync_final_parent(&final_dir).is_ok();
-            drop(handle);
-            let removed = cleanup_owned_stage(&staging_dir, staged_bytes, owned);
+            let removed = match named.as_ref() {
+                Some((dir, name)) => cleanup_owned_stage(dir, name, owned),
+                None => true,
+            };
             SavedChatZipPublishResult::published(
                 removed,
                 staged_length,
@@ -361,6 +545,31 @@ where
                 durability_complete,
             )
         }
+    }
+}
+
+/// Releases the retained handle, then cleans the staging name identity-checked.
+fn release_and_cleanup(stage: Stage) -> bool {
+    let Stage {
+        handle,
+        named,
+        owned,
+    } = stage;
+    drop(handle);
+    match named {
+        Some((dir, name)) => cleanup_owned_stage(&dir, &name, owned),
+        None => true,
+    }
+}
+
+/// This platform's create-only publication of the retained staging object:
+/// `fclonefileat` on macOS; descriptor-bound `linkat` on Linux; handle-bound
+/// no-replace rename on Windows. Never a pathname-based fallback.
+fn platform_publish(dir: &confined::Dir, source: &File, to: &[u8]) -> io::Result<bool> {
+    if cfg!(target_os = "macos") {
+        dir.publish_open_file_clone_exclusive(source, to)
+    } else {
+        dir.publish_file_by_handle(source, to)
     }
 }
 
@@ -376,7 +585,7 @@ pub fn publish_saved_chat_zip_bytes_within_roots(
         options,
         bytes,
         |_dir, _staged| Ok(()),
-        |dir, source, to| dir.publish_open_file_clone_exclusive(source, to),
+        platform_publish,
         |dir| dir.sync(),
     )
 }
@@ -482,6 +691,52 @@ mod tests {
         assert_eq!(fs::read(staged).unwrap(), b"foreign-stage-bytes");
         assert!(!final_root.join(FINAL_NAME).exists());
         let _ = fs::remove_dir_all(parent);
+    }
+
+    /// T02 (contract §12): ZIP leaves refuse a leading `.` and every Windows
+    /// reserved device stem on every platform; the result schema is unchanged.
+    #[test]
+    fn zip_leaves_refuse_leading_dots_and_reserved_device_stems() {
+        for refused in [
+            ".hidden.h2ochat.zip",
+            "CON.h2ochat.zip",
+            "nul.h2ochat.zip",
+            "LPT1.h2ochat.zip",
+        ] {
+            assert!(
+                !final_name_is_governed(refused),
+                "{refused} must be refused"
+            );
+        }
+        for admitted in [
+            "console.h2ochat.zip",
+            "com10.h2ochat.zip",
+            "a.CON.h2ochat.zip",
+        ] {
+            assert!(
+                final_name_is_governed(admitted),
+                "{admitted} must be admitted"
+            );
+        }
+        let refused =
+            serde_json::to_value(SavedChatZipPublishResult::refused("invalid-name", false))
+                .unwrap();
+        let mut keys: Vec<_> = refused.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "byteLength",
+                "committed",
+                "durabilityComplete",
+                "fullFsync",
+                "ok",
+                "schema",
+                "sha256",
+                "stagingRemoved",
+                "status",
+            ]
+        );
     }
 
     #[test]

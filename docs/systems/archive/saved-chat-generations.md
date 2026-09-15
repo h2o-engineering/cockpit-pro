@@ -392,15 +392,31 @@ failure. The caller never adjudicates an occupied destination: `deduped` is a
 the renderer reaches by inspecting the occupant.
 
 **Platform arms, stated precisely** (the distinction is load-bearing for the
-proof obligation above): the existing trusted module fails closed on any
-**non-Unix** target (`…-unsupported-platform`) — that is the `cfg(not(unix))`
-arm, i.e. Windows. It does **not** fail closed on non-macOS **Unix**: there the
-exclusive-promotion fallback is a live `linkat` implementation, which cannot
-hard-link a directory and therefore cannot promote a staged generation at all.
-So Phase 1 must either implement a directory-capable exclusive promotion for
-that arm (e.g. `renameat2(RENAME_NOREPLACE)`) or make it fail closed
-explicitly. Publishing must never silently degrade on a platform where the
-promotion primitive cannot express create-only directory promotion.
+proof obligation above; corrected by T02 of the cross-platform filesystem
+safety Mission, see `saved-chat-filesystem-safety.md`): the trusted module has
+**per-platform arms in the primitive layer, not module-level platform gates**.
+Create-only directory promotion is `renameatx_np(RENAME_EXCL)` on macOS,
+`renameat2(RENAME_NOREPLACE)` on Linux and a handle-bound
+`ReplaceIfExists = FALSE` rename of the retained staging directory handle on
+Windows; a plain replacing `renameat` is never used for it anywhere. A target
+without a compiled arm compiles and fails closed at runtime
+(`generation-unsupported-platform`); a root whose filesystem has not
+behaviourally proven exclusive creation, the no-replace rename and the
+namespace fence refuses at BEGIN, before any staging exists
+(`generation-capability-unproven`). On macOS and Linux the rename is
+pathname-bound, so the retained staging descriptor is re-identified under the
+final name after the rename and a divergence is reported as
+`generation-publication-identity-mismatch`, never as `Created`. Publishing
+never silently degrades on a platform or filesystem where the promotion
+primitive cannot express create-only directory promotion.
+
+**Reading `full_fsync`.** Result schemas carry the boolean `full_fsync`
+meaning exactly "the macOS `F_FULLFSYNC` media fence succeeded". On Linux
+(`fsync`, documented to flush a disk cache when present) and Windows
+(`FlushFileBuffers` through the retained write handle, which synchronizes the
+storage cache) it is `false` while the platform's documented fence WAS issued.
+Consumers must never read `full_fsync:false` as "not durable"; the durability
+claim is carried by `committed` / `durabilityComplete`.
 
 ### N.2 Occupied-destination classification is trusted-side
 

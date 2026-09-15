@@ -2279,6 +2279,24 @@ fn different_generations_for_one_chat_both_publish_side_by_side() {
     assert_ne!(a.content_hash, b.content_hash);
 }
 
+/// T02 (contract §12): a chatId that is, or begins (before the first `.`)
+/// with, a Windows reserved device stem is refused ASCII-case-insensitively on
+/// every platform — its derived basename would be "the name followed
+/// immediately by an extension". The charset itself is unchanged.
+#[test]
+fn chat_ids_with_reserved_device_stems_are_refused_on_every_platform() {
+    for refused in ["CON", "con", "NUL", "com1", "LPT9", "AUX.session", "prn.2024"] {
+        assert_eq!(
+            validated_chat_id(refused),
+            Err("generation-chat-id-reserved-device-name"),
+            "{refused}"
+        );
+    }
+    for admitted in ["console", "com10", "conversation.CON", "chat_u", "lpt", "nulls"] {
+        assert_eq!(validated_chat_id(admitted), Ok(admitted), "{admitted}");
+    }
+}
+
 #[test]
 fn promotion_is_create_only_and_never_replaces_a_destination() {
     // Directly exercise the promotion primitive with a POPULATED directory.
@@ -2294,7 +2312,7 @@ fn promotion_is_create_only_and_never_replaces_a_destination() {
     dest.create_new_child(b"occupant-file").expect("occupant");
 
     let promoted = packages
-        .promote_dir_exclusive(b"src-dir", b"dest-dir")
+        .promote_dir_exclusive(&src, b"src-dir", b"dest-dir")
         .expect("promote call");
     assert!(!promoted, "an occupied destination must not be replaced");
     // The occupant survived.
@@ -2306,7 +2324,7 @@ fn promotion_is_create_only_and_never_replaces_a_destination() {
         .exists());
     // A free destination promotes, carrying its contents.
     let promoted = packages
-        .promote_dir_exclusive(b"src-dir", b"free-dir")
+        .promote_dir_exclusive(&src, b"src-dir", b"free-dir")
         .expect("promote call");
     assert!(promoted);
     assert!(p

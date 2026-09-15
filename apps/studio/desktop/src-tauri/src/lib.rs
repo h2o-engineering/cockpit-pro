@@ -126,6 +126,9 @@ pub mod f5h_final_validation_seed;
 // destination internally from bytes it hashed itself. Not a rename API: no
 // source path is accepted from the renderer and no delete authority exists.
 pub mod archive_durable_write;
+/// T02 — class O runtime filesystem capability detection for governed
+/// Saved-Chat roots (frozen contract §10). No command, no renderer input.
+pub mod archive_filesystem_capability;
 
 /// M06 T3.1 — quarantine namespace and confined purge primitive. DORMANT:
 /// registers no command, is unreachable from the renderer, and can only remove

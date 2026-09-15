@@ -33,12 +33,16 @@
 //! (`require_literal_leading_dot`). The token is a session identifier, never an
 //! authorization boundary.
 //!
-//! PLATFORM SUPPORT: publication requires create-only promotion of a
-//! DIRECTORY. `linkat` cannot hard-link a directory, so every arm without an
-//! exclusive directory rename fails closed rather than degrading to a
-//! replacing rename.
-
-#![cfg(unix)]
+//! PLATFORM SUPPORT (T02, frozen contract §6 class G): publication requires
+//! create-only promotion of a DIRECTORY. No Unix renames a directory by
+//! descriptor and directories cannot be hard-linked, so macOS
+//! (`renameatx_np(RENAME_EXCL)`) and Linux (`renameat2(RENAME_NOREPLACE)`)
+//! are pathname-bound and the retained staging descriptor is re-identified
+//! under the final name afterwards (class H′); Windows renames the staging
+//! directory HANDLE. Every arm without an exclusive directory rename fails
+//! closed (`generation-unsupported-platform`) rather than degrading to a
+//! replacing rename, and an unproven filesystem capability refuses BEGIN
+//! before any staging exists (`generation-capability-unproven`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -126,10 +130,9 @@ fn parent_fence(dir: &confined::Dir) -> bool {
 /// durable-write module mitigates the same hazard by mixing in the pid.
 pub(crate) fn random_token_seed() -> u64 {
     let mut buf = [0u8; 8];
-    // getentropy(2) is available on macOS and Linux; on failure fall back to a
-    // process/time mix, which is weaker but still non-replaying.
-    let rc = unsafe { libc::getentropy(buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-    if rc == 0 {
+    // The OS CSPRNG through the platform-neutral facade; on failure fall back
+    // to a process/time mix, which is weaker but still non-replaying.
+    if crate::archive_durable_write::fill_entropy(&mut buf).is_ok() {
         return u64::from_ne_bytes(buf) | 1;
     }
     let pid = std::process::id() as u64;
@@ -433,6 +436,14 @@ pub(crate) fn validated_chat_id(chat_id: &str) -> Result<&str, &'static str> {
     {
         return Err("generation-chat-id-charset");
     }
+    // T02 (contract §12): Windows reserved device stems are refused on EVERY
+    // platform, as the whole id and as the segment before the first `.` — the
+    // derived basename `CON.g<hex>.h2ochat` is "the name followed immediately
+    // by an extension". Refused at admission so the archive stays portable and
+    // no platform ever mints a name its own tooling cannot open.
+    if crate::archive_durable_write::has_reserved_device_stem(chat_id) {
+        return Err("generation-chat-id-reserved-device-name");
+    }
     Ok(chat_id)
 }
 
@@ -459,6 +470,11 @@ struct SessionInner {
     /// `None` once the staging tree has been cleaned.
     dir: Option<confined::Dir>,
     staging_name: Vec<u8>,
+    /// Identity of the staging directory object captured at BEGIN from the
+    /// retained descriptor. Cleanup removes the staging NAME only while it
+    /// still resolves to this object (class L), and COMMIT proves the object
+    /// under the final name is this one (class H′).
+    staging_identity: Option<confined::ObjectIdentity>,
     members: BTreeMap<Member, MemberState>,
     last_activity: Instant,
     /// Set when ABORT or eviction claimed termination while work was active.
@@ -592,12 +608,7 @@ fn available_bytes(dir: &confined::Dir) -> Option<u64> {
             return Some(forced);
         }
     }
-    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::fstatfs(dir.as_raw_fd(), &mut st) };
-    if rc < 0 {
-        return None;
-    }
-    (st.f_bavail as u64).checked_mul(st.f_bsize as u64)
+    dir.available_bytes()
 }
 
 /// Admits one append against the operational free-space reserve, on the ACTUAL
@@ -630,18 +641,18 @@ fn admit_append(dir: &confined::Dir, incoming: u64) -> Result<(), String> {
 /// Environmental refusals are retryable and machine-local. They NEVER mark a
 /// package structurally invalid (§R.2-B).
 fn is_resource_errno(err: &std::io::Error) -> bool {
-    matches!(
-        err.raw_os_error(),
-        Some(libc::ENOSPC) | Some(libc::EDQUOT) | Some(libc::EFBIG)
-    )
+    confined::resource_error(err).is_some()
 }
 
 fn resource_code(err: &std::io::Error) -> String {
-    match err.raw_os_error() {
-        Some(libc::ENOSPC) => "generation-staging-resource-no-space".to_string(),
-        Some(libc::EDQUOT) => "generation-staging-resource-quota".to_string(),
-        Some(libc::EFBIG) => "generation-staging-resource-file-too-large".to_string(),
-        _ => "generation-staging-resource-unavailable".to_string(),
+    use confined::ResourceError;
+    match confined::resource_error(err) {
+        Some(ResourceError::NoSpace) => "generation-staging-resource-no-space".to_string(),
+        Some(ResourceError::Quota) => "generation-staging-resource-quota".to_string(),
+        Some(ResourceError::FileTooLarge) => {
+            "generation-staging-resource-file-too-large".to_string()
+        }
+        None => "generation-staging-resource-unavailable".to_string(),
     }
 }
 
@@ -661,6 +672,27 @@ pub fn begin(publisher: &Publisher, chat_id: &str) -> BeginResult {
         Ok(dir) => dir,
         Err(_) => return BeginResult::refused("generation-packages-unavailable"),
     };
+
+    // Class O: exclusive staging, create-only directory publication and the
+    // namespace fence must be PROVEN on this root before a session that could
+    // never commit is admitted. Refuses before any staging exists.
+    if let Err(refusal) = crate::archive_filesystem_capability::require(
+        &packages,
+        crate::archive_filesystem_capability::directory_publication_requirements(),
+    ) {
+        // A root this process cannot write is a permission condition, kept
+        // under the accepted staging-create refusal; a capability verdict is
+        // reported distinctly with its probe detail.
+        if refusal.is_root_not_writable() {
+            return BeginResult::refused("generation-staging-create-failed");
+        }
+        let mut out = BeginResult::refused("generation-capability-unproven");
+        out.blockers.push(Blocker::new(format!(
+            "generation-capability-detail:{}",
+            refusal.detail_text()
+        )));
+        return out;
+    }
 
     // NAME_MAX from the opened parent descriptor; fail closed when unanswerable
     // (§"Member bounds"). No hardcoded 240/255.
@@ -731,12 +763,21 @@ pub fn begin(publisher: &Publisher, chat_id: &str) -> BeginResult {
             return BeginResult::refused(&code);
         }
     };
+    let staging_identity = match dir.identity() {
+        Ok(identity) => Some(identity),
+        Err(_) => {
+            let _ = packages.unlink_child_dir(&name);
+            publisher.registry.release_slot();
+            return BeginResult::refused("generation-staging-create-failed");
+        }
+    };
 
     let session = Arc::new(Session {
         chat_id,
         inner: Mutex::new(SessionInner {
             dir: Some(dir),
             staging_name: name,
+            staging_identity,
             members: BTreeMap::new(),
             last_activity: Instant::now(),
             terminating: false,
@@ -827,9 +868,27 @@ fn cleanup_staging(publisher: &Publisher, inner: &mut SessionInner) -> bool {
     }
     drop(dir);
     if let Ok(packages) = publisher.packages_dir() {
-        if let Err(err) = packages.unlink_child_dir(&inner.staging_name) {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                clean = false;
+        // Class L, identity-checked: the staging NAME is removed only while it
+        // still resolves to the directory object this attempt created. A name
+        // that now identifies a foreign object is left untouched and reported.
+        match inner.staging_identity {
+            Some(owned) => {
+                match packages.unlink_child_dir_if_identity(&inner.staging_name, owned) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if !matches!(packages.stat_child_nofollow(&inner.staging_name), Ok(None)) {
+                            clean = false;
+                        }
+                    }
+                    Err(_) => clean = false,
+                }
+            }
+            None => {
+                if let Err(err) = packages.unlink_child_dir(&inner.staging_name) {
+                    if err.kind() != std::io::ErrorKind::NotFound {
+                        clean = false;
+                    }
+                }
             }
         }
     } else {
@@ -1028,14 +1087,14 @@ fn read_staged_member_bounded(
     if !confined::is_regular(&st) {
         return Err("generation-member-not-regular".to_string());
     }
-    if st.st_size < 0 || st.st_size as u64 > cap {
+    if st.size() > cap {
         return Err("generation-member-read-bound-exceeded".to_string());
     }
     let file = dir
         .open_child_read_nofollow(name)
         .map_err(|err| format!("generation-member-open-failed:{err}"))?;
     let mut bounded = file.take(cap.saturating_add(1));
-    let mut buf = Vec::with_capacity((st.st_size as u64).min(cap) as usize);
+    let mut buf = Vec::with_capacity(st.size().min(cap) as usize);
     bounded
         .read_to_end(&mut buf)
         .map_err(|err| format!("generation-member-read-failed:{err}"))?;
@@ -1271,17 +1330,26 @@ fn commit_consumed(
         }};
     }
 
-    // Flush and drop member handles so the bytes verified are the bytes on disk.
+    // Flush and FENCE every member through its retained WRITE handle (class J:
+    // the fence needs write access on Windows and the same call is the
+    // accepted content fence everywhere), then drop the handles so the bytes
+    // verified are the bytes on disk.
     {
         let mut flush_failed = false;
+        let mut fence_failed = false;
         for state in inner.members.values_mut() {
             if state.file.flush().is_err() {
                 flush_failed = true;
+            } else if crate::archive_durable_write::sync_file_contents(&state.file).is_err() {
+                fence_failed = true;
             }
         }
         inner.members.clear();
         if flush_failed {
             refuse!("generation-member-flush-failed");
+        }
+        if fence_failed {
+            refuse!("generation-member-fsync-failed");
         }
     }
 
@@ -1443,7 +1511,12 @@ fn commit_consumed(
     }
 
     // Durability fences: every member, then the staging directory, BEFORE
-    // promotion.
+    // promotion. Every member was already fenced through its write handle
+    // above; on Unix the accepted floor additionally re-fences each verified
+    // member through a fresh no-follow read descriptor (a read descriptor can
+    // issue `F_FULLFSYNC` / `fsync`). Windows cannot fence a read-only handle,
+    // so there the write-handle fence above IS the member fence.
+    #[cfg(unix)]
     for member in Member::all() {
         if is_v3 && matches!(member, Member::Markdown | Member::Html) {
             continue;
@@ -1463,13 +1536,28 @@ fn commit_consumed(
     let staging_name = inner.staging_name.clone();
     let generation_path = format!("{ARCHIVE_ROOT}/{PACKAGES_DIR}/{final_name}");
 
+    // Class O re-check on the packages root (cached; re-probed only after a
+    // failure) so a capability lost since BEGIN refuses before the insertion.
+    if crate::archive_filesystem_capability::require(
+        &packages,
+        crate::archive_filesystem_capability::directory_publication_requirements(),
+    )
+    .is_err()
+    {
+        refuse!("generation-capability-unproven");
+    }
+
     // Create-only exclusive DIRECTORY promotion; fails closed where the
-    // platform cannot express it.
-    let promoted = match packages.promote_dir_exclusive(&staging_name, final_name.as_bytes()) {
+    // platform cannot express it. The retained staging descriptor (`held`)
+    // is the rename source on Windows and the class H′ witness on Unix.
+    let promoted = match packages.promote_dir_exclusive(dir, &staging_name, final_name.as_bytes()) {
         Ok(value) => value,
         Err(err) => {
             if err.kind() == std::io::ErrorKind::Unsupported {
                 refuse!("generation-unsupported-platform");
+            }
+            if confined::is_capability_absent(&err) {
+                refuse!("generation-capability-unproven");
             }
             if is_resource_errno(&err) {
                 let code = resource_code(&err);
@@ -1495,6 +1583,36 @@ fn commit_consumed(
         let mut out = PublishResult::occupied(outcome, code, generation_path, derived.clone());
         // Non-blocking: advisories never gate success (batch repair R4).
         out.advisories = advisories;
+        if !clean {
+            out.blockers
+                .push(Blocker::new("generation-staging-cleanup-incomplete"));
+        }
+        if !fenced {
+            out.blockers
+                .push(Blocker::new("generation-parent-fsync-failed"));
+        }
+        return out;
+    }
+
+    // Class H′: the directory object now under the final name must be the
+    // retained staging object that was verified and fenced. A staging-name
+    // substitution between the fence and a pathname-bound rename can then
+    // never be reported as `Created`. On divergence the foreign occupant is
+    // left for trusted classification — never removed — and only this
+    // attempt's own staging name is cleaned, identity-checked.
+    let verified_identity = match inner.staging_identity {
+        Some(owned) => match packages.stat_child_nofollow(final_name.as_bytes()) {
+            Ok(Some(st)) => st.is_directory() && st.identity() == owned,
+            _ => false,
+        },
+        None => false,
+    };
+    if !verified_identity {
+        inner.dir = held.take();
+        let clean = cleanup_staging(publisher, &mut inner);
+        let fenced = parent_fence(&packages);
+        let mut out = PublishResult::refused("generation-publication-identity-mismatch");
+        out.generation_path = generation_path;
         if !clean {
             out.blockers
                 .push(Blocker::new("generation-staging-cleanup-incomplete"));

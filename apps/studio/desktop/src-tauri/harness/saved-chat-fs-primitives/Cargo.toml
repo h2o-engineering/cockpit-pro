@@ -1,0 +1,44 @@
+# T02 — bounded Saved-Chat filesystem-primitive compile harness.
+#
+# Compiles EXACTLY the Saved-Chat-owned primitive modules of the Desktop
+# native crate — the `confined` facade with its Unix / Windows back-ends, the
+# class O capability module and the presence lock — by `#[path]` inclusion,
+# for targets on which the whole crate cannot yet be checked (Linux: the
+# sibling GTK/WebKit toolchain prerequisite; Windows: the sibling D3 build
+# shape). It is COMPILE EVIDENCE ONLY: a green `cargo check --target …` proves
+# that the arms exist and type-check, never that a primitive behaves on a real
+# filesystem (that is the Mission's T03/T05 native certification).
+#
+# Not a workspace member of anything; not built by any product pipeline.
+[package]
+name = "h2o-saved-chat-fs-primitives-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Bounded compile harness for the Saved-Chat cross-platform filesystem primitives (T02)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+getrandom = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Kernel",
+    "Win32_System_WindowsProgramming",
+] }
+
+[workspace]
+
+[dev-dependencies]
+serde_json = "1"

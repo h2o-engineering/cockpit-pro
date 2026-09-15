@@ -58,6 +58,11 @@ pub mod codes {
     pub const INSTANCE_LOCK_UNAVAILABLE: &str = "archive-instance-lock-unavailable";
     /// This platform has no supported presence primitive — fail closed.
     pub const INSTANCE_LOCK_UNSUPPORTED: &str = "archive-instance-lock-unsupported-platform";
+    /// T02 (contract §10 CAP-PRESENCE): the lock file's filesystem gives
+    /// per-process rather than per-open-object lock semantics (e.g. an NFS
+    /// `flock` emulation), so presence cannot be proven there — fail closed.
+    pub const INSTANCE_LOCK_UNSUPPORTED_FILESYSTEM: &str =
+        "archive-instance-lock-unsupported-filesystem";
     /// A different archive root was presented than the one enrolled at setup.
     pub const INSTANCE_LOCK_ROOT_MISMATCH: &str = "archive-instance-lock-root-mismatch";
     /// The in-process mutation gate is held exclusively right now.
@@ -74,6 +79,7 @@ pub fn is_retryable_environmental(code: &str) -> bool {
         codes::INSTANCE_LOCK_BUSY
             | codes::INSTANCE_LOCK_UNAVAILABLE
             | codes::INSTANCE_LOCK_UNSUPPORTED
+            | codes::INSTANCE_LOCK_UNSUPPORTED_FILESYSTEM
             | codes::INSTANCE_LOCK_ROOT_MISMATCH
             | codes::MUTATION_GATE_BUSY
             | codes::MUTATION_GATE_UNAVAILABLE
@@ -82,125 +88,104 @@ pub fn is_retryable_environmental(code: &str) -> bool {
 
 // ── Instance presence (OS-backed) ───────────────────────────────────────────
 
-#[cfg(unix)]
 mod presence {
+    //! T02: one platform-neutral presence module over the `confined` facade
+    //! (class N). The lock file is opened RELATIVE to the admitted archive
+    //! root with a no-follow open (contract MB-03), so a symlink standing at
+    //! the lock name or at the archive root is refused rather than followed;
+    //! nothing is ever written to it. `flock` on Unix, `LockFileEx` on
+    //! Windows; every platform's conversion is non-atomic and only a
+    //! SUCCESSFUL acquisition is a proof point.
     use super::codes;
-    use std::os::fd::{AsRawFd, OwnedFd};
+    use crate::archive_durable_write::confined;
+    use std::fs::File;
     use std::path::Path;
 
-    /// A held presence descriptor. Dropping it closes the descriptor, which
-    /// releases the `flock` — including on abnormal process exit, because the
-    /// kernel closes descriptors for us. That is what makes crash release work
-    /// without any journal or stale-lock heuristic.
+    /// A held presence handle. Dropping it closes the handle, which releases
+    /// the lock — including on abnormal process exit, because the kernel
+    /// closes handles for us. That is what makes crash release work without
+    /// any journal or stale-lock heuristic.
     pub struct Presence {
-        fd: OwnedFd,
+        file: File,
     }
 
-    fn flock(fd: i32, op: i32) -> std::io::Result<()> {
-        // SAFETY: `fd` is a live descriptor owned by the caller for the whole
-        // call, and `flock` only manipulates kernel lock state for it.
-        if unsafe { libc::flock(fd, op) } == 0 {
-            Ok(())
+    fn lock_error(err: &std::io::Error) -> String {
+        if confined::lock_would_block(err) {
+            codes::INSTANCE_LOCK_BUSY.to_string()
+        } else if err.kind() == std::io::ErrorKind::Unsupported {
+            codes::INSTANCE_LOCK_UNSUPPORTED.to_string()
         } else {
-            Err(std::io::Error::last_os_error())
+            codes::INSTANCE_LOCK_UNAVAILABLE.to_string()
         }
     }
 
-    fn would_block(err: &std::io::Error) -> bool {
-        matches!(
-            err.raw_os_error(),
-            Some(libc::EWOULDBLOCK) | Some(libc::EINTR)
-        ) || err.kind() == std::io::ErrorKind::WouldBlock
+    fn open_error(err: &std::io::Error) -> String {
+        if err.kind() == std::io::ErrorKind::Unsupported {
+            codes::INSTANCE_LOCK_UNSUPPORTED.to_string()
+        } else {
+            codes::INSTANCE_LOCK_UNAVAILABLE.to_string()
+        }
     }
 
     impl Presence {
-        /// Opens (creating if needed) the lock file and takes SHARED presence.
-        /// Non-blocking: a would-block is reported, never waited on.
-        pub fn acquire_shared(lock_path: &Path) -> Result<Presence, String> {
-            if let Some(parent) = lock_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|_| codes::INSTANCE_LOCK_UNAVAILABLE.to_string())?;
+        /// Admits the archive root, opens (creating if needed) the lock file
+        /// relative to it, takes SHARED presence, and PROVES the lock
+        /// semantics (contract §10 CAP-PRESENCE): while shared is held on this
+        /// handle, an exclusive request on a SECOND handle to the same file in
+        /// this process must be refused. If it succeeds the filesystem locks
+        /// per process (an `flock` emulation), presence cannot be proven, and
+        /// every trusted mutation on this root refuses. Non-blocking
+        /// throughout: a would-block is reported, never waited on.
+        pub fn acquire_shared(root: &Path) -> Result<Presence, String> {
+            let dir = confined::Dir::open_root(root).map_err(|err| open_error(&err))?;
+            let file = dir
+                .open_lock_file(super::ARCHIVE_LOCK_NAME.as_bytes())
+                .map_err(|err| open_error(&err))?;
+            confined::lock_shared(&file).map_err(|err| lock_error(&err))?;
+            let probe = dir
+                .open_lock_file(super::ARCHIVE_LOCK_NAME.as_bytes())
+                .map_err(|err| open_error(&err))?;
+            match confined::lock_exclusive(&probe) {
+                Ok(()) => {
+                    let _ = confined::unlock(&probe);
+                    drop(probe);
+                    return Err(codes::INSTANCE_LOCK_UNSUPPORTED_FILESYSTEM.to_string());
+                }
+                Err(err) if confined::lock_would_block(&err) => {}
+                Err(err) => return Err(lock_error(&err)),
             }
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(lock_path)
-                .map_err(|_| codes::INSTANCE_LOCK_UNAVAILABLE.to_string())?;
-            let fd = OwnedFd::from(file);
-            flock(fd.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB).map_err(|err| {
-                if would_block(&err) {
-                    codes::INSTANCE_LOCK_BUSY.to_string()
-                } else {
-                    codes::INSTANCE_LOCK_UNAVAILABLE.to_string()
-                }
-            })?;
-            Ok(Presence { fd })
+            drop(probe);
+            Ok(Presence { file })
         }
 
-        /// Requests EXCLUSIVE on THIS descriptor, without blocking.
+        /// Requests EXCLUSIVE on THIS handle, without blocking.
         ///
-        /// Success is the proof point: no other open file description holds the
-        /// lock, so no other participating instance is executing against this
-        /// archive root. FAILURE PROVES NOTHING ABOUT THE PRIOR SHARED LOCK —
-        /// the kernel releases it before applying the new type — so the caller
-        /// MUST re-establish shared presence explicitly rather than assuming it
-        /// survived.
+        /// Success is the proof point: no other open file description holds
+        /// the lock, so no other participating instance is executing against
+        /// this archive root. FAILURE PROVES NOTHING ABOUT THE PRIOR SHARED
+        /// LOCK — the kernel releases it before applying the new type — so the
+        /// caller MUST re-establish shared presence explicitly rather than
+        /// assuming it survived.
         pub fn request_exclusive(&self) -> Result<(), String> {
-            flock(self.fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB).map_err(|err| {
-                if would_block(&err) {
-                    codes::INSTANCE_LOCK_BUSY.to_string()
-                } else {
-                    codes::INSTANCE_LOCK_UNAVAILABLE.to_string()
-                }
-            })
+            confined::lock_exclusive(&self.file).map_err(|err| lock_error(&err))
         }
 
-        /// TEST-ONLY. Drops the lock on this descriptor while keeping the
-        /// descriptor open, reproducing the state macOS `flock(2)` documents
+        /// TEST-ONLY. Drops the lock on this handle while keeping the handle
+        /// open, reproducing the state every platform documents
         /// mid-transition: "the previous lock being released and the new lock
         /// applied". Real code never calls this; it exists so the restoration
         /// path can be proven against the CONTRACT rather than against one
         /// platform's current behaviour.
         #[cfg(test)]
         pub fn force_unlock_for_test(&self) -> Result<(), String> {
-            flock(self.fd.as_raw_fd(), libc::LOCK_UN)
-                .map_err(|_| codes::INSTANCE_LOCK_UNAVAILABLE.to_string())
+            confined::unlock(&self.file).map_err(|_| codes::INSTANCE_LOCK_UNAVAILABLE.to_string())
         }
 
-        /// Requests SHARED on THIS descriptor. Used both to establish normal
+        /// Requests SHARED on THIS handle. Used both to establish normal
         /// participation and to RE-establish it after any exclusive attempt,
         /// successful or not. Never assumes a prior lock is still held.
         pub fn request_shared(&self) -> Result<(), String> {
-            flock(self.fd.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB).map_err(|err| {
-                if would_block(&err) {
-                    codes::INSTANCE_LOCK_BUSY.to_string()
-                } else {
-                    codes::INSTANCE_LOCK_UNAVAILABLE.to_string()
-                }
-            })
-        }
-    }
-}
-
-#[cfg(not(unix))]
-mod presence {
-    use super::codes;
-    use std::path::Path;
-
-    /// No supported presence primitive: fail closed rather than pretend.
-    pub struct Presence;
-
-    impl Presence {
-        pub fn acquire_shared(_lock_path: &Path) -> Result<Presence, String> {
-            Err(codes::INSTANCE_LOCK_UNSUPPORTED.to_string())
-        }
-        pub fn request_exclusive(&self) -> Result<(), String> {
-            Err(codes::INSTANCE_LOCK_UNSUPPORTED.to_string())
-        }
-        pub fn request_shared(&self) -> Result<(), String> {
-            Err(codes::INSTANCE_LOCK_UNSUPPORTED.to_string())
+            confined::lock_shared(&self.file).map_err(|err| lock_error(&err))
         }
     }
 }
@@ -334,7 +319,7 @@ impl ArchiveInstanceState {
             return Ok(());
         }
         if inner.presence.is_none() {
-            match Presence::acquire_shared(&root.join(ARCHIVE_LOCK_NAME)) {
+            match Presence::acquire_shared(root) {
                 Ok(presence) => {
                     inner.presence = Some(presence);
                     inner.state = PresenceState::Shared;
@@ -536,6 +521,7 @@ impl ArchiveInstanceState {
 /// Presence is established at instance startup, so this does NOT lazily create
 /// participation: an instance whose startup participation failed is refused
 /// here rather than quietly becoming a participant at first mutation.
+#[cfg(not(h2o_saved_chat_primitive_harness))]
 pub fn enter_mutation_for<'a>(
     app: &tauri::AppHandle,
     state: &'a tauri::State<'_, ArchiveInstanceState>,
@@ -588,6 +574,7 @@ pub fn enter_mutation_recovering<'a>(
 
 /// Establishes this instance's lifetime participation. Called once from the
 /// Tauri setup hook, before any command can run.
+#[cfg(not(h2o_saved_chat_primitive_harness))]
 pub fn establish_startup_presence(
     app: &tauri::AppHandle,
     state: &ArchiveInstanceState,
@@ -601,4 +588,5 @@ pub fn establish_startup_presence(
 }
 
 #[cfg(test)]
+#[path = "archive_instance_lock/tests.rs"]
 mod tests;

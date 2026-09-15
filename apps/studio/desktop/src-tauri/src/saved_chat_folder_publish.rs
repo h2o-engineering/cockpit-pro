@@ -6,6 +6,15 @@
 //! pair. Both operations resolve the immutable governed export root themselves and
 //! reuse the archive durable writer's descriptor-relative primitives. This is
 //! not a general filesystem, mkdir or rename API.
+//!
+//! T02 (frozen contract §6 class G, §11.1 class D4): the publication is ONE
+//! create-only directory rename — `renameatx_np(RENAME_EXCL)` on macOS,
+//! `renameat2(RENAME_NOREPLACE)` on Linux, a handle-bound `ReplaceIfExists =
+//! FALSE` rename of the retained staging directory handle on Windows — and the
+//! staged directory object is re-identified under the final name afterwards
+//! (class H′). The export folder stays the verified-on-consume class: no
+//! member fence and no namespace fence are issued here (OQ-2, MB-07), and
+//! `published` means exactly the namespace commit.
 
 use serde::Serialize;
 use std::io;
@@ -94,9 +103,16 @@ impl SavedChatFolderPublishResult {
     }
 }
 
+/// Governed ASCII leaf admission (contract §12): trimmed, no separators, no
+/// drive prefix, no `..`, ASCII `[A-Za-z0-9._ -]`, no leading `.` (a
+/// dot-leading stage is unreachable to the renderer's own member writes on
+/// Unix and behaves differently on Windows), and no Windows reserved device
+/// stem (whole stem or the segment before the first `.`) on ANY platform.
+/// Nothing is normalized, case-folded or trimmed to fit.
 fn is_safe_ascii_leaf(name: &str) -> bool {
     if name.is_empty()
         || name != name.trim()
+        || name.starts_with('.')
         || name.contains('/')
         || name.contains('\\')
         || name.contains("..")
@@ -108,9 +124,24 @@ fn is_safe_ascii_leaf(name: &str) -> bool {
     if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
         return false;
     }
+    if crate::archive_durable_write::has_reserved_device_stem(name) {
+        return false;
+    }
     bytes
         .iter()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'_' | b'-' | b' '))
+}
+
+/// Explicit NAME_MAX admission on the admitted export root (contract §12).
+fn name_fits(
+    dir: &crate::archive_durable_write::confined::Dir,
+    name: &str,
+) -> Result<(), &'static str> {
+    match dir.name_max() {
+        Ok(limit) if name.len() as u64 <= limit => Ok(()),
+        Ok(_) => Err("name-exceeds-filesystem-limit"),
+        Err(_) => Err("name-limit-indeterminate"),
+    }
 }
 
 fn final_name_is_governed(final_name: &str) -> bool {
@@ -148,8 +179,8 @@ fn names_are_governed(staged_name: &str, final_name: &str) -> bool {
     staging_name(final_name, token).as_deref() == Some(staged_name)
 }
 
-fn staged_is_directory(stat: &libc::stat) -> bool {
-    (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR
+fn staged_is_directory(stat: &crate::archive_durable_write::confined::EntryStat) -> bool {
+    stat.is_directory()
 }
 
 fn create_stage_within_root_with<F>(
@@ -166,12 +197,34 @@ where
     };
     let dir = match crate::archive_durable_write::confined::Dir::open_existing_nofollow(root) {
         Ok(dir) => dir,
+        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+            return SavedChatFolderStageResult::refused("unsupported-platform")
+        }
         Err(_) => return SavedChatFolderStageResult::refused("create-failed"),
     };
+    if let Err(status) = name_fits(&dir, &staged_name) {
+        return SavedChatFolderStageResult::refused(status);
+    }
+    // Class O: exclusive creation must be proven on this root before staging.
+    // A root this process cannot write is a permission condition, reported
+    // with the accepted infrastructure code, never as a capability verdict.
+    if let Err(refusal) = crate::archive_filesystem_capability::require(
+        &dir,
+        &[crate::archive_filesystem_capability::Capability::Exclusive],
+    ) {
+        return SavedChatFolderStageResult::refused(if refusal.is_root_not_writable() {
+            "create-failed"
+        } else {
+            "capability-unproven"
+        });
+    }
     match create(&dir, staged_name.as_bytes()) {
         Ok(()) => SavedChatFolderStageResult::created(staged_name),
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
             SavedChatFolderStageResult::refused("stage-exists")
+        }
+        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+            SavedChatFolderStageResult::refused("unsupported-platform")
         }
         Err(_) => SavedChatFolderStageResult::refused("create-failed"),
     }
@@ -194,16 +247,26 @@ fn publish_within_root_with<F>(
     promote: F,
 ) -> SavedChatFolderPublishResult
 where
-    F: FnOnce(&crate::archive_durable_write::confined::Dir, &[u8], &[u8]) -> io::Result<bool>,
+    F: FnOnce(
+        &crate::archive_durable_write::confined::Dir,
+        &crate::archive_durable_write::confined::Dir,
+        &[u8],
+        &[u8],
+    ) -> io::Result<bool>,
 {
     if !names_are_governed(staged_name, final_name) {
         return SavedChatFolderPublishResult::refused("invalid-name");
     }
-
     let dir = match crate::archive_durable_write::confined::Dir::open_existing_nofollow(root) {
         Ok(dir) => dir,
+        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+            return SavedChatFolderPublishResult::refused("unsupported-platform")
+        }
         Err(_) => return SavedChatFolderPublishResult::refused("publish-failed"),
     };
+    if let Err(status) = name_fits(&dir, final_name) {
+        return SavedChatFolderPublishResult::refused(status);
+    }
     let staged = match dir.stat_child_nofollow(staged_name.as_bytes()) {
         Ok(Some(stat)) => stat,
         Ok(None) => return SavedChatFolderPublishResult::refused("staged-missing"),
@@ -212,10 +275,54 @@ where
     if !staged_is_directory(&staged) {
         return SavedChatFolderPublishResult::refused("staged-not-directory");
     }
-
-    match promote(&dir, staged_name.as_bytes(), final_name.as_bytes()) {
+    // Class O: the no-replace directory rename must be proven on this root.
+    // A root this process cannot write is a permission condition, reported
+    // with the accepted infrastructure code, never as a capability verdict.
+    if let Err(refusal) = crate::archive_filesystem_capability::require(
+        &dir,
+        &[crate::archive_filesystem_capability::Capability::NoReplaceRename],
+    ) {
+        return SavedChatFolderPublishResult::refused(if refusal.is_root_not_writable() {
+            "publish-failed"
+        } else {
+            "capability-unproven"
+        });
+    }
+    // Retain the staged directory object across the rename: it is the rename
+    // source on Windows and the class H′ witness everywhere.
+    let staged_dir = match dir.open_child_nofollow(staged_name.as_bytes()) {
+        Ok(staged_dir) => staged_dir,
+        Err(_) => return SavedChatFolderPublishResult::refused("staged-not-directory"),
+    };
+    let owned = match staged_dir.identity() {
+        Ok(identity) => identity,
+        Err(_) => return SavedChatFolderPublishResult::refused("publish-failed"),
+    };
+    match promote(
+        &dir,
+        &staged_dir,
+        staged_name.as_bytes(),
+        final_name.as_bytes(),
+    ) {
         Ok(false) => SavedChatFolderPublishResult::refused("destination-exists"),
-        Ok(true) => SavedChatFolderPublishResult::published(),
+        Ok(true) => {
+            drop(staged_dir);
+            // Class H′: the directory object now under the final name must be
+            // the staged object that was admitted above; a foreign object is
+            // left for the portable verifier and never reported `published`.
+            match dir.stat_child_nofollow(final_name.as_bytes()) {
+                Ok(Some(st)) if st.is_directory() && st.identity() == owned => {
+                    SavedChatFolderPublishResult::published()
+                }
+                _ => SavedChatFolderPublishResult::refused("publication-identity-mismatch"),
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+            SavedChatFolderPublishResult::refused("unsupported-platform")
+        }
+        Err(err) if crate::archive_durable_write::confined::is_capability_absent(&err) => {
+            SavedChatFolderPublishResult::refused("capability-unproven")
+        }
         Err(_) => SavedChatFolderPublishResult::refused("publish-failed"),
     }
 }
@@ -225,9 +332,12 @@ pub fn publish_saved_chat_folder_within_root(
     staged_name: &str,
     final_name: &str,
 ) -> SavedChatFolderPublishResult {
-    publish_within_root_with(root, staged_name, final_name, |dir, from, to| {
-        dir.promote_dir_exclusive(from, to)
-    })
+    publish_within_root_with(
+        root,
+        staged_name,
+        final_name,
+        |dir, staged_dir, from, to| dir.promote_dir_exclusive(staged_dir, from, to),
+    )
 }
 
 #[tauri::command]
@@ -288,6 +398,77 @@ mod tests {
             "round-trip.h2ochat.tmp-00112233445566778899aabbccddeeff",
             "round-trip.h2ochat",
         )
+    }
+
+    /// T02 (contract §12): export leaves refuse a leading `.` and every
+    /// Windows reserved device stem on every platform, and never widen the
+    /// admitted charset.
+    #[test]
+    fn export_leaves_refuse_leading_dots_and_reserved_device_stems() {
+        for refused in [
+            ".hidden.h2ochat",
+            "CON.h2ochat",
+            "nul.h2ochat",
+            "COM1.h2ochat",
+            "lpt9.h2ochat",
+            "AUX.notes.h2ochat",
+            "PRN.h2ochat",
+        ] {
+            assert!(
+                !final_name_is_governed(refused),
+                "{refused} must be refused"
+            );
+            assert_eq!(
+                create_saved_chat_folder_stage_within_root(
+                    &scratch_root("name-policy"),
+                    refused,
+                    TOKEN_A
+                )
+                .status,
+                "invalid-name"
+            );
+        }
+        for admitted in [
+            "console.h2ochat",
+            "com10.h2ochat",
+            "chat.CON.h2ochat",
+            "a b.h2ochat",
+        ] {
+            assert!(
+                final_name_is_governed(admitted),
+                "{admitted} must be admitted"
+            );
+        }
+    }
+
+    /// T02 (class H′): when the object under the final name after the rename
+    /// is NOT the staged directory object, publication reports a distinct
+    /// non-success and leaves the foreign occupant untouched.
+    #[test]
+    fn a_foreign_object_under_the_final_name_is_reported_as_identity_mismatch_and_left_untouched() {
+        let root = scratch_root("identity-mismatch");
+        let (staged, final_name) = names();
+        fs::create_dir(root.join(staged)).unwrap();
+        fs::write(root.join(staged).join("payload"), b"our-staged-bytes").unwrap();
+        let foreign = root.join(final_name);
+        let result =
+            publish_within_root_with(&root, staged, final_name, |_dir, _staged_dir, _from, to| {
+                // A rename that (illegitimately) leaves a DIFFERENT directory
+                // under the final name: create-only insertion of a foreign tree.
+                let path = root.join(std::str::from_utf8(to).unwrap());
+                fs::create_dir(&path)?;
+                fs::write(path.join("foreign"), b"foreign-bytes")?;
+                Ok(true)
+            });
+        assert_eq!(result.status, "publication-identity-mismatch");
+        assert!(!result.ok);
+        assert!(!result.staging_removed);
+        assert_eq!(fs::read(foreign.join("foreign")).unwrap(), b"foreign-bytes");
+        assert_eq!(
+            fs::read(root.join(staged).join("payload")).unwrap(),
+            b"our-staged-bytes"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -67,6 +67,13 @@ pub mod codes {
     pub const QUARANTINE_NOT_DURABLE: &str = "reclaim-quarantine-not-durable";
     pub const QUARANTINE_UNSUPPORTED_PLATFORM: &str =
         "reclaim-quarantine-unsupported-platform";
+    /// T02: the no-replace move or the namespace fence is unproven on this
+    /// root's filesystem (contract §10); environmental and retryable.
+    pub const QUARANTINE_CAPABILITY_UNPROVEN: &str = "reclaim-quarantine-capability-unproven";
+    /// T02: after the move, the object under the quarantine name is not the
+    /// retained source object (class H′); the foreign occupant is left alone.
+    pub const QUARANTINE_IDENTITY_MISMATCH: &str =
+        "reclaim-quarantine-publication-identity-mismatch";
     pub const ROOT_UNAVAILABLE: &str = "reclaim-root-unavailable";
     pub const RUN_UNREADABLE: &str = "reclaim-run-unreadable";
     pub const ITEM_UNREADABLE: &str = "reclaim-item-unreadable";
@@ -439,8 +446,8 @@ pub(crate) fn open_reclaim_root_for_test(
 /// stays byte-unchanged. It is a mode check on a stat the caller already took
 /// with the confined primitive, not a second confinement implementation: it
 /// opens nothing and resolves no path.
-fn is_dir(st: &libc::stat) -> bool {
-    (st.st_mode & libc::S_IFMT) == libc::S_IFDIR
+fn is_dir(st: &confined::EntryStat) -> bool {
+    confined::is_directory(st)
 }
 
 /// The reclaim namespace for an execution run, derived from a trusted archive
@@ -543,8 +550,10 @@ impl ReceiptsDir {
             })?;
         file.write_all(bytes)
             .map_err(|_| codes::EVIDENCE_WRITE_FAILED.to_string())?;
-        // The record, then the directory entry that names it.
-        file.sync_all()
+        // The record — through the ONE governed content fence authority
+        // (`F_FULLFSYNC` on macOS; MB-04) — then the directory entry that
+        // names it.
+        crate::archive_durable_write::sync_file_contents(&file)
             .map_err(|_| codes::EVIDENCE_NOT_DURABLE.to_string())?;
         self.dir
             .sync()
@@ -564,7 +573,6 @@ impl ReceiptsDir {
 ///
 /// Returns `Ok(false)` when the destination already exists, so a collision
 /// fails closed instead of overwriting evidence.
-#[cfg(target_os = "macos")]
 pub fn quarantine_generation(
     _exclusive: &ExclusiveOwnership<'_>,
     packages: &confined::Dir,
@@ -576,49 +584,93 @@ pub fn quarantine_generation(
 }
 
 /// The single atomic non-replacing move into quarantine, shared by every
-/// family. One `renameatx_np(RENAME_EXCL)` and nothing else: no copy-then-
-/// unlink, no replacing rename, no second mechanism to keep in step.
+/// family (contract §6 class M): ONE no-replace move — `renameatx_np(RENAME_EXCL)`
+/// on macOS, `renameat2(RENAME_NOREPLACE)` on Linux, a handle-bound
+/// `ReplaceIfExists = FALSE` rename on Windows — and nothing else: no
+/// copy-then-unlink, no replacing rename, no second mechanism to keep in step.
 ///
 /// Both endpoints are descriptor-relative; no path is constructed or followed.
-#[cfg(target_os = "macos")]
+/// The source entry is opened no-follow and retained across the move so the
+/// object that arrives under the quarantine name can be proven to be that
+/// object (class H′); on divergence the foreign occupant is left alone and a
+/// distinct refusal is reported. An unproven move capability refuses before
+/// the syscall (`reclaim-quarantine-capability-unproven`).
 fn quarantine_into_run(
     source_dir: &confined::Dir,
     run: &RunDir,
     source: &QuarantineComponent,
     item: &QuarantineComponent,
 ) -> Result<bool, String> {
-    let from = std::ffi::CString::new(source.as_str())
-        .map_err(|_| codes::COMPONENT_SEPARATOR.to_string())?;
-    let to = std::ffi::CString::new(item.as_str())
-        .map_err(|_| codes::COMPONENT_SEPARATOR.to_string())?;
-    let rc = unsafe {
-        libc::renameatx_np(
-            source_dir.as_raw_fd(),
-            from.as_ptr(),
-            run.dir.as_raw_fd(),
-            to.as_ptr(),
-            libc::RENAME_EXCL,
-        )
-    };
-    if rc < 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EEXIST) {
-            return Ok(false);
+    let from = source.as_str().as_bytes();
+    let to = item.as_str().as_bytes();
+    match crate::archive_filesystem_capability::require(
+        &run.dir,
+        crate::archive_filesystem_capability::move_requirements(),
+    ) {
+        Ok(_) => {}
+        Err(refusal) if refusal.is_root_not_writable() => {
+            return Err(codes::QUARANTINE_RENAME_FAILED.to_string())
         }
-        return Err(codes::QUARANTINE_RENAME_FAILED.to_string());
+        Err(_) => return Err(codes::QUARANTINE_CAPABILITY_UNPROVEN.to_string()),
     }
-    Ok(true)
+    // Retain the source object across the move: a directory descriptor
+    // admitted no-follow, a no-follow read handle for a durable-temp file, or
+    // — for an entry that cannot be opened without following it (a symlink
+    // occupant, moved AS AN ENTRY exactly as the accepted floor does) — its
+    // no-follow identity, re-checked under the quarantine name afterwards.
+    let owned = match source_dir.stat_child_nofollow(from) {
+        Ok(Some(st)) if st.is_directory() => match source_dir.open_child_nofollow(from) {
+            Ok(dir) => RetainedSource::Directory(dir),
+            Err(_) => return Err(codes::QUARANTINE_RENAME_FAILED.to_string()),
+        },
+        Ok(Some(st)) if st.is_regular() => match source_dir.open_child_read_nofollow(from) {
+            Ok(file) => RetainedSource::File(file),
+            Err(_) => return Err(codes::QUARANTINE_RENAME_FAILED.to_string()),
+        },
+        Ok(Some(st)) => RetainedSource::Unopened(st.identity()),
+        _ => return Err(codes::QUARANTINE_RENAME_FAILED.to_string()),
+    };
+    let owned_identity = match owned.identity() {
+        Ok(identity) => identity,
+        Err(_) => return Err(codes::QUARANTINE_RENAME_FAILED.to_string()),
+    };
+    match source_dir.move_exclusive_into(from, &run.dir, to) {
+        Ok(true) => {}
+        Ok(false) => return Ok(false),
+        Err(err) if err.kind() == std::io::ErrorKind::Unsupported => {
+            return Err(codes::QUARANTINE_UNSUPPORTED_PLATFORM.to_string())
+        }
+        Err(err) if confined::is_capability_absent(&err) => {
+            return Err(codes::QUARANTINE_CAPABILITY_UNPROVEN.to_string())
+        }
+        Err(_) => return Err(codes::QUARANTINE_RENAME_FAILED.to_string()),
+    }
+    // Class H′ (Windows: the retained handle must be released before the
+    // cross-check open; on Unix the descriptor is simply no longer needed).
+    drop(owned);
+    match run.dir.stat_child_nofollow(to) {
+        Ok(Some(st)) if st.identity() == owned_identity => Ok(true),
+        _ => Err(codes::QUARANTINE_IDENTITY_MISMATCH.to_string()),
+    }
 }
 
-/// Non-macOS: fail closed, for the same reason the generation move does.
-#[cfg(not(target_os = "macos"))]
-fn quarantine_into_run(
-    _source_dir: &confined::Dir,
-    _run: &RunDir,
-    _source: &QuarantineComponent,
-    _item: &QuarantineComponent,
-) -> Result<bool, String> {
-    Err(codes::QUARANTINE_UNSUPPORTED_PLATFORM.to_string())
+/// The source object retained across a quarantine move for class H′.
+enum RetainedSource {
+    Directory(confined::Dir),
+    File(std::fs::File),
+    /// A link or other entry that no-follow rules forbid opening: only its
+    /// own no-follow identity can be retained.
+    Unopened(confined::ObjectIdentity),
+}
+
+impl RetainedSource {
+    fn identity(&self) -> std::io::Result<confined::ObjectIdentity> {
+        match self {
+            RetainedSource::Directory(dir) => dir.identity(),
+            RetainedSource::File(file) => confined::file_identity(file),
+            RetainedSource::Unopened(identity) => Ok(*identity),
+        }
+    }
 }
 
 /// M06 T3.3 — atomically moves proven staging/temp RESIDUE into a run
@@ -700,8 +752,8 @@ pub(crate) fn open_cas_shard_dir(
 
 /// Makes a completed quarantine rename DURABLE.
 ///
-/// `renameatx_np` is atomic but not durable: after it returns, a crash can
-/// still leave the directory entries unwritten. The namespace transition spans
+/// The no-replace move is atomic but not durable: after it returns, a crash
+/// can still leave the directory entries unwritten. The namespace transition spans
 /// TWO directories — the source loses an entry and the destination gains one —
 /// so both must be synchronized before anything may claim the move survived a
 /// crash boundary, and before the item is purged.
@@ -731,20 +783,6 @@ pub fn durable_quarantine_transition(
         .sync()
         .map_err(|_| codes::QUARANTINE_NOT_DURABLE.to_string())?;
     Ok(())
-}
-
-/// Non-macOS: fail closed. A plain `renameat` would silently REPLACE an
-/// existing quarantine entry, and no weaker guarantee is acceptable for the
-/// only operation that removes a canonical package.
-#[cfg(not(target_os = "macos"))]
-pub fn quarantine_generation(
-    _exclusive: &ExclusiveOwnership<'_>,
-    packages: &confined::Dir,
-    run: &RunDir,
-    source: &QuarantineComponent,
-    item: &QuarantineComponent,
-) -> Result<bool, String> {
-    quarantine_into_run(packages, run, source, item)
 }
 
 /// The outcome of one bounded purge. Partial failure is reported, never

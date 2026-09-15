@@ -237,18 +237,18 @@ impl RunOutcome {
 
 /// A trusted-side run identity.
 ///
-/// 128 bits from `getentropy(2)` — the OS CSPRNG, and the same primitive the
-/// publisher already uses for its session seed. Deliberately WITHOUT that
-/// function's weak pid⊕nanos fallback: a run id must be collision resistant, so
-/// entropy failure fails closed rather than degrading silently.
+/// 128 bits from the OS CSPRNG (`getentropy` on macOS, `getrandom(2)` on
+/// Linux, `ProcessPrng` on Windows, through the platform-neutral facade) — the
+/// same source the publisher uses for its session seed. Deliberately WITHOUT
+/// that function's weak pid⊕nanos fallback: a run id must be collision
+/// resistant, so entropy failure fails closed rather than degrading silently.
 ///
 /// A run id is namespace and evidence identity ONLY. No wall clock is involved
 /// and nothing derives deletion authority from its ordering. The caller cannot
 /// supply one.
 pub(crate) fn generate_run_id() -> Result<QuarantineRunId, String> {
     let mut buf = [0u8; 16];
-    let rc = unsafe { libc::getentropy(buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-    if rc != 0 {
+    if crate::archive_durable_write::fill_entropy(&mut buf).is_err() {
         return Err(codes::RUN_ID_UNAVAILABLE.to_string());
     }
     let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();

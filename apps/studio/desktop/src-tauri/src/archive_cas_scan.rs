@@ -125,14 +125,14 @@ pub fn scan_cas_within(archive_root: &std::path::Path) -> CasInventory {
         let dir = match assets.open_child_nofollow(&shard) {
             Ok(dir) => dir,
             Err(err) => {
-                match err.raw_os_error() {
-                    _ if err.kind() == std::io::ErrorKind::NotFound => {}
-                    // A symlink or non-directory standing where a shard should
-                    // be: never followed, and the walk is no longer complete.
-                    Some(libc::ELOOP) | Some(libc::ENOTDIR) => {
-                        out.fail(codes::SHARD_NOT_A_DIRECTORY)
-                    }
-                    _ => out.fail(codes::SHARD_UNREADABLE),
+                // A symlink / reparse point or non-directory standing where a
+                // shard should be: never followed, and the walk is no longer
+                // complete. A raced-away shard reports nothing.
+                if err.kind() == std::io::ErrorKind::NotFound {
+                } else if crate::archive_durable_write::confined::is_redirect_refusal(&err) {
+                    out.fail(codes::SHARD_NOT_A_DIRECTORY)
+                } else {
+                    out.fail(codes::SHARD_UNREADABLE)
                 }
                 continue;
             }

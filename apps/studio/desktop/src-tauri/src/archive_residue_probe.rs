@@ -148,17 +148,16 @@ pub fn probe_durable_temp_within(archive_root: &Path) -> DurableTempResidue {
         let dir = match assets.open_child_nofollow(&shard) {
             Ok(dir) => dir,
             Err(err) => {
-                match err.raw_os_error() {
-                    // Raced away between listing and opening: nothing there to
-                    // report, and nothing was skipped.
-                    _ if err.kind() == std::io::ErrorKind::NotFound => {}
-                    // A symlink or non-directory standing where a shard should
-                    // be. O_NOFOLLOW refused to traverse it, so this probe did
-                    // NOT look inside — that is an incomplete walk, not a zero.
-                    Some(libc::ELOOP) | Some(libc::ENOTDIR) => {
-                        out.fail(codes::SHARD_NOT_A_DIRECTORY)
-                    }
-                    _ => out.fail(codes::SHARD_UNREADABLE),
+                // Raced away between listing and opening: nothing there to
+                // report, and nothing was skipped. A symlink / reparse point or
+                // non-directory standing where a shard should be was refused by
+                // the no-follow open, so this probe did NOT look inside — that
+                // is an incomplete walk, not a zero.
+                if err.kind() == std::io::ErrorKind::NotFound {
+                } else if crate::archive_durable_write::confined::is_redirect_refusal(&err) {
+                    out.fail(codes::SHARD_NOT_A_DIRECTORY)
+                } else {
+                    out.fail(codes::SHARD_UNREADABLE)
                 }
                 continue;
             }
@@ -529,8 +528,12 @@ fn scan_durable_temp_within(archive_root: &Path, out: &mut TrustedResidueScan) {
 /// Directory test on an ALREADY `O_NOFOLLOW`-stat'd entry. A mode check on a
 /// stat the confined primitive already took — it opens nothing and resolves no
 /// path, so it is not a second confinement implementation.
-fn is_dir_stat(st: &libc::stat) -> bool {
-    (st.st_mode & libc::S_IFMT) == libc::S_IFDIR
+/// The only stat fields this probe ever consults are the TYPE bits: the
+/// facade's `EntryStat::kind()` is derived from `st_mode & libc::S_IFMT` on
+/// Unix (the file-attribute / reparse tag on Windows) and exposes no time,
+/// owner or size authority to this module.
+fn is_dir_stat(st: &crate::archive_durable_write::confined::EntryStat) -> bool {
+    st.is_directory()
 }
 
 /// The complete trusted residue authority for BOTH established families.

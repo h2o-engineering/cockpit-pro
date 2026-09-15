@@ -272,6 +272,30 @@
     }).join('');
   }
 
+  /* T02 (cross-platform Saved-Chat filesystem safety): native publication
+   * refusals that name a destination FILESYSTEM or PLATFORM condition, or a
+   * post-publication identity check. They are never retried with a weaker
+   * mechanism and are presented distinctly from a write fault. The native
+   * side already mutated nothing (or left a foreign occupant untouched). */
+  var NATIVE_DESTINATION_REFUSALS = {
+    'unsupported-filesystem-capability': 'the destination filesystem cannot publish create-only from the verified staged object',
+    'capability-unproven': 'the destination filesystem could not prove the required exclusive-create, no-replace-rename or fence primitives',
+    'unsupported-platform': 'this platform has no native publication arm for this operation',
+    'name-exceeds-filesystem-limit': 'the export name exceeds the destination filesystem component limit',
+    'name-limit-indeterminate': 'the destination filesystem component limit could not be determined',
+    'publication-identity-mismatch': 'the object under the final name is not the verified staged object; it was left untouched',
+  };
+  function nativeDestinationRefusal(status) {
+    var key = cleanString(status);
+    return Object.prototype.hasOwnProperty.call(NATIVE_DESTINATION_REFUSALS, key) ? NATIVE_DESTINATION_REFUSALS[key] : '';
+  }
+  function NativeDestinationRefusal(status, reason) {
+    this.name = 'NativeDestinationRefusal';
+    this.nativeStatus = cleanString(status);
+    this.message = 'saved-chat-native-destination-refusal:' + this.nativeStatus;
+    this.reason = reason;
+  }
+
   async function createOwnedFolderStage(finalName) {
     for (var attempt = 0; attempt < FOLDER_STAGE_CREATE_ATTEMPTS; attempt += 1) {
       var token = randomFolderStageToken();
@@ -283,6 +307,8 @@
           cleanString(result.stagedName) === expectedName) {
         return { stagedName: expectedName, stagedPath: joinPath(EXPORT_ROOT, expectedName) };
       }
+      var stageRefusal = nativeDestinationRefusal(status);
+      if (stageRefusal) throw new NativeDestinationRefusal(status, stageRefusal);
       throw new Error('saved-chat-folder-stage-create-failed');
     }
     throw new Error('saved-chat-folder-stage-collision-exhausted');
@@ -764,6 +790,17 @@
           reason: 'destination already exists',
         });
       }
+      var folderRefusal = nativeDestinationRefusal(publication.status);
+      if (folderRefusal) {
+        return exportResult('unsupported-destination', {
+          packagePath: packagePath,
+          exportName: dest.exportName,
+          destinationPath: dest.destinationPath,
+          inspectionStatus: 'verified',
+          nativeStatus: cleanString(publication.status),
+          reason: folderRefusal,
+        });
+      }
       if (publication.ok !== true || cleanString(publication.status) !== 'published') {
         throw new Error('saved-chat-folder-create-only-publication-failed');
       }
@@ -794,6 +831,9 @@
     } catch (err) {
       if (ownsStage && tempPath) {
         try { await fsRemove(tempPath, exportRootOptions(exportPolicy, { recursive: true })); } catch (_) { /* best-effort cleanup only */ }
+      }
+      if (err && err.name === 'NativeDestinationRefusal') {
+        return exportResult('unsupported-destination', { packagePath: packagePath, nativeStatus: err.nativeStatus, reason: err.reason });
       }
       return exportResult('write-error', { packagePath: packagePath, tempPath: tempPath, reason: String((err && err.message) || err || 'export failed') });
     }
@@ -996,6 +1036,18 @@
           reason: 'destination already exists',
         });
       }
+      var zipRefusal = nativeDestinationRefusal(publication.status);
+      if (zipRefusal) {
+        return zipExportResult('unsupported-destination', {
+          packagePath: packagePath,
+          exportName: dest.exportName,
+          destinationPath: dest.destinationPath,
+          packageDirName: dest.packageDirName,
+          inspectionStatus: 'verified',
+          nativeStatus: cleanString(publication.status),
+          reason: zipRefusal,
+        });
+      }
       if (publication.ok !== true || cleanString(publication.status) !== 'published') {
         throw new Error('saved-chat-zip-create-only-publication-failed:' + cleanString(publication.status));
       }
@@ -1054,6 +1106,7 @@
     'rejected': { tone: 'block', label: 'Rejected', note: 'Export was refused.' },
     'read-error': { tone: 'block', label: 'Read error', note: 'The source package could not be verified/read.' },
     'write-error': { tone: 'block', label: 'Write error', note: 'The export write did not complete.' },
+    'unsupported-destination': { tone: 'block', label: 'Destination unsupported', note: 'The export destination filesystem or platform cannot provide the required create-only, durable publication primitives. Nothing was written and nothing was replaced.' },
   };
 
   var PILL_TONES = {
