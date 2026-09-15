@@ -14,7 +14,11 @@
  * vendor/dompurify and isolated behind this adapter, which is the only Renderer
  * code permitted to talk to it. WHAT is allowed stays in sanitizer-policy.v1.js.
  *
- * This module is unwired: nothing packages or loads it yet.
+ * This module is packaged and loaded in the production Studio Renderer chain
+ * (studio.html / pack-studio, after sanitizer-policy.v1.js and the vendored
+ * engine). Rich replay and the controlled live-HTML ContentRenderer sinks
+ * (ownerSanitizedHtml / opaqueProviderBlock) consume v2 as their DOM safety
+ * boundary.
  *
  * Shared v1 (H2O.Studio.html.sanitize) is untouched and keeps serving
  * Saved-Chat projection. Saved-Chat `sanitized: true` is an ingress-admission

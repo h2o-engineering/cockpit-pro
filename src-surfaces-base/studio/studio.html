@@ -675,24 +675,30 @@
        H2O.Studio.html.sanitize. Must load BEFORE the saved-chat package
        projector, which delegates its sanitization here. Interim regex+CSP. -->
   <script src="./platform/html-sanitizer.js"></script>
-  <!-- Renderer sanitizer v2 (M03 P1 S1A) — LOADED BUT UNUSED. Admitted in
-       dependency order: the pure policy installs first, then the pinned
-       DOMPurify 3.4.15 UMD singleton, then the Renderer adapter that
-       captures it. Installs H2O.Studio.Renderer.htmlSanitizer only; the v1
-       surface above is untouched and remains what the Renderer and the
-       saved-chat projector consume. No consumer has migrated. -->
+  <!-- Renderer sanitizer v2 (M03 P1 S1A) — LIVE. Admitted in dependency
+       order: the pure policy installs first, then the pinned DOMPurify 3.4.15
+       UMD singleton, then the Renderer adapter that captures it. Installs
+       H2O.Studio.Renderer.htmlSanitizer, the active Renderer runtime safety
+       boundary for rich replay and for controlled owner / provider HTML
+       content (ownerSanitizedHtml / opaqueProviderBlock) before any live DOM
+       sink. The shared v1 surface above stays separate for its
+       Saved-Chat / Storage-compatible persistence responsibilities; v2 does
+       not replace shared v1 globally. -->
   <script src="./renderer/safety/sanitizer-policy.v1.js"></script>
   <script src="./renderer/safety/vendor/dompurify/purify.js"></script>
   <script src="./renderer/safety/html-sanitizer.v2.js"></script>
-  <!-- Renderer Markdown semantic engine (M03 P2 S2A T4) — LOADED BUT UNUSED.
-       Admitted in dependency order: the byte-verbatim markdown-it 15.0.1 UMD
-       first, then the H2O bounded GFM closure that extends it, then the one
-       engine configuration, then the Render IR adapter. Installs
-       H2O.Studio.Renderer.markdownGfm / .markdownEngine / .markdownIrAdapter
-       only. No consumer has migrated: the Renderer below still uses its
-       bespoke Markdown functions and both bespoke parsers stay live. The
-       vendored THIRD_PARTY_NOTICES beside the engine is licence material and
-       is deliberately NOT a script. -->
+  <!-- Renderer Markdown semantic engine (M03 P2 S2A T4) — LIVE. Admitted in
+       dependency order: the byte-verbatim markdown-it 15.0.1 UMD first, then
+       the H2O bounded GFM closure that extends it, then the one engine
+       configuration, then the Render IR adapter. Installs
+       H2O.Studio.Renderer.markdownGfm / .markdownEngine / .markdownIrAdapter,
+       the shared semantic Markdown chain actively consumed by the canonical
+       Renderer path (markdown-it -> H2O GFM -> engine -> IR adapter ->
+       transient Render IR -> ContentRenderer -> H2O-owned DOM); the former
+       bespoke Web and Mobile Markdown parsers are retired and Mobile consumes
+       the same semantics through its thin bridge. The vendored
+       THIRD_PARTY_NOTICES beside the engine is licence material and is
+       deliberately NOT a script. -->
   <script src="./renderer/markdown/vendor/markdown-it/markdown-it.umd.min.js"></script>
   <script src="./renderer/markdown/h2o-gfm.v1.js"></script>
   <script src="./renderer/markdown/markdown-engine.v1.js"></script>

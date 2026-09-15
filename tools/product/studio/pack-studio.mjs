@@ -1479,23 +1479,26 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   // ARCHIVE_WORKBENCH_OUT_FILES below.
   "reader-notes/annotation-report.studio.js",
 
-  // Renderer sanitizer v2 (M03 P1 S1A) — DELIVERY-ONLY admission. These four
-  // files ship inside the produced artifact but are deliberately UNUSED: no
-  // studio.html <script> tag references them and no runtime consumer exists.
-  // Current rich replay stays on v1 (platform/html-sanitizer.js). The vendored
-  // engine is byte-verbatim DOMPurify 3.4.15; its LICENSE ships beside it as an
-  // Apache-2.0 condition. PIN.json is source/build provenance and is NOT
-  // delivered. Keep parallel to ARCHIVE_WORKBENCH_OUT_FILES below.
+  // Renderer sanitizer v2 (M03 P1 S1A) — part of the active Renderer runtime
+  // chain. studio.html loads these in dependency order and the accepted
+  // Renderer paths consume v2: rich replay and the controlled live-HTML
+  // ContentRenderer sinks (ownerSanitizedHtml / opaqueProviderBlock). Shared v1
+  // (platform/html-sanitizer.js) stays separate for Saved-Chat / Storage-
+  // compatible persistence. The vendored engine is byte-verbatim DOMPurify
+  // 3.4.15; its LICENSE ships beside it as an Apache-2.0 condition. PIN.json is
+  // source/build provenance and is NOT delivered. Keep parallel to
+  // ARCHIVE_WORKBENCH_OUT_FILES below.
   "renderer/safety/sanitizer-policy.v1.js",
   "renderer/safety/vendor/dompurify/purify.js",
   "renderer/safety/html-sanitizer.v2.js",
   "renderer/safety/vendor/dompurify/LICENSE",
 
-  // Renderer Markdown semantic engine (M03 P2 S2A T4 S1) — DELIVERY-ONLY
-  // admission. These five files ship inside the produced artifact but are
-  // deliberately UNUSED: no studio.html <script> tag references them and no
-  // runtime consumer exists. Both bespoke Markdown parsers stay live during the
-  // bounded dual-path window. The vendored engine is byte-verbatim markdown-it
+  // Renderer Markdown semantic engine (M03 P2 S2A T4 S1) — part of the active
+  // Renderer runtime chain. studio.html loads these in dependency order and
+  // canonical Markdown rendering consumes them (markdown-it 15.0.1 -> H2O
+  // bounded GFM -> engine -> IR adapter -> transient Render IR ->
+  // ContentRenderer -> H2O-owned DOM); the former bespoke Web and Mobile
+  // parsers are retired. The vendored engine is byte-verbatim markdown-it
   // 15.0.1; THIRD_PARTY_NOTICES ships beside it because the artifact physically
   // incorporates six projects across MIT and BSD-2-Clause. PIN.json is
   // source/build provenance and is NOT delivered. Keep parallel to
@@ -1946,13 +1949,13 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   // Reader & Notes — NV1 annotation report consumer — see SOURCE_FILES.
   "reader-notes/annotation-report.studio.js",
 
-  // Renderer sanitizer v2 (M03 P1 S1A) — delivered but UNUSED — see SOURCE_FILES.
+  // Renderer sanitizer v2 (M03 P1 S1A) — active Renderer runtime chain — see SOURCE_FILES.
   "renderer/safety/sanitizer-policy.v1.js",
   "renderer/safety/vendor/dompurify/purify.js",
   "renderer/safety/html-sanitizer.v2.js",
   "renderer/safety/vendor/dompurify/LICENSE",
 
-  // Renderer Markdown semantic engine (M03 P2 S2A T4 S1) — delivered but UNUSED — see SOURCE_FILES.
+  // Renderer Markdown semantic engine (M03 P2 S2A T4 S1) — active Renderer runtime chain — see SOURCE_FILES.
   "renderer/markdown/vendor/markdown-it/markdown-it.umd.min.js",
   "renderer/markdown/vendor/markdown-it/THIRD_PARTY_NOTICES",
   "renderer/markdown/h2o-gfm.v1.js",
