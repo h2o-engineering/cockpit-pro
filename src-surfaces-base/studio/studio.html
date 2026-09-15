@@ -59,6 +59,7 @@
        chatgpt-reference presentation rules scoped to the conversation root
        marker. Loads after studio.css. -->
   <link rel="stylesheet" href="./renderer/presentation/chatgpt-reference.v1.css?v=1.0.6" />
+  <link rel="stylesheet" href="./renderer/presentation/h2o-clean-reader.v1.css" />
 </head>
 <body data-h2o-studio-mode="1">
   <div class="wbShell">
@@ -728,6 +729,7 @@
        semantic dependency; loads before the renderers that consume its
        presentation class hooks. -->
   <script src="./renderer/presentation/presentation-profile.v1.js"></script>
+  <script src="./renderer/presentation/h2o-clean-reader.v1.js"></script>
   <script src="./renderer/content/content-renderer.v1.js"></script>
   <!-- Canonical base transcript Renderer. Loads after the shared sanitizer
        and selector contract, and before studio.js Reader orchestration. -->

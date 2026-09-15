@@ -1,0 +1,340 @@
+/*
+ * @version 1.0.0
+ * H2O Studio Renderer — h2o-clean-reader PresentationProfile stylesheet.
+ *
+ * Owner:   L-STUDIO-RENDERER
+ * Profile: h2o-clean-reader (H2O.Studio.Renderer.presentationProfile)
+ *
+ * Reading-first presentation of the accepted H2O structure: quiet user blocks
+ * instead of provider bubbles, calm prose rhythm, plain code panels. Every
+ * rule is scoped to the conversation root carrying
+ * data-h2o-presentation-profile="h2o-clean-reader" through :where(), so the
+ * scope adds no specificity and the rules never reach another profile's root.
+ * Selectors key on Renderer structural vocabulary (cgTurn--<role>,
+ * cgMsg[data-message-author-role], cgMsgBody, cgBubble--user, wbRichRoot) and
+ * on this profile's own content / edit-state hooks (h2oCleanCode,
+ * h2oCleanCodeLang, h2oCleanMsg--edited); the profile places no presentation
+ * class on transcript, turn, message or bubble shells. Colours, radii and
+ * fonts come from the shared --wb-* theme tokens only, so every Appearance
+ * theme flows through unchanged. Sizes are relative (em) so the Appearance
+ * font size and per-message overrides compose on top of them. No !important.
+ *
+ * Structural geometry, Application Shell frame / mount layout, the Reader
+ * scroll root and the Reader-route end-alignment of user turns stay outside
+ * this source (studio.css); this stylesheet never contradicts them.
+ *
+ * Accepted limitation (Clean Reader v1): captured ChatGPT rich content
+ * (rich replay) receives the global compatibility baseline in studio.css plus
+ * the element rules below. There is no provider utility, design-token or
+ * prose bridge here, so provider-fidelity presentation of captured markup is
+ * not promised by this profile; the reference profile remains the
+ * provider-fidelity presentation.
+ */
+
+/* ── Shell: text colour, turn rhythm ─────────────────────────────────── */
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsg{
+  color:var(--wb-text);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot{
+  color:var(--wb-text);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot > *{
+  max-width:100%;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgScroll > .cgTurn{
+  margin-bottom:calc(var(--wb-thread-gap) * 1.5);
+}
+
+/* ── Canonical message hosts ─────────────────────────────────────────── */
+/* User message: a quiet block (soft surface, hairline border), shrink-to-fit
+   at the end of the column - the column end alignment itself is structural
+   (.cgTurn--user in studio.css). A rich-replay user host carries the H2O
+   bubble (.cgBubble--user) instead, and the bubble is the block (below). */
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsg[data-message-author-role="user"]:not(:has(.cgBubble--user)){
+  width:fit-content;
+  max-width:min(var(--wb-user-w), 44rem);
+  padding:.6em 1em;
+  border:1px solid var(--wb-border);
+  border-radius:var(--wb-radius-md);
+  background:var(--wb-surface-soft);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsg[data-message-author-role="assistant"]{
+  background:transparent;
+}
+
+/* Persisted edit result on a message host (profile edit-state hook): an
+   inset accent that shifts no geometry. The rich edited-turn hook
+   (h2oCleanTurn--edited) is a state marker without presentation. */
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .h2oCleanMsg--edited{
+  box-shadow:inset 3px 0 0 var(--wb-focus-ring);
+}
+
+/* ── Canonical content body ──────────────────────────────────────────── */
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody{
+  font-size:1.0625em;
+  line-height:1.7;
+  color:var(--wb-text);
+  overflow-wrap:anywhere;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody p{
+  margin:0 0 .8em;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody p:last-child{
+  margin-bottom:0;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody :where(h1, h2, h3, h4, h5, h6){
+  margin:1.15em 0 .45em;
+  line-height:1.3;
+  font-weight:600;
+  letter-spacing:-.01em;
+  color:var(--wb-text);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody h1{ font-size:1.35em; }
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody h2{ font-size:1.2em; }
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody h3{ font-size:1.08em; }
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody :where(h4, h5, h6){ font-size:1em; }
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody :where(ul, ol){
+  margin:0 0 .8em;
+  padding-left:1.5em;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody ul{ list-style:disc; }
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody ol{ list-style:decimal; }
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody li{
+  margin:.2em 0;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody li > p{
+  margin:0;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody blockquote{
+  margin:.8em 0;
+  padding:.1em 0 .1em 1em;
+  border-left:2px solid var(--wb-border-strong);
+  color:var(--wb-text-soft);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody hr{
+  margin:1.4em 0;
+  border:0;
+  border-top:1px solid var(--wb-border);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody table{
+  margin:.8em 0;
+  border-collapse:collapse;
+  font-size:.95em;
+  max-width:100%;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody :where(th, td){
+  padding:.4em .75em;
+  border:1px solid var(--wb-border);
+  text-align:left;
+  vertical-align:top;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody th{
+  font-weight:600;
+  background:var(--wb-surface-soft);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody a{
+  color:var(--wb-focus);
+  text-decoration:underline;
+  text-underline-offset:2px;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody a:hover{
+  color:var(--wb-text);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody img{
+  max-width:100%;
+  height:auto;
+  border-radius:var(--wb-radius-sm);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody code{
+  font-family:var(--wb-ff-mono);
+  font-size:.92em;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody :not(pre) > code{
+  padding:.1em .35em;
+  border:1px solid var(--wb-border);
+  border-radius:var(--wb-radius-sm);
+  background:var(--wb-surface-soft);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsgBody pre{
+  margin:0;
+  overflow:auto;
+  padding:.8em 1em;
+  border:1px solid var(--wb-code-border);
+  border-radius:var(--wb-radius-sm);
+  background:var(--wb-code-bg);
+  font-family:var(--wb-ff-mono);
+  font-size:.82em;
+  line-height:1.6;
+}
+
+/* ── Code block content hooks (ContentRenderer codeBlock) ────────────── */
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .h2oCleanCode{
+  margin:.9em 0;
+  overflow:hidden;
+  border:1px solid var(--wb-code-border);
+  border-radius:var(--wb-radius-md);
+  background:var(--wb-code-bg);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .h2oCleanCode > pre{
+  margin:0;
+  border:0;
+  border-radius:0;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .h2oCleanCodeLang{
+  padding:.4em 1em;
+  border-bottom:1px solid var(--wb-code-border);
+  font-family:var(--wb-ff-mono);
+  font-size:.72em;
+  line-height:1.4;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+  color:var(--wb-dim);
+}
+
+/* ── Rich replay: H2O shells around captured content ─────────────────── */
+/* The H2O user bubble is the same quiet block as the canonical user host.
+   The user host sits at the column end and carries the width cap (its
+   containing block, the turn, is definite); the bubble fills the host, so no
+   percentage resolves against a shrink-wrapped box. The assistant host spans
+   the column. */
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot .cgTurn--user [data-message-author-role="user"]{
+  max-width:min(var(--wb-user-w), 44rem);
+  margin-left:auto;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot .cgBubble--user{
+  width:fit-content;
+  max-width:100%;
+  margin-left:auto;
+  padding:.6em 1em;
+  border:1px solid var(--wb-border);
+  border-radius:var(--wb-radius-md);
+  background:var(--wb-surface-soft);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot [data-message-author-role="assistant"]{
+  width:100%;
+  margin-right:auto;
+}
+
+/* ── Rich replay: captured content element rules (see the limitation) ── */
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot :where(p, li, blockquote){
+  line-height:1.7;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot p{
+  margin:0 0 .8em;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot :where(h1, h2, h3, h4, h5, h6){
+  margin:1.15em 0 .45em;
+  line-height:1.3;
+  font-weight:600;
+  letter-spacing:-.01em;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot h1{ font-size:1.35em; }
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot h2{ font-size:1.2em; }
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot h3{ font-size:1.08em; }
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot :where(h4, h5, h6){ font-size:1em; }
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot :where(ul, ol){
+  margin:0 0 .8em;
+  padding-left:1.5em;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot ul{ list-style:disc; }
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot ol{ list-style:decimal; }
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot :where(strong, b){
+  font-weight:600;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot blockquote{
+  margin:.8em 0;
+  padding:.1em 0 .1em 1em;
+  border-left:2px solid var(--wb-border-strong);
+  color:var(--wb-text-soft);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot table{
+  margin:.8em 0;
+  border-collapse:collapse;
+  font-size:.95em;
+  max-width:100%;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot :where(th, td){
+  padding:.4em .75em;
+  border:1px solid var(--wb-border);
+  text-align:left;
+  vertical-align:top;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot a{
+  color:var(--wb-focus);
+  text-decoration:underline;
+  text-underline-offset:2px;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot code{
+  font-family:var(--wb-ff-mono);
+  font-size:.92em;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot :not(pre) > code{
+  padding:.1em .35em;
+  border:1px solid var(--wb-border);
+  border-radius:var(--wb-radius-sm);
+  background:var(--wb-surface-soft);
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot pre{
+  margin:.9em 0;
+  overflow:auto;
+  padding:.8em 1em;
+  border:1px solid var(--wb-code-border);
+  border-radius:var(--wb-radius-md);
+  background:var(--wb-code-bg);
+  font-family:var(--wb-ff-mono);
+  font-size:.82em;
+  line-height:1.6;
+}
+
+:where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot :where(img, video, canvas, svg){
+  max-width:100%;
+  height:auto;
+}
+
+/* ── Narrow viewport ─────────────────────────────────────────────────── */
+@media (max-width: 720px){
+  :where([data-h2o-presentation-profile="h2o-clean-reader"]) .cgMsg[data-message-author-role="user"]:not(:has(.cgBubble--user)),
+  :where([data-h2o-presentation-profile="h2o-clean-reader"]) .wbRichRoot .cgTurn--user [data-message-author-role="user"]{
+    max-width:min(100%, 42rem);
+  }
+}

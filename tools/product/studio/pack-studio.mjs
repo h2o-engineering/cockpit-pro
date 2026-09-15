@@ -1529,6 +1529,11 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   // S3C/T7: Renderer-owned chatgpt-reference stylesheet, linked by studio.html
   // after studio.css. Keep parallel to ARCHIVE_WORKBENCH_OUT_FILES below.
   "renderer/presentation/chatgpt-reference.v1.css",
+  // M04 P2 T3: H2O Clean Reader profile module + its stylesheet (HDA decision A:
+  // EXT-BUILD-LISTS). The script loads after presentation-profile.v1.js and
+  // before content-renderer.v1.js. Keep parallel to ARCHIVE_WORKBENCH_OUT_FILES below.
+  "renderer/presentation/h2o-clean-reader.v1.js",
+  "renderer/presentation/h2o-clean-reader.v1.css",
   "renderer/content/content-renderer.v1.js",
 ]);
 export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
@@ -1969,6 +1974,8 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   "renderer/decoration/decoration-contribution.v1.js",
   "renderer/presentation/presentation-profile.v1.js",
   "renderer/presentation/chatgpt-reference.v1.css",
+  "renderer/presentation/h2o-clean-reader.v1.js",
+  "renderer/presentation/h2o-clean-reader.v1.css",
   "renderer/content/content-renderer.v1.js",
 ]);
 
