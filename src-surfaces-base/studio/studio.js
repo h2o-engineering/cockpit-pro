@@ -20,7 +20,6 @@ const FOLDER_SIDEBAR_UI_STATE = {
   showFolderCountPills: false,
 };
 const UI_PREFS_KEY = "h2o:archiveWorkbench:ui:vNext";
-const EDIT_OVERRIDES_KEY = "h2o:archiveWorkbench:editOverrides:v1";
 const CHAT_TITLE_STATE_KEY_PREFIX = "h2o:prm:cgx:library:chat-title:state:v1:";
 const CHAT_TITLE_BOOT_KEY_PREFIX = "h2o:prm:cgx:library:chat-title:boot-cache:v1:";
 const LEGACY_CHAT_TITLE_BOOT_KEY_PREFIX = "h2o:chat-title:boot-cache:v1:";
@@ -157,6 +156,9 @@ const state = {
 };
 
 let activeRailPopoverButton = null;
+let folderOperatorModeMemoryValue = false;
+let folderOperatorModeHydrationSequence = 0;
+const editOverrideCompatibilityBySnapshot = new Map();
 
 // D2 blocker: expose a read-only accessor for the current reader chat
 // context so the Studio Dock shell (dock-shell.studio.js) can route
@@ -277,11 +279,62 @@ function folderOperatorModeEnabled(){
     if (explicit === true) return true;
     if (explicit === false) return false;
   } catch {}
+  return folderOperatorModeMemoryValue;
+}
+
+function normalizeFolderOperatorModeValue(value){
+  if (value === true || value === "1" || value === "true") return true;
+  if (value === false || value === "0" || value === "false") return false;
+  return null;
+}
+
+function persistFolderOperatorModeValue(value){
   try {
-    const raw = W.localStorage?.getItem?.(FOLDER_LOCAL_REVIEW_OPERATOR_MODE_KEY);
-    return raw === "1" || raw === "true";
-  } catch {}
-  return false;
+    const store = W.H2O?.Library?.Store;
+    if (!store || typeof store.set !== "function") return Promise.resolve(false);
+    return Promise.resolve(store.set(FOLDER_LOCAL_REVIEW_OPERATOR_MODE_KEY, value === true))
+      .then(() => true, () => false);
+  } catch {
+    return Promise.resolve(false);
+  }
+}
+
+function applyHydratedFolderOperatorModeValue(value){
+  const next = value === true;
+  const changed = folderOperatorModeMemoryValue !== next;
+  folderOperatorModeMemoryValue = next;
+  applyFolderOperatorModeMarker();
+  syncFolderOperatorModeDiagnosticsUi(document);
+  if (changed) {
+    rerenderFolderOperatorModeSurfaces();
+    rerenderSettingsFolderOperatorModeRoute();
+  }
+  return next;
+}
+
+async function hydrateFolderOperatorModeFromStore(){
+  const sequence = ++folderOperatorModeHydrationSequence;
+  try {
+    const store = W.H2O?.Library?.Store;
+    if (!store || typeof store.get !== "function") return folderOperatorModeEnabled();
+    const stored = await store.get(FOLDER_LOCAL_REVIEW_OPERATOR_MODE_KEY);
+    if (sequence !== folderOperatorModeHydrationSequence) return folderOperatorModeEnabled();
+    const durableValue = normalizeFolderOperatorModeValue(stored);
+    if (durableValue !== null) return applyHydratedFolderOperatorModeValue(durableValue);
+
+    let legacyValue = null;
+    try {
+      legacyValue = normalizeFolderOperatorModeValue(
+        W.localStorage?.getItem?.(FOLDER_LOCAL_REVIEW_OPERATOR_MODE_KEY)
+      );
+    } catch {}
+    if (legacyValue === null) return applyHydratedFolderOperatorModeValue(false);
+    applyHydratedFolderOperatorModeValue(legacyValue);
+    await persistFolderOperatorModeValue(legacyValue);
+    return legacyValue;
+  } catch {
+    return folderOperatorModeEnabled();
+  }
 }
 
 function folderLocalReviewAppearanceAllowed(){
@@ -311,12 +364,14 @@ function rerenderFolderOperatorModeSurfaces(){
 
 function setFolderOperatorModeEnabled(enabled){
   const next = enabled === true;
-  try { W.localStorage?.setItem?.(FOLDER_LOCAL_REVIEW_OPERATOR_MODE_KEY, next ? "1" : "0"); } catch {}
+  folderOperatorModeHydrationSequence += 1;
+  folderOperatorModeMemoryValue = next;
   try {
     W.H2O = W.H2O || {};
     W.H2O.Studio = W.H2O.Studio || {};
     W.H2O.Studio.folderLocalReviewOperatorMode = next;
   } catch {}
+  persistFolderOperatorModeValue(next);
   applyFolderOperatorModeMarker();
   syncFolderOperatorModeDiagnosticsUi(document);
   try { W.dispatchEvent(new CustomEvent("evt:h2o:studio:folder-operator-mode-changed", { detail: { enabled: next } })); } catch {}
@@ -340,6 +395,12 @@ function installFolderOperatorModeApi(){
 }
 
 installFolderOperatorModeApi();
+try {
+  W.addEventListener("evt:h2o:library:store:tier-promoted", () => {
+    hydrateFolderOperatorModeFromStore().catch(() => {});
+  });
+} catch {}
+hydrateFolderOperatorModeFromStore().catch(() => {});
 
 function studioHostUnmount(reason = "studio:unmount") {
   state.currentReaderEditOverrides = null;
@@ -700,62 +761,104 @@ function subscribeReaderToPresentationPreference(){
   state.readerPresentationUnsubscribe = typeof unsubscribe === "function" ? unsubscribe : function () {};
 }
 
-// ─── Edit-override persistence ────────────────────────────────────────────────
-// Stores user edits keyed by `${snapshotId}:${turnIdx}` in localStorage.
-// Extension-page localStorage is isolated to the extension origin, so these
-// overrides persist across Studio sessions but never leak to chatgpt.com.
+// ─── Edit-override compatibility view ────────────────────────────────────────
+// Renderer still consumes a synchronous getEditOverride hook. The durable
+// authority is the existing per-snapshot edit-overlay store; renderReader
+// hydrates this in-memory projection before Renderer receives the hook.
 
-function editOverrideKey(snapshotId, turnIdx){
-  return `${EDIT_OVERRIDES_KEY}:${snapshotId}:${String(turnIdx)}`;
+function buildEditOverrideCompatibilityView(overlay){
+  const view = new Map();
+  try {
+    const applier = W.H2O?.Studio?.overlay;
+    if (!overlay || typeof applier?.computeMessageState !== "function") return view;
+    const turnIndexes = new Set();
+    (Array.isArray(overlay.ops) ? overlay.ops : []).forEach((op) => {
+      const idx = Number(op?.target?.turnIdx);
+      if (op?.target?.kind === "message" && Number.isInteger(idx) && idx > 0) turnIndexes.add(idx);
+    });
+    turnIndexes.forEach((idx) => {
+      const messageState = applier.computeMessageState(overlay, idx);
+      const body = messageState?.textReplace?.body;
+      if (typeof body === "string") view.set(idx, body);
+    });
+  } catch {}
+  return view;
+}
+
+function setEditOverrideCompatibilityView(snapshotId, overlay){
+  const sid = String(snapshotId || "").trim();
+  if (!sid) return new Map();
+  const view = buildEditOverrideCompatibilityView(overlay);
+  editOverrideCompatibilityBySnapshot.set(sid, view);
+  return view;
+}
+
+async function hydrateEditOverrideCompatibilityView(snapshotId){
+  const sid = String(snapshotId || "").trim();
+  if (!sid) return null;
+  try {
+    const store = W.H2O?.Studio?.store?.editOverlay;
+    if (!store || typeof store.get !== "function") {
+      editOverrideCompatibilityBySnapshot.set(sid, new Map());
+      return null;
+    }
+    const overlay = await store.get(sid);
+    setEditOverrideCompatibilityView(sid, overlay || null);
+    return overlay || null;
+  } catch {
+    editOverrideCompatibilityBySnapshot.set(sid, new Map());
+    return null;
+  }
 }
 
 function getEditOverride(snapshotId, turnIdx){
-  try { return localStorage.getItem(editOverrideKey(snapshotId, turnIdx)) ?? null; } catch { return null; }
+  const sid = String(snapshotId || "").trim();
+  const idx = Number(turnIdx);
+  if (!sid || !Number.isInteger(idx) || idx < 1) return null;
+  const view = editOverrideCompatibilityBySnapshot.get(sid);
+  return view && view.has(idx) ? view.get(idx) : null;
 }
 
 function setEditOverride(snapshotId, turnIdx, text){
-  try { localStorage.setItem(editOverrideKey(snapshotId, turnIdx), String(text)); return true; } catch { return false; }
-}
-
-function deleteEditOverridesForSnapshot(snapshotId){
   try {
-    const prefix = `${EDIT_OVERRIDES_KEY}:${snapshotId}:`;
-    const keys = [];
-    for (let i = 0; i < localStorage.length; i++){
-      const k = localStorage.key(i);
-      if (k && k.startsWith(prefix)) keys.push(k);
-    }
-    keys.forEach((k) => { try { localStorage.removeItem(k); } catch {} });
-  } catch {}
+    const sid = String(snapshotId || "").trim();
+    const idx = Number(turnIdx);
+    const snap = state.currentReaderSnapshot;
+    const bridge = W.H2O?.Studio?.RibbonBridge;
+    if (!sid || !Number.isInteger(idx) || idx < 1) return false;
+    if (String(snap?.snapshotId || "").trim() !== sid) return false;
+    if (!bridge || typeof bridge.applyOverlayOp !== "function") return false;
+
+    const view = editOverrideCompatibilityBySnapshot.get(sid) || new Map();
+    view.set(idx, String(text));
+    editOverrideCompatibilityBySnapshot.set(sid, view);
+    Promise.resolve(bridge.applyOverlayOp({
+      type: "text-replace",
+      target: { kind: "message", turnIdx: idx, messageId: null },
+      payload: { text: String(text) },
+    })).then((result) => {
+      if (result?.ok && result.overlay) setEditOverrideCompatibilityView(sid, result.overlay);
+      else hydrateEditOverrideCompatibilityView(sid).catch(() => {});
+    }, () => {
+      hydrateEditOverrideCompatibilityView(sid).catch(() => {});
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-// Persists an edit into the extension-stored snapshot so exported bundles
-// reflect what the user sees. Fire-and-forget; localStorage override remains
-// the authoritative source for the current Studio session.
-function persistEditToExtensionSnapshot(snapshotId, turnIdx, newText){
-  const snap = state.currentReaderSnapshot;
-  if (!snap || String(snap.snapshotId || "") !== String(snapshotId || "")) return;
-  const messages = Array.isArray(snap.messages) ? snap.messages : [];
-  const targetOrder = Number(turnIdx) - 1; // turnIdx is 1-based over all turns
-  const nowStr = new Date().toISOString();
-  const editedMessages = messages.map((msg) => {
-    if (Number(msg.order) !== targetOrder) return { ...msg };
-    const originalText = msg.originalText !== undefined ? msg.originalText : String(msg.text || "");
-    return { ...msg, text: newText, editedAt: nowStr, originalText };
-  });
-  // Keep in-memory snapshot current so subsequent edits in this session build on the
-  // correct state (each edit would otherwise use the original captured text as base).
-  state.currentReaderSnapshot = { ...snap, messages: editedMessages };
-  rememberPublicationTarget(state.currentReaderSnapshot);
-  const meta = {
-    ...(snap.meta && typeof snap.meta === "object" ? snap.meta : {}),
-    updatedAt: nowStr,
-  };
-  callArchive("captureSnapshot", {
-    chatId: String(snap.chatId || ""),
-    messages: editedMessages,
-    meta,
-  }).catch(() => {});
+async function deleteEditOverridesForSnapshot(snapshotId){
+  const sid = String(snapshotId || "").trim();
+  if (!sid) return false;
+  editOverrideCompatibilityBySnapshot.delete(sid);
+  try {
+    const store = W.H2O?.Studio?.store?.editOverlay;
+    if (!store || typeof store.remove !== "function") return false;
+    return await store.remove(sid) === true;
+  } catch {
+    return false;
+  }
 }
 
 // ─── Delete-confirm state ─────────────────────────────────────────────────────
@@ -821,8 +924,8 @@ async function executeDeleteChat(chatId, snapshotId, articleEl){
       try { await callArchive("deleteSnapshot", { snapshotId, chatId }); deleted = true; } catch {}
     }
 
-    // Always remove edit overrides for this snapshot locally
-    deleteEditOverridesForSnapshot(snapshotId);
+    // Remove the snapshot's canonical edit-overlay record and sync projection.
+    await deleteEditOverridesForSnapshot(snapshotId);
 
     // Remove from rows cache
     if (Array.isArray(state.rowsCache)){
@@ -921,14 +1024,10 @@ function mountEditTextarea(hostEl, snapshotId, turnIdx, originalText, onSave, on
     } catch (_) { /* swallow */ }
   }, 0);
 
-  /* Phase 7b — Two save paths. Default (legacy pencil): writes the
-   * localStorage edit-override + mutates the in-memory snapshot via
-   * persistEditToExtensionSnapshot. Overlay path (Edit-Mode button):
-   * opts.persistViaOverlay === true → skip BOTH legacy writes; instead
-   * call opts.applyOverlayOp(newText) which is expected to dispatch a
-   * `text-replace` overlay op via RibbonBridge.applyOverlayOp. onSave
-   * still fires with newText so the caller can repaint via
-   * applyEditedMessageBody. */
+  /* Phase 7b — Both save paths persist through the existing text-replace
+   * edit-overlay contract. The explicit overlay path supplies its own bridge
+   * callback; the legacy compatibility path below routes through the same
+   * Authoring bridge without mutating snapshots or direct storage. */
   const persistViaOverlay = !!(opts && opts.persistViaOverlay);
   const applyOverlayOp = opts && typeof opts.applyOverlayOp === 'function'
     ? opts.applyOverlayOp
@@ -943,18 +1042,16 @@ function mountEditTextarea(hostEl, snapshotId, turnIdx, originalText, onSave, on
     try { ev.preventDefault(); } catch (_) {}
     const newText = textarea.value;
     if (persistViaOverlay) {
-      /* Phase 7b — overlay path. Do NOT touch localStorage override,
-       * do NOT mutate snapshot.messages. Dispatch the text-replace op
-       * via the supplied callback; onSave repaints the reader. */
+      /* Phase 7b — overlay path. Dispatch the text-replace op via the
+       * supplied callback; onSave repaints the reader. */
       try {
         if (applyOverlayOp) applyOverlayOp(newText);
       } catch (_) { /* swallow — caller's responsibility to surface */ }
       onSave(newText);
       return;
     }
-    /* Legacy path (pencil). Untouched until Phase 7e removes it. */
+    /* Legacy compatibility path; persistence is still canonical overlay. */
     setEditOverride(snapshotId, turnIdx, newText);
-    persistEditToExtensionSnapshot(snapshotId, turnIdx, newText);
     onSave(newText);
   });
   cancelBtn.addEventListener("click", (ev) => {
@@ -5228,6 +5325,7 @@ function refreshReaderOverlay(root, snap){
     if (__sid && __store && typeof __store.get === "function" && typeof __applier === "function") {
       Promise.resolve(__store.get(__sid)).then((__overlay) => {
         if (!isCurrentReaderRoot(root, snap)) return;
+        setEditOverrideCompatibilityView(__sid, __overlay || null);
         try { __applier(root, snap, __overlay || null); }
         catch (_) { /* applier never throws, but defensive catch anyway */ }
         /* Phase 5b-1 — inline Bold/Italic render pass on initial mount. */
@@ -5720,6 +5818,11 @@ async function renderReader(snapshotId){
     renderFolderSidebar(state.rowsCache || [], state.lastView, state.lastFolderId);
     refreshSidebarChatList(state.lastView, state.lastFolderId);
 
+    const editOverlayStore = W.H2O?.Studio?.store?.editOverlay;
+    if (editOverlayStore && typeof editOverlayStore.get === "function") {
+      await hydrateEditOverrideCompatibilityView(snap.snapshotId);
+      if (token !== state.renderToken) return;
+    }
     const renderer = getStudioChatRenderer();
     const rendererInput = renderer.normalizeInput(snap);
     const nextEditOverrides = collectRendererEditOverrides(rendererInput);
@@ -16924,6 +17027,7 @@ function __ribbonBridge_applyOverlayOp(opSpec){
       if (!next) return { ok: false, reason: 'append-failed' };
       /* Persist */
       return Promise.resolve(ovStore.upsert(next)).then(function (saved) {
+        setEditOverrideCompatibilityView(sid, saved);
         /* Re-apply to the live reader DOM */
         let outcome = null;
         try {
@@ -16972,6 +17076,7 @@ function __ribbonBridge_applyOverlayOp(opSpec){
  * each stack manipulation. Never throws. */
 function __ribbonBridge_publishAndRender(snap, saved){
   let outcome = null;
+  try { setEditOverrideCompatibilityView(String(snap?.snapshotId || ''), saved || null); } catch (_) {}
   try {
     const ov = W.H2O?.Studio?.overlay;
     const readerEl = document.getElementById('viewReader');

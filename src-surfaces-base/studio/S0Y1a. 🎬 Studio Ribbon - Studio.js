@@ -1371,28 +1371,19 @@
       onClick: function (ctx, setStatus) {
         const href = String((ctx && ctx.originalUrl) || '').trim();
         if (!href) { setStatus('No source URL'); return; }
-        const platform = getPlatform();
+        const runtime = H2O && H2O.Studio && H2O.Studio.platform && H2O.Studio.platform.runtime;
         setStatus('Opening original…');
-        if (platform && typeof platform.openUrl === 'function') {
-          Promise.resolve(platform.openUrl(href)).then(
+        if (runtime && typeof runtime.openUrl === 'function') {
+          Promise.resolve(runtime.openUrl(href)).then(
             function () { setStatus(''); },
             function (err) {
-              /* Mirror existing studio.js linked-reader precedent: fall back
-               * to window.open when platform.openUrl rejects. */
-              try { window.open(href, '_blank', 'noopener'); setStatus(''); }
-              catch (_) {
-                const msg = (err && (err.message || String(err))) || 'unknown error';
-                setStatus('Open failed: ' + msg);
-              }
+              const msg = (err && (err.message || String(err))) || 'unknown error';
+              setStatus('Open failed: ' + msg);
             }
           );
           return;
         }
-        try { window.open(href, '_blank', 'noopener'); setStatus(''); }
-        catch (e) {
-          const msg = (e && (e.message || String(e))) || 'unknown error';
-          setStatus('Open failed: ' + msg);
-        }
+        setStatus('Open failed: runtime unavailable');
       },
     },
     /* Phase 2e — overlay-aware copy.
