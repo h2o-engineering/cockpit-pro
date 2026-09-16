@@ -173,6 +173,7 @@ try {
     "isReusableReaderMountCurrent",
     "collectRendererEditOverrides",
     "haveEquivalentRendererEditOverrides",
+    "isReaderPresentationCurrent",
     "canReuseReaderDOM",
     "refreshReaderOverlay",
     "buildReaderDOM",

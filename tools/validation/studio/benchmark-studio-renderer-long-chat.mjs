@@ -232,6 +232,7 @@ try {
     "isReusableReaderMountCurrent",
     "collectRendererEditOverrides",
     "haveEquivalentRendererEditOverrides",
+    "isReaderPresentationCurrent",
     "canReuseReaderDOM",
     /* M03 S4C: the Reader current-render bridge and its unmount seam are part of
      * the production refresh/teardown path (bind on build, disposeAll + clear
