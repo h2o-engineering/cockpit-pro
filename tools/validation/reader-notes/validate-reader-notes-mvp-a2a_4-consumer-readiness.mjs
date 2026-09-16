@@ -478,7 +478,6 @@ check('repo source evidence confirms saved-reader message root conventions', () 
   for (const token of [
     'function buildReaderDOM',
     'renderer.normalizeInput(snap)',
-    'renderer.render(rendererInput, { getEditOverride })',
     "const root = turn.querySelector('[data-message-author-role], [data-message-id]') || turn",
   ]) {
     has(studio, token, 'studio.js Reader orchestration convention');
@@ -487,11 +486,17 @@ check('repo source evidence confirms saved-reader message root conventions', () 
     'root.className = "cgFrame"',
     'root.dataset.chatId',
     'const TURNS_TESTID = TESTIDS.CONVERSATION_TURNS || "conversation-turns"',
-    'wrap.setAttribute(ROLE_ATTR, role)',
-    'wrap.setAttribute(MESSAGE_ID_ATTR, String(meta.messageId))',
   ]) {
     has(renderer, token, 'Renderer reader DOM convention');
   }
+  /* Reader M01 T5: T4 (3b5eac87) legitimately adds presentationProfile to
+   * render options. The older wrap role/message-id pins were already stale on
+   * main after accepted M03 (35d6da7a), before T4. Reuse executed contract proof:
+   * the Reader consumer checks exact render arguments/binding; the Renderer
+   * owner checks public role/message-id attributes in canonical AND rich DOM.
+   * No Renderer-local variable name or production behavior is prescribed here. */
+  runValidator('tools/validation/reader-notes/validate-reader-notes-mvp-a2a_4-highlight-resolution-consumer.mjs');
+  runValidator('tools/validation/studio/validate-studio-renderer-contract-repair.mjs');
 });
 
 check('A1 attributed highlight fixture uses real nested 3H1a raw.anchors shape', () => {
