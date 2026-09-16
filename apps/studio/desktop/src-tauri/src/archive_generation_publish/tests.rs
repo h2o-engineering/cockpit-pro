@@ -755,16 +755,50 @@ fn the_pinned_glob_matcher_denies_every_renderer_reach_into_staging() {
     );
 }
 
+/// D1 (cross-platform filesystem-safety contract §16, co-landed with the Shell
+/// owner of `tauri.conf.json`): the product EXPLICITLY enables literal-leading-
+/// dot exclusion on every platform. `tauri-plugin-fs` defaults the option to
+/// `true` on Unix and `false` on Windows, so until this pin §R.1 depended on an
+/// OS-specific default; now it depends on a shipped value this test proves.
 #[test]
-fn no_shipped_configuration_disables_the_leading_dot_exclusion_or_names_staging() {
-    // (a) No fs configuration may turn the matcher option off.
-    let conf = include_str!("../../tauri.conf.json");
-    for forbidden in ["requireLiteralLeadingDot", "require_literal_leading_dot"] {
-        assert!(
-            !conf.contains(forbidden),
-            "tauri.conf.json must not configure {forbidden}: the default \
-             (enabled) is load-bearing for §R.1"
-        );
+fn the_shipped_configuration_explicitly_enables_the_leading_dot_exclusion_and_names_no_staging() {
+    // (a) The shipped configuration must carry the exact D1 value, proven
+    // SEMANTICALLY on the parsed JSON rather than by substring: the key must
+    // sit at exactly `plugins.fs.requireLiteralLeadingDot` — the camelCase
+    // spelling tauri-plugin-fs deserializes (it denies unknown fields) — and
+    // its value must be the JSON boolean `true`.
+    fn d1_pinned(conf: &serde_json::Value) -> bool {
+        conf.get("plugins")
+            .and_then(|plugins| plugins.get("fs"))
+            .and_then(|fs| fs.get("requireLiteralLeadingDot"))
+            == Some(&serde_json::Value::Bool(true))
+    }
+    let conf: serde_json::Value = serde_json::from_str(include_str!("../../tauri.conf.json"))
+        .expect("tauri.conf.json must be valid JSON");
+    assert!(
+        d1_pinned(&conf),
+        "tauri.conf.json must set plugins.fs.requireLiteralLeadingDot to the boolean true \
+         (D1): the dot-leading exclusion is load-bearing for §R.1 on every platform, \
+         never left to the plugin's OS-specific default"
+    );
+    assert!(
+        conf["plugins"]["fs"].get("require_literal_leading_dot").is_none(),
+        "only the camelCase spelling the plugin deserializes may appear"
+    );
+    // The predicate really discriminates: `false`, `null`, a string, a number,
+    // an absent key, the snake_case spelling and a misplaced key all fail it.
+    for rejected in [
+        serde_json::json!({ "plugins": {} }),
+        serde_json::json!({ "plugins": { "fs": {} } }),
+        serde_json::json!({ "plugins": { "fs": { "requireLiteralLeadingDot": false } } }),
+        serde_json::json!({ "plugins": { "fs": { "requireLiteralLeadingDot": null } } }),
+        serde_json::json!({ "plugins": { "fs": { "requireLiteralLeadingDot": "true" } } }),
+        serde_json::json!({ "plugins": { "fs": { "requireLiteralLeadingDot": 1 } } }),
+        serde_json::json!({ "plugins": { "fs": { "require_literal_leading_dot": true } } }),
+        serde_json::json!({ "plugins": { "requireLiteralLeadingDot": true } }),
+        serde_json::json!({ "requireLiteralLeadingDot": true }),
+    ] {
+        assert!(!d1_pinned(&rejected), "must reject {rejected}");
     }
 
     // (b) No archive capability may grant a scope that explicitly reaches the

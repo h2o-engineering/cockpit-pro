@@ -215,6 +215,37 @@ pins remain green. Documented retryable lock-busy behavior is allowed.
 CAS crash and purge semantics are **excluded**, because CAS mutation is not
 part of M06.
 
+### J.1 Later compatibility reflection — capability-probe residue (post-M06)
+
+*This subsection is NOT part of the accepted M06 Revision 2 record above and
+does not reopen it; it is recorded so the current implementation stays legible
+against that record.* The later Mission
+`establish-cross-platform-saved-chat-filesystem-safety` (T02; its contract
+§10 rule 1 and certification case C24) adds a **third trusted residue family**
+beside the two accepted at M06 (generation-staging, durable-temp):
+
+- **`capability-probe`** — exact `.h2o-probe-<digits>-<digits>` crash residue
+  of the class O filesystem-capability probes, and ONLY in the two
+  archive-owned locations capability probing actually writes: directly under
+  the admitted archive root, and under `archive/packages`. No probe runs in a
+  CAS shard, so none is walked there.
+- It is typed (`ResidueFamily::CapabilityProbe`, with a typed probe location)
+  and is discovered by the **existing** trusted residue scan and moved by the
+  **existing** no-replace quarantine machinery — the same atomic rename into
+  the run namespace, the same durability barrier, receipts and purge — under
+  the quarantine identity `probe.<root|packages>.<name>`.
+- Symlink / reparse-point lookalikes and malformed reserved-prefix lookalikes
+  are reported indeterminate and are never actionable; probe-shaped names
+  outside that archive-owned boundary (a CAS shard, the export root, ZIP
+  staging) remain inert.
+- The addition authorizes **no** physical CAS reclamation (§H unchanged) and
+  widens **no** renderer mutation authority (§I and §P unchanged): no new
+  command, delete primitive or renderer-nameable path exists for it.
+- The accepted M06 retention / quarantine / recovery model is preserved, not
+  reopened: run-record evidence carries the family additively, and recovery
+  attributes its quarantine entries exactly as it does the two accepted
+  families.
+
 ## K. Manual-first policy
 
 *Normative rule.* Functional Core reclamation is explicit and manual:

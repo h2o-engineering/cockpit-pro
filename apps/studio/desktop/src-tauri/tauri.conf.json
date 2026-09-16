@@ -40,5 +40,9 @@
       "icons/icon.icns"
     ]
   },
-  "plugins": {}
+  "plugins": {
+    "fs": {
+      "requireLiteralLeadingDot": true
+    }
+  }
 }

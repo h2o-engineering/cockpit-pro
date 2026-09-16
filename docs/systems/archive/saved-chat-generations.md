@@ -661,26 +661,37 @@ it. Retained descriptors plus commit-time re-read/re-hash close **substitution,
 unexpected entries and path re-resolution**; they do **not** close post-hash
 in-place mutation.
 
-What actually closes it, on the supported Unix/macOS configuration at current
-authority, is that the renderer has no authority to open a staging member for
-writing at all:
+What actually closes it, on every supported platform at current authority, is
+that the renderer has no authority to open a staging member for writing at
+all:
 
 - staging **MUST** live under a **literal dot-leading** reserved directory
   component (`archive/packages/.h2o-genstage-<opaque>`);
-- the pinned glob matcher applies `require_literal_leading_dot`, so the broad
-  `archive/**` renderer grant does **not** confer `write_file`, `open`,
-  `mkdir` or `read_file` authority through that dot-leading component;
+- the pinned glob matcher applies `require_literal_leading_dot`, and Product
+  **explicitly** sets `plugins.fs.requireLiteralLeadingDot = true` in
+  `apps/studio/desktop/src-tauri/tauri.conf.json` (D1 of the cross-platform
+  filesystem-safety contract, co-landed with the Desktop shell owner of that
+  file), so the exclusion does not depend on the fs plugin's OS-specific
+  default (`true` on Unix, `false` on Windows) — the broad `archive/**`
+  renderer grant therefore does **not** confer `write_file`, `open`, `mkdir`
+  or `read_file` authority through that dot-leading component on any
+  platform;
 - this scope exclusion is therefore a **REQUIRED pre-cutover integrity
   invariant** — load-bearing, not token secrecy and not optional hardening;
 - staging directory *names* may still be visible through a parent `read_dir`.
-  Visibility is not authority.
+  Visibility is not authority, and remains distinct from mutation authority.
 
-Implementation and test obligations (T1.2.2):
+Implementation and test obligations (T1.2.2, D1):
 
 1. the staging prefix begins with a literal `.`;
-2. no fs-plugin configuration may disable `require_literal_leading_dot` while
-   this pre-cutover assumption is load-bearing — a committed test pins that
-   the app ships no such override;
+2. the shipped fs-plugin configuration MUST enable
+   `require_literal_leading_dot` explicitly on every platform
+   (`plugins.fs.requireLiteralLeadingDot = true`), and no configuration may
+   disable it — a committed test
+   (`the_shipped_configuration_explicitly_enables_the_leading_dot_exclusion_and_names_no_staging`)
+   parses the shipped `tauri.conf.json` and pins that value to the boolean
+   `true`; `false`, an absent key, `null`, a wrong type or another spelling
+   cannot satisfy it;
 3. a committed test proves the renderer cannot enter the dot-leading staging
    namespace via `write_file`, open-for-write, `mkdir`, or `read_file`;
 4. a committed test may assert that parent `read_dir` *can* list staging names,
@@ -694,7 +705,12 @@ that removal is the primary protection; the dot-leading rule remains as defense
 in depth and as namespace reservation. Neither mechanism is described here as
 the eternal sole security boundary, and the ordering matters: the dot-leading
 invariant must hold **before** the cutover, because until the cutover the broad
-grant exists.
+grant exists. **Current state (post-cutover, D1 landed):** the renderer holds
+no archive mutation grant, which remains the primary protection; the
+explicitly configured leading-dot rule remains defense in depth and namespace
+protection, and it prevents the Windows plugin default (`false`) from widening
+wildcard reach into the reserved dot-leading namespaces (`.h2o-genstage-*`,
+`.h2o-durable-*`, `.h2o-probe-*`, `.h2o-archive.lock`, `.h2o-reclaim`).
 - Crash residue is bounded per run by the session cap (which, per §Q, counts
   in-flight commits), is honestly unbounded across repeated crash cycles, and is reclaimed only by a future explicitly
   authorized janitor — never automatically in M05 (see "Carried risks").
