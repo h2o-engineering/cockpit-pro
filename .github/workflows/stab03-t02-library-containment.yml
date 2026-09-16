@@ -1,0 +1,79 @@
+name: STAB-03 T02 Library Containment
+
+on:
+  push:
+    branches:
+      - work/stab03-t02-library-containment
+
+permissions:
+  contents: write
+
+jobs:
+  transform-and-validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/stab03-t02-library-containment
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Apply bounded six-file transform
+        run: |
+          node --check .github/stab03-t02-library-transform.mjs
+          node .github/stab03-t02-library-transform.mjs
+          node --check "src-surfaces-base/studio/S0F1b. 🎬 Library Workspace - Studio.js"
+          node --check "src-surfaces-base/studio/S0F1c. 🎬 Library Index - Studio.js"
+          node --check "src-surfaces-base/studio/S0F1d. 🎬 Library Insights - Studio.js"
+          node --check "src-surfaces-base/studio/S0F1k. 🎬 Library Canonical Services - Studio.js"
+          node --check "src-surfaces-base/studio/S0F5a. 🎬 Tags - Studio.js"
+          node --check "src-surfaces-base/studio/S9D1a. 🎬 Auto Emoji Title - Studio.js"
+
+      - name: Validate frozen Library slice
+        run: |
+          node --check .github/stab03-t02-library-validate.mjs
+          node .github/stab03-t02-library-validate.mjs
+
+      - name: Re-run accepted STAB-P0 contracts
+        run: |
+          node tools/validation/studio/validate-stab-p0-t02a-folder-command-contract.mjs
+          node tools/validation/studio/validate-stab-p0-t02b-shell-folder-contribution-seam.mjs
+          node tools/validation/studio/validate-stab-p0-t03-library-folder-integration.mjs
+          node tools/validation/studio/validate-stab-p0-ac04-library-catalog-fanout.mjs
+
+      - name: Verify Studio package references
+        run: |
+          node tools/product/studio/__smoke__/pack-refcheck.smoke.mjs
+
+      - name: Verify exact routed write set
+        env:
+          BASE: c0bcee76b9ccf241a85b738dcc2b9ba482c3e4dd
+        run: |
+          rm -f .github/stab03-t02-library-transform.mjs .github/stab03-t02-library-validate.mjs .github/workflows/stab03-t02-library-containment.yml
+          git diff --check
+          git config core.quotePath false
+          actual="$(git diff --name-only "$BASE" | sort)"
+          expected="$(printf '%s\n' \
+            'src-surfaces-base/studio/S0F1b. 🎬 Library Workspace - Studio.js' \
+            'src-surfaces-base/studio/S0F1c. 🎬 Library Index - Studio.js' \
+            'src-surfaces-base/studio/S0F1d. 🎬 Library Insights - Studio.js' \
+            'src-surfaces-base/studio/S0F1k. 🎬 Library Canonical Services - Studio.js' \
+            'src-surfaces-base/studio/S0F5a. 🎬 Tags - Studio.js' \
+            'src-surfaces-base/studio/S9D1a. 🎬 Auto Emoji Title - Studio.js' | sort)"
+          if [ "$actual" != "$expected" ]; then
+            echo 'Unexpected STAB-03 T02-LIBRARY diff:'
+            printf '%s\n' "$actual"
+            exit 1
+          fi
+
+      - name: Commit validated candidate
+        run: |
+          git config user.name "H2O STAB-03 Library"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "Studio: contain STAB-03 Library host and persistence bypasses"
+          git push origin HEAD:work/stab03-t02-library-containment
