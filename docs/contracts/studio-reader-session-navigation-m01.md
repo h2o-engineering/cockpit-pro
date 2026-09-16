@@ -1,11 +1,26 @@
 # Reader M01 session/navigation regression floor
 
+This is the durable Reader regression contract retained after accepted M01
+closure.
+
+```text
+M01_STATUS=Complete
+M01_ACCEPTANCE=Accepted
+M01_CLOSURE=Complete
+AC01–AC10=Pass
+ACCEPTED_PRODUCT_MAIN=0cb641f9cd78c47f3329b911bd43b74df95ebb64
+ACCEPTED_PRODUCT_TREE=fd85208502ea154573ac4821d5c16ff5d2b4eb4b
+```
+
+Historical execution checkpoints:
+
 T1 baseline: Product `f2a434c8ad457f82136f0a3668e5ab5d82c2036c`.
 T1 checkpoint: `98f9782dc6231c9ec2c453126eadd8f307d34542` (contract/tests only).
 T2 checkpoint: `5a8cf94a76550bedc1f378d771cd4fb037a08bbb` (selection identity).
 T3 implements common semantic navigation and repairs populated MiniMap rebuilding.
 T4 repairs collapsed MiniMap access using a native control and focused browser
-evidence. Mission acceptance is pending; T6 still verifies the integrated New UI.
+evidence. T5 integrated the Reader lineage and T6 completed final current-main
+New UI acceptance before HDA/User acceptance and closure.
 
 ## Run and interpret
 
@@ -22,12 +37,14 @@ Playwright package if it is not resolvable normally; optionally set
 fails the checkpoint; it is never counted as a pass. No package installation,
 generated app, server, user profile, saved-chat storage or external page is used.
 
-Output distinguishes:
+Output categories retained from M01 execution distinguish:
 
 - **PASSING CURRENT CONTRACT**: executable current behavior.
-- **KNOWN BASELINE GAP**: the named defect was reproduced, not repaired.
+- **KNOWN BASELINE GAP**: a named historical defect was reproduced, not repaired
+  at that checkpoint; the accepted post-M01 baseline has zero such gaps.
 - **FUTURE POST-FIX EXPECTATION**: acceptance data/available semantic references
-  only; the future behavior is pending and excluded from current PASS counts.
+  only; any separately authorized future fixture remains excluded from current
+  PASS counts. The accepted post-M01 baseline has zero fixture gaps.
 
 ## Current contract and evidence
 
@@ -52,6 +69,30 @@ The runtime-unavailable rebuild is checked before loading the existing real
 turn-runtime implementation is stubbed. API wrappers observe calls and forward
 to the real Reader implementation. This is an isolated browser fixture, not a
 claim of full integrated New UI acceptance.
+
+## Final acceptance and durable ownership boundary
+
+Final isolated current-main New UI acceptance passed on the accepted Product SHA
+and tree recorded above. The accepted closure baseline is:
+
+- Reader: **22 current-contract groups, 0 baseline gaps, 0 fixture gaps, 0 failures**;
+- Renderer lifecycle: **24/24 PASS**;
+- the Shell MiniMap stacking correction is accepted in the tested lineage;
+- final native T6 New UI acceptance: **PASS**;
+- unresolved HIGH Reader-owned blockers: **none**;
+- M01: **Accepted / Complete / Closed**.
+
+Canonical acceptance detail remains in the Management repository rather than
+being duplicated here:
+
+- `missions/establish-reliable-reader-session-and-navigation/t06-final-current-main-new-ui-acceptance.md`
+- `missions/establish-reliable-reader-session-and-navigation/m01-hda-acceptance-and-closure.md`
+
+Reader navigation remains scoped to the current render and its turn targets. M01
+establishes neither a generic Anchor API nor durable reading-position persistence.
+Renderer owns projection and Semantic Index construction. Application Shell owns
+structural scrolling, routes and chrome. Authoring owns highlights and annotations.
+Storage owns durable saved-chat persistence. Sync owns convergence.
 
 ### RDR-LIVE-001 — T1 gap, repaired by T2
 
@@ -119,12 +160,11 @@ The real-module browser fixture proves:
 - programmatic toggle and repeated UI reuse retain one current access control;
 - all T2/T3 selection, navigation, populated rebuilding and Engine tests.
 
-The focused T4 checkpoint reports **22 current-contract groups, 0 baseline gaps,
-0 failures**, plus the reused lifecycle suite's **19/19 PASS**. This proves bounded
-browser behavior, not final Mission acceptance. T6 must still inspect the collapsed
-affordance in the integrated current-main New UI, including surrounding chrome,
-actual theme and window size. No known fixture visibility/hit-target concern is
-left open; integrated visual acceptance remains pending by the Mission plan.
+The focused T4 checkpoint reported **22 current-contract groups, 0 baseline gaps,
+0 failures**, plus the then-current reused lifecycle suite's **19/19 PASS**. This
+was bounded browser evidence. Final T6 acceptance later passed in the integrated
+current-main New UI across surrounding chrome, actual themes and tested window
+sizes; no fixture visibility or hit-target concern remained open.
 
 ### RDR-M01-T1-OBS-001 — T1/T2 gap, repaired by T3
 
@@ -215,22 +255,22 @@ Engine API/button/page dispatch. The T3 focused checkpoint reports 19 current
 contract groups, 1 known baseline, 0 pending T3 fixtures and 0 failures, with the
 reused lifecycle suite separately reporting 19/19 PASS. That historical T3 baseline is superseded by the T4 access evidence above.
 
-## Task write-sets (T3/T4 implemented)
+## Historical M01 task write-sets (implemented)
 
 Paths below are repository-relative. The validator and this contract remain
-Reader-owned and accompany each task's assertion/contract promotion.
+Reader-owned and accompanied each task's assertion/contract promotion.
 
-| Task | Exact proposed production files and semantic home | Leases |
+| Task | Exact implemented production files and semantic home | Leases |
 | --- | --- | --- |
-| T2 | `src-surfaces-base/studio/studio.js`: Reader-owned delegated selection inside `buildReaderDOM`; consumes the existing index linkage. | No Renderer lease required or used. Any Renderer DOM/index change would require a new bounded Renderer lease and is not proposed. |
+| T2 | `src-surfaces-base/studio/studio.js`: Reader-owned delegated selection inside `buildReaderDOM`; consumes the existing index linkage. | No Renderer lease was required or used. Any Renderer DOM/index change would have required a new bounded Renderer lease. |
 | T3 | `src-surfaces-base/studio/studio.js`: Reader-owned current-session navigation/focus/scroll policy and compatibility accessors. `src-surfaces-base/studio/S1A1b. 🎬 MiniMap Core - Studio.js`: Reader-owned populated-rebuild `rt` repair assigned by the accepted T1 Management record. `src-surfaces-base/studio/S1A1c. 🎬 MiniMap Engine - Studio.js`: Reader-owned semantic target dispatch into that path. | No lease needed for these Reader seams. Recheck if the Core repair crosses its navigation substrate. Shell lease only if structural scroll-root/route/host geometry must change; Runtime admission and Build list leases only if a new runtime module is proposed. None is proposed. |
 | T4 | `src-surfaces-base/studio/S1A1d. 🎬 MiniMap Shell - Studio.js`: Reader-owned MiniMap control semantics/keyboard access. `src-surfaces-base/studio/S1A1e. 🎬 MiniMap Skin - Studio.js`: Reader-owned control affordance/focus styles. | No Application Shell lease needed for control-local changes. The filename “MiniMap Shell” does not transfer semantic ownership to Application Shell. Any global placement/geometry change requires a Shell lease. |
 
-Each task also proposes exactly
+Each task also changed exactly
 `tools/validation/studio/validate-studio-reader-session-navigation-m01.mjs` and
 `docs/contracts/studio-reader-session-navigation-m01.md` (Reader).
 The T3 Core delta is one accessor binding. T3 adds no new runtime module and
-requires no Renderer, Shell, Runtime or Build lease. T4 still needs only its two
+requires no Renderer, Shell, Runtime or Build lease. T4 used only its two
 control-local files plus the existing Reader validator and this document.
 
 Renderer M04 was clean at `efb0dcb0cd5901de04d1101bf0d99116fc7aa66b`, with seven

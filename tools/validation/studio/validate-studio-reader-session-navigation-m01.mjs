@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Reader M01 T4: current contracts, remaining baseline gaps, and unimplemented
-// acceptance vectors are separate results. No production behavior is replaced.
-// See docs/contracts/studio-reader-session-navigation-m01.md for scope,
-// policies and later write-sets.
+// Accepted Reader M01 session/navigation regression floor.
+// Retained after M01 closure as the durable Reader regression harness.
+// Behavioral assertions and validation semantics remain unchanged unless
+// separately authorized. See the contract document for scope and history.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
