@@ -783,6 +783,53 @@
     };
   }
 
+  /* O1 — the recovered chat row's summary counters, for the initial INSERT of
+   * that fresh row only. Without them the chats row keeps its database
+   * defaults (0 / 0 / 0) while the snapshot and its turns are complete, and the
+   * Desktop list card shows "0 answers" for a fully recovered chat.
+   *
+   * Trusted local authority: the SAME normalized `turns` array the importer is
+   * about to persist — never the package's own count metadata. Role matching
+   * is the canonical capture / import rule (cleaned, lower-cased role compared
+   * to `user` / `assistant`; answerCount is the assistant-turn count). The
+   * last-turn time is the latest VALID per-turn `meta.createdAt`, normalized to
+   * the chat store's epoch-ms representation by the Studio shell's rule (an
+   * epoch number or numeric string with the seconds-vs-ms boundary, otherwise a
+   * parseable date string); when no turn carries a trustworthy time it stays 0
+   * and the caller omits it, so nothing is manufactured from the recovery
+   * moment and `created_at` keeps its existing meaning. */
+  function turnTimeToEpochMs(value) {
+    if (value == null || value === '') return 0;
+    var raw = typeof value === 'number' ? value : cleanString(value);
+    if (raw === '') return 0;
+    var numeric = Number(raw);
+    if (isFiniteNumber(numeric) && numeric > 0) {
+      return numeric < 10000000000 ? Math.round(numeric * 1000) : Math.round(numeric);
+    }
+    var parsed = Date.parse(String(raw));
+    return isFiniteNumber(parsed) && parsed > 0 ? parsed : 0;
+  }
+  function deriveRecoveredChatSummary(turns) {
+    var list = asArray(turns);
+    var userTurnCount = 0;
+    var assistantTurnCount = 0;
+    var lastMessageAt = 0;
+    for (var i = 0; i < list.length; i += 1) {
+      var turn = safeObject(list[i]);
+      var role = cleanString(turn.role).toLowerCase();
+      if (role === 'user') userTurnCount += 1;
+      else if (role === 'assistant') assistantTurnCount += 1;
+      lastMessageAt = Math.max(lastMessageAt, turnTimeToEpochMs(safeObject(turn.meta).createdAt));
+    }
+    return {
+      messageCount: list.length,
+      userTurnCount: userTurnCount,
+      assistantTurnCount: assistantTurnCount,
+      answerCount: assistantTurnCount,
+      lastMessageAt: lastMessageAt,
+    };
+  }
+
   function importCandidate(candidate, dry, mode) {
     var source = safeObject(candidate);
     var packagePath = cleanString(source.packagePath);
@@ -836,14 +883,24 @@
           return importResult(packagePath, 'rejected', decision, null, 'refusing to reuse original id');
         }
 
-        /* (a) recovered chat — fresh id => INSERT (never UPDATE). */
+        /* (a) recovered chat — fresh id => INSERT (never UPDATE). O1: the
+         * initial row carries its summary counters, derived from the turns
+         * persisted in (b); `answerCount` has no chats column and is read by
+         * the Library Index from meta, so it travels inside `meta` beside the
+         * recovery provenance. lastMessageAt is set only from a trustworthy
+         * per-turn time. */
+        var summary = deriveRecoveredChatSummary(turns);
         var chatPatch = {
           chatId: freshChatId,
           title: recoveredTitle,
           isSaved: true,
           isLinked: false,
-          meta: { recovered: provenance },
+          messageCount: summary.messageCount,
+          userTurnCount: summary.userTurnCount,
+          assistantTurnCount: summary.assistantTurnCount,
+          meta: { recovered: provenance, answerCount: summary.answerCount },
         };
+        if (summary.lastMessageAt > 0) chatPatch.lastMessageAt = summary.lastMessageAt;
         return Promise.resolve(chatStore.upsert(chatPatch)).then(function () {
           /* (b) recovered snapshot — NO snapshotId in the patch => the store
            * generates a fresh id => INSERT (never an update). The
