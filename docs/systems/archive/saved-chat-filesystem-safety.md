@@ -123,15 +123,21 @@ authority per name class, never normalized, case-folded or trimmed to fit:
 
 ## 6. Dependencies outside this Lane
 
-- **D1 — Windows leading-dot condition.** Tauri's `fs` scope defaults
-  `requireLiteralLeadingDot` to `true` on Unix and `false` on Windows; the
-  product currently ships `plugins: {}`. The documented §R.1 protection of
-  the `.h2o-*` reserved namespaces against wildcard read grants therefore
-  holds on Windows only once `plugins.fs.requireLiteralLeadingDot = true`
-  lands (owner: the Desktop shell / Tauri configuration owner, co-landed with
-  the Saved-Chat test and this documentation). Until then Windows renderer
-  READ reach into reserved staging namespaces is wider; no mutation invariant
-  depends on it.
+- **D1 — Windows leading-dot condition (co-landed on the current T02
+  candidate).** Tauri's `fs` scope still defaults `requireLiteralLeadingDot`
+  to `true` on Unix and `false` on Windows. D1 is co-landed on the current
+  T02 candidate (with the Desktop shell / Tauri configuration owner and the
+  Saved-Chat test): `tauri.conf.json` explicitly sets
+  `plugins.fs.requireLiteralLeadingDot = true`, so the documented §R.1
+  protection of the `.h2o-*` reserved namespaces against wildcard read grants
+  no longer depends on the OS-specific default, and the committed Saved-Chat
+  test pins that value to the boolean `true`. Windows wildcard reach into the
+  reserved dot-leading Saved-Chat namespaces is therefore constrained
+  consistently with Unix by the explicit setting. The post-G1 absence of any
+  renderer archive mutation authority remains the PRIMARY protection; the
+  explicit leading-dot setting is defense in depth and reserved-namespace
+  protection. This is a candidate-branch fact, not a canonical Product-main
+  landing, and it is not a native Windows certification claim (§7).
 - **D3 / D5.** Sibling native modules (Sync / P02) carry ungated
   `libc::getentropy` calls, and the Windows Desktop build needs its icon and
   packaging pipeline; the whole crate is therefore not yet buildable on
