@@ -28,7 +28,18 @@ import { acquireLock, releaseLock } from "./lean-publisher.mjs";
 import { getExtensionId } from "../product/extensions/chatgpt/chrome/chrome-extension-keys.mjs";
 import {
   ARCHIVE_WORKBENCH_OUT_FILES,
+  ITEM9_BROWSER_ADAPTER_OUT_REL,
+  ITEM9_BROWSER_ADAPTER_OUT_FILES,
+  P02_CORE_OUT_REL,
+  P02_CORE_SOURCE_FILES,
+  P02_CHROME_ADAPTER_OUT_REL,
+  P02_CHROME_ADAPTER_SOURCE_FILES,
+  LOCAL_PUBLICATION_MODULE_MAPPINGS,
   compareArchiveWorkbenchToSource,
+  compareItem9BrowserAdaptersToSource,
+  compareP02CoreModulesToSource,
+  compareP02ChromeAdaptersToSource,
+  compareLocalPublicationModulesToSource,
   parseStudioHtmlScriptRefs,
 } from "../product/studio/pack-studio.mjs";
 // P3C-1a: the one explicit production import edge to the payload-transaction
@@ -209,7 +220,38 @@ export const ACTIVATION_ID_PATTERN = /^\d{8}T\d{9}Z-[a-f0-9]{12}$/u;
 // intervals. P2.1 publishes only a journal through a same-directory no-replace
 // hard link; no payload-tree rename or other promotion primitive exists here.
 
-const TEXT_OUTPUT_PATTERN = /\.(?:js|json|txt|html|css)$/iu;
+// ES modules (.mjs) are inspected as staged text too (M04-P2-R01).
+const TEXT_OUTPUT_PATTERN = /\.(?:js|mjs|json|txt|html|css)$/iu;
+// M04-P2-R01 (HDA decision E): the activator independently recomputes the
+// Studio supplemental inventory (Item 9 adapters, P02 core, P02 Chrome
+// adapters, local-publication adapters) from the same governed pack mappings,
+// in "/" artifact form, and byte-verifies every family against the
+// independently verified authorized source root.
+const STUDIO_SUPPLEMENTAL_FAMILIES = Object.freeze([
+  Object.freeze({
+    family: "item9-browser-adapters",
+    outputs: ITEM9_BROWSER_ADAPTER_OUT_FILES.map((name) => path.join(ITEM9_BROWSER_ADAPTER_OUT_REL, name)),
+    compare: compareItem9BrowserAdaptersToSource,
+  }),
+  Object.freeze({
+    family: "p02-core",
+    outputs: P02_CORE_SOURCE_FILES.map((name) => path.join(P02_CORE_OUT_REL, name)),
+    compare: compareP02CoreModulesToSource,
+  }),
+  Object.freeze({
+    family: "p02-chrome-adapters",
+    outputs: P02_CHROME_ADAPTER_SOURCE_FILES.map((name) => path.join(P02_CHROME_ADAPTER_OUT_REL, name)),
+    compare: compareP02ChromeAdaptersToSource,
+  }),
+  Object.freeze({
+    family: "local-publication-adapters",
+    outputs: LOCAL_PUBLICATION_MODULE_MAPPINGS.map(({ outRel }) => outRel),
+    compare: compareLocalPublicationModulesToSource,
+  }),
+]);
+const studioArtifactPath = (relative) => String(relative).split(path.sep).join("/");
+const studioSupplementalOutputFiles = () =>
+  STUDIO_SUPPLEMENTAL_FAMILIES.flatMap((entry) => entry.outputs.map(studioArtifactPath));
 const DESTINATION_OVERRIDE_NAMES = Object.freeze([
   "H2O_SRC_DIR",
   "H2O_ORDER_FILE",
@@ -830,7 +872,8 @@ function extensionIdFromManifestKey(value) {
 
 function verifyStudioRequiredOutputs(stage, receipt, source, manifest, authorizedSourceRoot = null) {
   const expectedFiles = [...STUDIO_LAUNCHER_SHELL_FILES,
-    ...ARCHIVE_WORKBENCH_OUT_FILES.map((name) => `surfaces/studio/${name}`)]
+    ...ARCHIVE_WORKBENCH_OUT_FILES.map((name) => `surfaces/studio/${name}`),
+    ...studioSupplementalOutputFiles()]
     .sort((left, right) => left.localeCompare(right, "en"));
   const prefix = path.relative(stage.stagingRoot, stage.outputPaths.extension).split(path.sep).join("/");
   const actualFiles = manifest.entries.map((entry) => {
@@ -867,6 +910,16 @@ function verifyStudioRequiredOutputs(stage, receipt, source, manifest, authorize
   const packed = compareArchiveWorkbenchToSource(authorizedSourceRoot?.real ?? source.repository,
     stage.outputPaths.extension);
   if (!packed.matches) fail("studio-stage-source-drift", "Packed Studio differs from the authorized source.");
+  for (const entry of STUDIO_SUPPLEMENTAL_FAMILIES) {
+    const compared = entry.compare(authorizedSourceRoot?.real ?? source.repository, stage.outputPaths.extension);
+    if (!compared.matches) {
+      fail("studio-stage-supplemental-drift", "Packed Studio Sync module family differs from the authorized source.", {
+        family: entry.family,
+        mismatches: compared.files.filter((item) => !item.sourceExists || !item.outExists || !item.equal)
+          .map((item) => studioArtifactPath(item.outRel ?? item.name)),
+      });
+    }
+  }
   const html = fs.readFileSync(path.join(stage.outputPaths.extension, "surfaces", "studio", "studio.html"), "utf8");
   const refs = parseStudioHtmlScriptRefs(html);
   const positions = STUDIO_REQUIRED_ORDER.map((name) => refs.indexOf(name));

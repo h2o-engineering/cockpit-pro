@@ -163,11 +163,13 @@ const BATCH11_VALIDATOR_SHA256 = "c8a1abd5c21a9328dc13a8bf19aba508ab476095d9e988
 // Stage B advanced the publisher again (markdown STUDIO_REQUIRED_ORDER), and
 // M03 P3 S3B T6 admitted the Renderer presentation profile, M03 P4 S4A T8
 // admitted the Renderer semantic index, and M03 P4 S4B T8 admitted the Renderer
-// decoration contribution lifecycle, and M04 P2 T3 admitted the H2O Clean
-// Reader presentation profile (one STUDIO_REQUIRED_ORDER entry, HDA decision
-// A / EXT-BUILD-LISTS; previous pin 7ed0065a...), so this moving pin follows the
-// new committed publisher bytes.
-const SYNCED_PUBLISHER_SHA256 = "ee993b9ed573ac28a637263c5aa3cb283b5afe1581115c7ac66e564f886ab9c3";
+// decoration contribution lifecycle, M04 P2 T3 admitted the H2O Clean Reader
+// presentation profile (one STUDIO_REQUIRED_ORDER entry, HDA decision A /
+// EXT-BUILD-LISTS; pin 7ed0065a... -> ee993b9e...), and M04-P2-R01 (HDA
+// decision E) taught the publisher the governed Sync-family inventory, its
+// source-byte verification and .mjs provenance inspection, so this moving pin
+// follows the new committed publisher bytes.
+const SYNCED_PUBLISHER_SHA256 = "efbc9854a95e6066f8362abc6e447de5376d6c0c7d8e4fe75488c498ab00351a";
 const ACCEPTED_ACTIVATOR_SHA256 = "531bb4e9b5d7d61584e013d0d10c8007c78f75498988ba64bac4d24a8d4f2f36";
 const REQUIRED_FILES = Object.freeze([
   "manifest.json", "loader.js", "bg.js", "title-contract-bridge.js",
