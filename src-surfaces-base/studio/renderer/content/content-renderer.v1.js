@@ -1,8 +1,8 @@
-// @version 1.1.0
+// @version 2.0.0
 "use strict";
 
 /*
- * Typed ContentRenderer registry (M03 P2 S2B T5).
+ * Typed ContentRenderer registry (M03 P2 S2B T5; governed registration M04 P1 T1).
  *
  * Renders accepted Render IR blocks into H2O-owned DOM nodes. Semantic content
  * NEVER becomes an HTML string here: every node is built with createElement /
@@ -21,9 +21,28 @@
  * author's characters, BEFORE any mark wrapper is applied). Reporting never
  * changes the DOM, adds no attribute or wrapper, and is not a public registry;
  * the caller owns whatever it collects for its own render.
+ *
+ * M04 P1 T1 (API 2.0.0): registration is governed. `register(kind, fn, meta)`
+ * still returns the kind string, but a registration must name an admitted
+ * Render IR block kind (the core kinds or the reserved extension kinds - the
+ * vocabulary is not expanded here), an extension registration must carry
+ * `meta.owner` (non-blank) and `meta.version` (semver), duplicates fail, and
+ * registration after `seal()` fails deterministically (`registry-sealed`).
+ * The core renderers install once below with Renderer-owned metadata; they
+ * could not be overridden before this version either (duplicates always
+ * failed) and still cannot. `describe(kind)` reports kind/owner/version/core
+ * and `describe()` the whole sorted registry; `seal()` is idempotent and
+ * `registryDigest()` is the deterministic evidence token formed at sealing
+ * from the unambiguously serialized sorted registry. There is no dispose,
+ * unregister, replacement or hot reload; the Renderer decides when the
+ * registry is sealed (its first render in the document), never this module.
  */
 (function installStudioContentRenderer(W) {
-  const API_VERSION = "1.1.0";
+  const API_VERSION = "2.0.0";
+  const SCHEMA = "h2o.renderer.content-renderer";
+  const SCHEMA_VERSION = 1;
+  const REGISTRY_ID = "content-renderer";
+  const CORE_OWNER = "L-STUDIO-RENDERER";
   const H2O = W.H2O = W.H2O || {};
   const Studio = H2O.Studio = H2O.Studio || {};
   const Renderer = Studio.Renderer = Studio.Renderer || {};
@@ -53,7 +72,22 @@
   const MARK_TAGS = Object.freeze({ strong: "strong", emphasis: "em", code: "code", strikethrough: "s" });
   const ALIGNMENTS = Object.freeze(["left", "center", "right"]);
 
+  /* The admitted Render IR block-kind vocabulary: exactly the core kinds and
+   * the reserved extension kinds. Nothing else can be registered. */
+  const ADMITTED_KINDS = Object.freeze([...CORE_KINDS, ...RESERVED_EXTENSION_KINDS]);
+  /* SemVer 2.0.0 items 2, 9 and 10: no leading zeroes in numeric identifiers,
+   * including numeric prerelease identifiers (M04-P1-R02). */
+  const SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*)?(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?$/;
+
+  /* kind -> { render, meta }; meta is frozen { kind, owner, version, core }. */
   const registry = new Map();
+  let sealedToken = null;
+
+  function failure(ErrorType, code, message) {
+    const error = new ErrorType(`contentRenderer: ${code}: ${message}`);
+    try { Object.defineProperty(error, "code", { value: code, enumerable: true }); } catch {}
+    return error;
+  }
 
   function asText(value) { return value === null || value === undefined ? "" : String(value); }
 
@@ -170,16 +204,75 @@
 
   /* --------------------------------------------------------------- registry */
 
-  function register(kind, renderer) {
+  /* Deterministic admission order: kind, sealed window, admitted vocabulary,
+   * duplicate, renderer function - then (extensions only) metadata. */
+  function precheck(kind, renderer) {
     if (typeof kind !== "string" || !kind) throw new TypeError("contentRenderer.register requires a kind");
-    if (typeof renderer !== "function") throw new TypeError(`contentRenderer.register requires a function for ${kind}`);
+    if (sealedToken !== null) {
+      throw failure(Error, "registry-sealed", `the content-renderer registry is sealed; registration of ${kind} is closed for this document`);
+    }
+    if (!ADMITTED_KINDS.includes(kind)) {
+      throw failure(TypeError, "unknown-kind", `${kind} is not an admitted Render IR block kind`);
+    }
     if (registry.has(kind)) throw new TypeError(`contentRenderer already has a renderer for kind: ${kind}`);
-    registry.set(kind, renderer);
+    if (typeof renderer !== "function") throw new TypeError(`contentRenderer.register requires a function for ${kind}`);
+  }
+
+  function admit(kind, renderer, meta) {
+    registry.set(kind, Object.freeze({ render: renderer, meta: Object.freeze(meta) }));
     return kind;
+  }
+
+  /* Core renderers: installed once below with Renderer-owned metadata. */
+  function registerCore(kind, renderer) {
+    precheck(kind, renderer);
+    return admit(kind, renderer, { kind, owner: CORE_OWNER, version: API_VERSION, core: true });
+  }
+
+  /* Public registration (extensions): owner/version metadata is mandatory. */
+  function register(kind, renderer, meta) {
+    precheck(kind, renderer);
+    const owner = meta && typeof meta.owner === "string" ? meta.owner.trim() : "";
+    const version = meta && typeof meta.version === "string" ? meta.version.trim() : "";
+    if (!owner) throw failure(TypeError, "invalid-metadata", `registration of ${kind} requires a non-blank meta.owner`);
+    if (!version || !SEMVER_PATTERN.test(version)) throw failure(TypeError, "invalid-metadata", `registration of ${kind} requires a semver meta.version`);
+    return admit(kind, renderer, { kind, owner, version, core: false });
   }
 
   function has(kind) { return registry.has(kind); }
   function registeredKinds() { return Object.freeze(Array.from(registry.keys()).sort()); }
+
+  function sortedEntries() {
+    return Array.from(registry.keys()).sort().map((kind) => registry.get(kind).meta);
+  }
+
+  /* describe(kind) -> frozen { kind, owner, version, core } or null;
+   * describe() -> frozen registry evidence (sorted; observational only). */
+  function describe(kind) {
+    if (kind === undefined) {
+      return Object.freeze({
+        schema: SCHEMA, schemaVersion: SCHEMA_VERSION, apiVersion: API_VERSION,
+        sealed: sealedToken !== null, registryDigest: sealedToken,
+        entries: Object.freeze(sortedEntries()),
+      });
+    }
+    const entry = typeof kind === "string" ? registry.get(kind) : undefined;
+    return entry ? entry.meta : null;
+  }
+
+  /* Deterministic evidence token: sorted kinds, unambiguously serialized. */
+  function evidenceToken() {
+    const entries = sortedEntries().map((meta) => ({ kind: meta.kind, owner: meta.owner, version: meta.version, core: meta.core }));
+    return JSON.stringify({ schema: SCHEMA, schemaVersion: SCHEMA_VERSION, registry: REGISTRY_ID, apiVersion: API_VERSION, entries });
+  }
+
+  function seal() {
+    if (sealedToken === null) sealedToken = evidenceToken();
+    return sealedToken;
+  }
+
+  function sealed() { return sealedToken !== null; }
+  function registryDigest() { return sealedToken; }
 
   /* Optional per-render projection reporting (S4A). The sink is an internal
    * seam supplied by the Chat Renderer for one render; `null` target means the
@@ -192,13 +285,13 @@
 
   function renderBlock(block, context) {
     if (!block || typeof block !== "object") throw new TypeError("contentRenderer.renderBlock requires a block object");
-    const renderer = registry.get(block.kind);
-    if (!renderer) throw new TypeError(`contentRenderer: no renderer registered for kind: ${block.kind || "<empty>"}`);
+    const entry = typeof block.kind === "string" ? registry.get(block.kind) : undefined;
+    if (!entry) throw new TypeError(`contentRenderer: no renderer registered for kind: ${block.kind || "<empty>"}`);
     const ctx = context || {};
     const sink = block.kind === "text" ? null : projectionSinkOf(ctx);
     const report = sink ? { projection: "block", block, target: null } : null;
     if (report) sink(report);
-    const node = renderer(block, ctx);
+    const node = entry.render(block, ctx);
     if (report) report.target = node;
     return node;
   }
@@ -213,7 +306,7 @@
 
   /* ---------------------------------------------------------- core renderers */
 
-  register("text", (block, context) => {
+  registerCore("text", (block, context) => {
     /* The Text node itself is the projection target; marks wrap around it and
      * never replace it, so no extra element is introduced for indexing. */
     const node = textNode(context, block.text);
@@ -222,19 +315,19 @@
     return applyMarks(node, block.marks, context);
   });
 
-  register("hardBreak", (block, context) => el(context, "br"));
-  register("thematicBreak", (block, context) => el(context, "hr"));
+  registerCore("hardBreak", (block, context) => el(context, "br"));
+  registerCore("thematicBreak", (block, context) => el(context, "hr"));
 
-  register("paragraph", (block, context) => appendInline(el(context, "p"), block.children, context));
+  registerCore("paragraph", (block, context) => appendInline(el(context, "p"), block.children, context));
 
-  register("heading", (block, context) => {
+  registerCore("heading", (block, context) => {
     const level = Number.isInteger(block.level) && block.level >= 1 && block.level <= 6 ? block.level : 1;
     return appendInline(el(context, `h${level}`), block.children, context);
   });
 
-  register("blockquote", (block, context) => appendBlocks(el(context, "blockquote"), block.blocks, context));
+  registerCore("blockquote", (block, context) => appendBlocks(el(context, "blockquote"), block.blocks, context));
 
-  register("list", (block, context) => {
+  registerCore("list", (block, context) => {
     const ordered = block.ordered === true;
     const list = el(context, ordered ? "ol" : "ul");
     /* Only surface an explicit start; the native default stays otherwise. */
@@ -244,7 +337,7 @@
     return list;
   });
 
-  register("listItem", (block, context) => {
+  registerCore("listItem", (block, context) => {
     const item = el(context, "li");
     /* Task state is descriptive, not an actionable control: a real text marker
      * keeps it accessible without creating a checkbox. */
@@ -258,7 +351,7 @@
     return appendBlocks(item, block.blocks, context);
   });
 
-  register("codeBlock", (block, context) => {
+  registerCore("codeBlock", (block, context) => {
     /* Wrapper, optional language badge, pre > code with the author's text; the
      * wrapper and badge presentation classes come from the active profile. */
     const profile = resolvePresentationProfile(context);
@@ -279,7 +372,7 @@
     return wrap;
   });
 
-  register("tableCell", (block, context) => {
+  registerCore("tableCell", (block, context) => {
     const cell = el(context, block.header === true ? "th" : "td");
     if (block.header === true) cell.setAttribute("scope", "col");
     const align = ALIGNMENTS.indexOf(block.align) === -1 ? null : block.align;
@@ -287,7 +380,7 @@
     return appendBlocks(cell, block.blocks, context);
   });
 
-  register("tableRow", (block, context) => {
+  registerCore("tableRow", (block, context) => {
     const row = el(context, "tr");
     const cells = Array.isArray(block.cells) ? block.cells : [];
     for (let i = 0; i < cells.length; i += 1) {
@@ -301,7 +394,7 @@
     return row;
   });
 
-  register("table", (block, context) => {
+  registerCore("table", (block, context) => {
     const table = el(context, "table");
     const rows = Array.isArray(block.rows) ? block.rows : [];
     let head = null;
@@ -319,7 +412,7 @@
     return table;
   });
 
-  register("image", (block, context) => {
+  registerCore("image", (block, context) => {
     const decision = classify(context, block.src, "image");
     if (decision.ok === true) {
       const img = el(context, "img");
@@ -337,7 +430,7 @@
     return denied;
   });
 
-  register("file", (block, context) => {
+  registerCore("file", (block, context) => {
     /* Smallest representation the current IR payload supports: an admitted
      * destination becomes a link, anything else stays as its label text. */
     const label = asText(block.name || block.alt || block.text || block.href || block.src);
@@ -427,7 +520,7 @@
     return host;
   }
 
-  register("opaqueProviderBlock", (block, context) => {
+  registerCore("opaqueProviderBlock", (block, context) => {
     if (block.opaqueKind === OPAQUE_OWNER_SANITIZED_HTML) return renderOwnerSanitizedHtml(block, context);
     if (block.opaqueKind === OPAQUE_UNSUPPORTED_OWNER_CONTENT) return renderUnsupportedOwnerContent(block, context);
     throw new TypeError(`contentRenderer: unsupported opaqueProviderBlock subtype: ${block.opaqueKind || "<empty>"}`);
@@ -436,12 +529,19 @@
   Renderer.contentRenderer = Object.freeze({
     __installed: true,
     __version: API_VERSION,
+    schema: SCHEMA,
+    schemaVersion: SCHEMA_VERSION,
     coreKinds: CORE_KINDS,
     extensionKinds: RESERVED_EXTENSION_KINDS,
+    admittedKinds: ADMITTED_KINDS,
     opaqueKinds: Object.freeze([OPAQUE_OWNER_SANITIZED_HTML, OPAQUE_UNSUPPORTED_OWNER_CONTENT]),
     register,
     has,
     registeredKinds,
+    describe,
+    seal,
+    sealed,
+    registryDigest,
     renderBlock,
     renderBlocks,
   });

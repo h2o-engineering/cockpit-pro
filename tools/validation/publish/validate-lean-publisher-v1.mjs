@@ -696,11 +696,29 @@ async function runRuntimeScenarios() {
     assert.match(receipt.generationId, /^[a-f0-9]{64}$/u);
     assert.equal(receipt.validatorResult.extension.exactFileSet, true);
     assert.equal(receipt.validatorResult.extension.extensionId, receipt.expectedExtensionId);
+    // Independent, explicit expectation of the publisher's STUDIO_REQUIRED_ORDER
+    // (never derived from the list under test). M04 P2 T3 (HDA decision A /
+    // EXT-BUILD-LISTS): the previous 7-entry literal predated the accepted M03
+    // chain and omitted its ten entries (markdown, semantic, decoration,
+    // presentation profile, content renderer); it is restored here and the
+    // H2O Clean Reader profile is inserted at its Runtime-approved position
+    // (after presentation-profile, before content-renderer) - 18 entries.
     assert.deepEqual(receipt.validatorResult.extension.requiredLoadOrder,
       ["platform/selectors.contract.js", "platform/html-sanitizer.js",
         "renderer/safety/sanitizer-policy.v1.js",
         "renderer/safety/vendor/dompurify/purify.js",
         "renderer/safety/html-sanitizer.v2.js",
+        "renderer/markdown/vendor/markdown-it/markdown-it.umd.min.js",
+        "renderer/markdown/h2o-gfm.v1.js",
+        "renderer/markdown/markdown-engine.v1.js",
+        "renderer/markdown/markdown-ir-adapter.v1.js",
+        "renderer/semantic/render-ir.v1.js",
+        "renderer/semantic/semantic-ingress.v1.js",
+        "renderer/semantic/semantic-index.v1.js",
+        "renderer/decoration/decoration-contribution.v1.js",
+        "renderer/presentation/presentation-profile.v1.js",
+        "renderer/presentation/h2o-clean-reader.v1.js",
+        "renderer/content/content-renderer.v1.js",
         "renderer/chat-renderer.studio.js", "studio.js"]);
     assert.equal(fs.existsSync(path.join(receipt.outputPaths.extension,
       "surfaces", "studio", "renderer", "chat-renderer.studio.js")), true);

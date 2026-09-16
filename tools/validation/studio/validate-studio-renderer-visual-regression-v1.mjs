@@ -17,6 +17,18 @@
 // rewritten only with the explicit switch --update-baselines (or
 // H2O_RENDERER_VISUAL_UPDATE=1), which prints every file it writes.
 //
+// M04 P2 T4 — profile dimension. The same fixture page is captured a second
+// time with the H2O Clean Reader profile selected explicitly
+// (presentationProfile "h2o-clean-reader") for the same four cells, compared
+// against its own committed baselines in
+// tools/validation/studio/baselines/m04-p2-v1/ (manifest + PNGs). Both matrices
+// run on the PRODUCTION chain and stylesheets (studio.html: Clean Reader module
+// and stylesheet included), so the untouched m03-s5a-v1 comparison is the
+// proof that the admitted profile changes nothing about the default output.
+// The m04 baselines are written only by --update-m04-baselines (or
+// H2O_RENDERER_VISUAL_UPDATE_M04=1); --update-baselines never touches them and
+// the m04 switch never touches m03-s5a-v1.
+//
 // Verdicts: PASS | VISUAL_REGRESSION | STRUCTURAL_SEMANTIC_DELTA |
 //           BASELINE_ENVIRONMENT_MISMATCH | HARNESS_FAILURE | BLOCKED
 // Exit codes: 0 PASS (or a completed baseline update), 1 regression/failure,
@@ -38,6 +50,12 @@ const PACK_STUDIO_REL = 'tools/product/studio/pack-studio.mjs';
 const BASELINE_REL = 'tools/validation/studio/baselines/m03-s5a-v1';
 const BASELINE_DIR = path.join(REPO_ROOT, BASELINE_REL);
 const MANIFEST_PATH = path.join(BASELINE_DIR, 'manifest.json');
+/* M04 P2 T4: the Clean Reader profile matrix (own namespace; m03 stays read-only). */
+const M04_BASELINE_REL = 'tools/validation/studio/baselines/m04-p2-v1';
+const M04_BASELINE_DIR = path.join(REPO_ROOT, M04_BASELINE_REL);
+const M04_MANIFEST_PATH = path.join(M04_BASELINE_DIR, 'manifest.json');
+const M04_MATRIX_VERSION = 'm04-p2-v1';
+const CLEAN_READER_PROFILE = 'h2o-clean-reader';
 const ARTIFACT_DIR = path.join(REPO_ROOT, 'artifacts/renderer-visual-regression');
 
 const SCHEMA = 'h2o.renderer.visual-regression-baseline';
@@ -50,6 +68,8 @@ const PRODUCT_BASELINE_COMMIT = '5438e34a2b392816d8679066e1cfe98bc7279636';
 
 const UPDATE_MODE = process.argv.includes('--update-baselines')
   || /^(1|true|yes)$/i.test(String(process.env.H2O_RENDERER_VISUAL_UPDATE || ''));
+const UPDATE_M04_MODE = process.argv.includes('--update-m04-baselines')
+  || /^(1|true|yes)$/i.test(String(process.env.H2O_RENDERER_VISUAL_UPDATE_M04 || ''));
 
 /* ----------------------------------------------------------------- matrix -- */
 
@@ -75,7 +95,10 @@ const CONTEXT_PINS = Object.freeze({
 });
 const MAX_FIT_PASSES = 4;
 
-/* The accepted Renderer chain in production order (studio.html / pack lists). */
+/* The accepted Renderer chain in production order (studio.html / pack lists).
+ * M04 P2 T4: the H2O Clean Reader profile module is part of the production
+ * chain (M04 T3 admission), so both matrices load it; the default matrix
+ * proves it changes nothing. */
 const RENDERER_CHAIN = Object.freeze([
   'platform/selectors.contract.js',
   'platform/html-sanitizer.js',
@@ -91,12 +114,14 @@ const RENDERER_CHAIN = Object.freeze([
   'renderer/semantic/semantic-index.v1.js',
   'renderer/decoration/decoration-contribution.v1.js',
   'renderer/presentation/presentation-profile.v1.js',
+  'renderer/presentation/h2o-clean-reader.v1.js',
   'renderer/content/content-renderer.v1.js',
   'renderer/chat-renderer.studio.js',
 ]);
 const STYLESHEETS = Object.freeze([
   'studio.css',
   'renderer/presentation/chatgpt-reference.v1.css',
+  'renderer/presentation/h2o-clean-reader.v1.css',
 ]);
 
 /* Capture-only normalization: motion and caret are the only nondeterministic
@@ -277,14 +302,17 @@ function fixtureHtml(theme) {
  * mount them into the Reader host, and return the companion fingerprint inputs
  * plus the programmatic coverage facts. Nothing here re-implements Renderer
  * logic; it only calls the public Renderer API and reads the resulting DOM. */
-function RENDER_IN_PAGE(inputs) {
+function RENDER_IN_PAGE([inputs, profile]) {
   const cr = globalThis.H2O && globalThis.H2O.Studio && globalThis.H2O.Studio.chatRenderer;
   if (!cr || typeof cr.render !== 'function') throw new Error('H2O.Studio.chatRenderer is not installed');
   const results = [];
   for (const [label, input] of inputs) {
     const host = document.querySelector(`[data-h2o-visual-cell="${label}"] > .wbReader`);
     if (!host) throw new Error(`no Reader host for ${label}`);
-    const r = cr.render(JSON.parse(JSON.stringify(input)), { getEditOverride: () => null });
+    /* M04 P2 T4: the default matrix passes no profile (production default path);
+     * the profile matrix selects the Clean Reader explicitly. */
+    const options = profile ? { getEditOverride: () => null, presentationProfile: profile } : { getEditOverride: () => null };
+    const r = cr.render(JSON.parse(JSON.stringify(input)), options);
     host.appendChild(r.root);
     const ix = r.semanticIndex;
     const roles = { user: 0, assistant: 0, system: 0, tool: 0 };
@@ -300,6 +328,8 @@ function RENDER_IN_PAGE(inputs) {
       contributions: r.decorationContributions.list().length,
       outerHTML: r.root.outerHTML,
       textContent: r.root.textContent,
+      /* M04 P2 T4: presentation facts (not part of the m03 fingerprint). */
+      presentation: { effectiveId: r.presentation.effectiveId, reason: r.presentation.reason, marker: r.root.getAttribute('data-h2o-presentation-profile'), cleanHooks: q('.h2oCleanCode, .h2oCleanCodeLang'), referenceHooks: q('.wbTurn, .wbCodeBlock, .cgMsg--user, .cgMsg--assistant, .user-message-bubble-color'), sealed: typeof r.presentation.registryDigest === 'string' },
       coverage: {
         roleUser: q('.cgMsg[data-message-author-role="user"]'), roleAssistant: q('.cgMsg[data-message-author-role="assistant"]'), roleSystem: q('.cgMsg[data-message-author-role="system"]'), roleTool: q('.cgMsg[data-message-author-role="tool"]'),
         heading: q('h1, h2, h3'), paragraph: q('p'), strong: q('strong, b'), emphasis: q('em, i'), inlineCode: q(':not(pre) > code'), nestedList: q('ul li ul, ol li ul, ul li ol'), orderedList: q('ol'), blockquote: q('blockquote'),
@@ -327,7 +357,7 @@ async function SETTLE_IN_PAGE() {
   return { scrollHeight: Math.ceil(main.scrollHeight), clientHeight: main.clientHeight, imageCount: images.length, imagesComplete: images.every((img) => img.complete && img.naturalWidth > 0) };
 }
 
-async function captureCell({ chromium, executable, studioDir, cell, negativeControlCss = null }) {
+async function captureCell({ chromium, executable, studioDir, cell, negativeControlCss = null, profile = null }) {
   const viewport = VIEWPORTS[cell.viewport];
   const theme = THEMES[cell.theme];
   const blockedRequests = [];
@@ -355,7 +385,7 @@ async function captureCell({ chromium, executable, studioDir, cell, negativeCont
     for (const rel of STYLESHEETS) await page.addStyleTag({ path: path.join(studioDir, rel) });
     await page.addStyleTag({ content: CAPTURE_NORMALIZATION_CSS });
     for (const rel of RENDERER_CHAIN) await page.addScriptTag({ path: path.join(studioDir, rel) });
-    const rendered = await page.evaluate(RENDER_IN_PAGE, [['canonical', CANONICAL_INPUT], ['rich', RICH_INPUT]]);
+    const rendered = await page.evaluate(RENDER_IN_PAGE, [[['canonical', CANONICAL_INPUT], ['rich', RICH_INPUT]], profile]);
     /* Fit the viewport height to the full fixture extent (iterate until stable). */
     let settle = await page.evaluate(SETTLE_IN_PAGE);
     let height = viewport.baseHeight;
@@ -451,6 +481,7 @@ function writeArtifact(name, bytes) {
 
 async function main() {
   console.log(`BASELINE_UPDATE_MODE: ${UPDATE_MODE ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`M04_BASELINE_UPDATE_MODE: ${UPDATE_M04_MODE ? 'ENABLED' : 'DISABLED'}`);
   const pw = await resolvePlaywright();
   if (!pw || !pw.chromium) {
     console.log('BLOCKED: Playwright is unavailable (set H2O_PLAYWRIGHT_MODULE or NODE_PATH to a runtime carrying the playwright package). jsdom is not a substitute for this real-browser matrix.');
@@ -467,13 +498,14 @@ async function main() {
   const refs = [...html.matchAll(/<script src="\.\/([^"?]+)(?:\?[^"]*)?"><\/script>/g)].map((m) => m[1]);
   const chainInHtml = refs.filter((r) => RENDERER_CHAIN.includes(r));
   check('harness Renderer chain equals the production script order (studio.html)', JSON.stringify(chainInHtml) === JSON.stringify([...RENDERER_CHAIN]), JSON.stringify(chainInHtml));
-  check('harness stylesheets are the production stylesheets (studio.css + reference profile)', html.includes('href="./studio.css?') && html.includes('href="./renderer/presentation/chatgpt-reference.v1.css?'));
+  /* M04 P2 T4: the production stylesheet set now includes the Clean Reader stylesheet (was studio.css + reference profile only). */
+  check('harness stylesheets are the production stylesheets (studio.css + reference profile + Clean Reader profile)', html.includes('href="./studio.css?') && html.includes('href="./renderer/presentation/chatgpt-reference.v1.css?') && html.includes('href="./renderer/presentation/h2o-clean-reader.v1.css"'));
 
   /* Packed carrier: a disposable pack-studio out directory (never a live path). */
   const packer = await import(pathToFileURL(path.join(REPO_ROOT, PACK_STUDIO_REL)).href);
   const tempOut = fs.mkdtempSync(path.join(os.tmpdir(), 'h2o-renderer-visual-'));
   let packedStudioDir = null;
-  const summary = { matrixVersion: MATRIX_VERSION, cells: {}, captures: { source: 0, packed: 0, negativeControl: 0 } };
+  const summary = { matrixVersion: MATRIX_VERSION, cells: {}, captures: { source: 0, packed: 0, negativeControl: 0 }, m04: { matrixVersion: M04_MATRIX_VERSION, profile: CLEAN_READER_PROFILE, cells: {}, captures: { source: 0, packed: 0 } } };
   const comparer = await openComparer(pw.chromium, executable);
   let manifest = null;
   let environment = null;
@@ -528,6 +560,8 @@ async function main() {
       c.heading >= 1 && c.paragraph >= 4 && c.strong >= 2 && c.emphasis >= 1 && c.inlineCode >= 2 && c.nestedList >= 2 && c.orderedList >= 2 && c.blockquote >= 1 && c.thematicBreak >= 1 && c.codeBlock >= 1 && c.table >= 1 && c.link >= 1 && c.image >= 2 && c.attachmentImage === 1 && c.taskItem >= 2 && c.unicode === 1, JSON.stringify(c));
     check('coverage: render modes — canonical/semantic (Render IR) and rich replay', canonical.renderMode === 'canonical' && canonical.index.blocks > 0 && canonical.index.texts > 0 && rich.renderMode === 'rich' && rich.coverage.userBubble >= 2 && rich.coverage.heading >= 1 && rich.coverage.table >= 1 && rich.coverage.blockquote >= 1 && rich.coverage.codeBlock >= 1, JSON.stringify({ canonical: { mode: canonical.renderMode, index: canonical.index }, rich: { mode: rich.renderMode, coverage: rich.coverage } }));
     check('coverage: no decoration consumer is loaded — zero contributions, Renderer output only', canonical.contributions === 0 && rich.contributions === 0);
+    /* M04 P2 T4: with the Clean Reader module admitted, the default path still resolves the reference profile and emits no Clean Reader hook. */
+    check('coverage: default matrix renders the reference profile (reason default, no Clean Reader hook) on the production chain', canonical.presentation.effectiveId === REFERENCE_PROFILE && canonical.presentation.reason === 'default' && canonical.presentation.cleanHooks === 0 && rich.presentation.effectiveId === REFERENCE_PROFILE && rich.presentation.cleanHooks === 0 && rich.coverage.userBubble >= 2, JSON.stringify({ canonical: canonical.presentation, rich: rich.presentation }));
     check('coverage: viewports wide (1280) + narrow (480); themes dark + light', CELLS.length === 4 && VIEWPORTS.wide.width === 1280 && VIEWPORTS.narrow.width === 480 && Object.keys(THEMES).join(',') === 'dark,light');
 
     /* PACKED: 4 cells × 1, compared to the source raster of the same cell. */
@@ -612,6 +646,95 @@ async function main() {
     check(`negative visual control (${CELLS[0].id}, injected outline): DIFFERING_PIXELS=${summary.negativeControlDifferingPixels} > 0`, controlCmp.sameDimensions && controlCmp.differingPixels > 0, JSON.stringify(controlCmp));
     check('negative control never touched Product bytes or committed baselines', fs.readFileSync(path.join(STUDIO_DIR, 'studio.css')).length > 0 && (UPDATE_MODE || sha256(fs.readFileSync(path.join(BASELINE_DIR, `${CELLS[0].id}.png`))) === manifest.images[CELLS[0].id].sha256));
 
+    /* ── M04 P2 T4: profile matrix (h2o-clean-reader) ─────────────────────── */
+    const m04 = summary.m04;
+    let m04Manifest = null;
+    const m04Source = {}; const m04Packed = {};
+    if (!UPDATE_M04_MODE) {
+      if (!fs.existsSync(M04_MANIFEST_PATH)) {
+        check('committed m04-p2-v1 baseline manifest exists', false, `${path.relative(REPO_ROOT, M04_MANIFEST_PATH)} missing (run with --update-m04-baselines to create it)`);
+        visualDelta = true;
+      } else {
+        m04Manifest = JSON.parse(fs.readFileSync(M04_MANIFEST_PATH, 'utf8'));
+        check('committed m04-p2-v1 baseline manifest schema', m04Manifest.schema === SCHEMA && m04Manifest.schemaVersion === SCHEMA_VERSION && m04Manifest.matrixVersion === M04_MATRIX_VERSION && m04Manifest.profile === CLEAN_READER_PROFILE, JSON.stringify({ schema: m04Manifest.schema, matrixVersion: m04Manifest.matrixVersion, profile: m04Manifest.profile }));
+      }
+    }
+    for (const cell of CELLS) {
+      const first = await captureCell({ chromium: pw.chromium, executable, studioDir: STUDIO_DIR, cell, profile: CLEAN_READER_PROFILE });
+      const second = await captureCell({ chromium: pw.chromium, executable, studioDir: STUDIO_DIR, cell, profile: CLEAN_READER_PROFILE });
+      m04.captures.source += 2;
+      m04Source[cell.id] = first;
+      check(`m04 ${cell.id}: no page errors and no network requests (Clean Reader, both repeats)`, first.pageErrors.length === 0 && second.pageErrors.length === 0 && first.blockedRequests.length === 0 && second.blockedRequests.length === 0, JSON.stringify({ errors: [...first.pageErrors, ...second.pageErrors], requests: [...first.blockedRequests, ...second.blockedRequests] }));
+      check(`m04 ${cell.id}: viewport fitted to the whole fixture`, first.settle.scrollHeight <= first.settle.clientHeight && second.settle.scrollHeight <= second.settle.clientHeight && first.settle.imagesComplete, JSON.stringify([first.settle, second.settle]));
+      const repeat = await comparer.compare(first.png, second.png, false);
+      check(`m04 ${cell.id}: Clean Reader repeat determinism — identical dimensions and RGBA (${repeat.a.width}×${repeat.a.height})`, repeat.sameDimensions && repeat.differingPixels === 0, JSON.stringify(repeat));
+      const fpA = fingerprintOf(first.rendered); const fpB = fingerprintOf(second.rendered);
+      check(`m04 ${cell.id}: companion fingerprints deterministic across repeats`, JSON.stringify(fpA) === JSON.stringify(fpB));
+      /* The profile cell differs from the default cell visually but not semantically. */
+      const defaultFp = summary.cells[cell.id].fingerprint;
+      const semanticSame = fpA.every((f, i) => f.renderMode === defaultFp[i].renderMode && f.messageCount === defaultFp[i].messageCount && JSON.stringify(f.roles) === JSON.stringify(defaultFp[i].roles) && JSON.stringify(f.index) === JSON.stringify(defaultFp[i].index) && f.textContentSha256 === defaultFp[i].textContentSha256);
+      const versusDefault = await comparer.compare(sourceCaptures[cell.id].png, first.png, false);
+      check(`m04 ${cell.id}: same text / index / roles as the default cell, different presentation (outerHTML classes) and a visibly different raster (${versusDefault.sameDimensions ? versusDefault.differingPixels : 'dimensions differ'} px)`, semanticSame && fpA.every((f, i) => f.outerHtmlSha256 !== defaultFp[i].outerHtmlSha256) && (!versusDefault.sameDimensions || versusDefault.differingPixels > 0), JSON.stringify({ semanticSame, versusDefault }));
+      const pc = first.rendered.find((r) => r.label === 'canonical').presentation; const pr = first.rendered.find((r) => r.label === 'rich').presentation;
+      check(`m04 ${cell.id}: both examples render under h2o-clean-reader (explicit, marker on the root, Clean Reader hooks present, no reference hook)`, pc.effectiveId === CLEAN_READER_PROFILE && pc.reason === 'explicit' && pc.marker === CLEAN_READER_PROFILE && pc.cleanHooks >= 1 && pc.referenceHooks === 0 && pc.sealed && pr.effectiveId === CLEAN_READER_PROFILE && pr.marker === CLEAN_READER_PROFILE && pr.referenceHooks === 0 && first.rendered.find((r) => r.label === 'rich').renderMode === 'rich', JSON.stringify({ canonical: pc, rich: pr }));
+      m04.cells[cell.id] = { width: repeat.a.width, height: repeat.a.height, repeatDifferingPixels: repeat.differingPixels, versusDefaultDifferingPixels: versusDefault.sameDimensions ? versusDefault.differingPixels : -1, fingerprint: fpA };
+      const packed = await captureCell({ chromium: pw.chromium, executable, studioDir: packedStudioDir, cell, profile: CLEAN_READER_PROFILE });
+      m04.captures.packed += 1;
+      m04Packed[cell.id] = packed;
+      const parity = await comparer.compare(first.png, packed.png, false);
+      check(`m04 ${cell.id}: SOURCE vs PACKED carrier raster parity`, packed.pageErrors.length === 0 && packed.blockedRequests.length === 0 && parity.sameDimensions && parity.differingPixels === 0, JSON.stringify({ parity, errors: packed.pageErrors }));
+      m04.cells[cell.id].packedDifferingPixels = parity.differingPixels;
+    }
+    if (UPDATE_M04_MODE) {
+      fs.mkdirSync(M04_BASELINE_DIR, { recursive: true });
+      const images = {};
+      for (const cell of CELLS) {
+        const target = path.join(M04_BASELINE_DIR, `${cell.id}.png`);
+        fs.writeFileSync(target, m04Source[cell.id].png);
+        console.log(`M04_BASELINE_WRITTEN: ${path.relative(REPO_ROOT, target)}`);
+        images[cell.id] = { file: `${cell.id}.png`, width: m04.cells[cell.id].width, height: m04.cells[cell.id].height, sha256: sha256(m04Source[cell.id].png), fingerprint: m04.cells[cell.id].fingerprint };
+      }
+      m04Manifest = {
+        schema: SCHEMA, schemaVersion: SCHEMA_VERSION, matrixVersion: M04_MATRIX_VERSION, fixtureVersion: FIXTURE_VERSION,
+        profile: CLEAN_READER_PROFILE, defaultMatrixVersion: MATRIX_VERSION,
+        viewports: VIEWPORTS, themes: THEMES, context: CONTEXT_PINS, cells: CELLS.map((cell) => cell.id),
+        environment, images,
+      };
+      fs.writeFileSync(M04_MANIFEST_PATH, `${JSON.stringify(m04Manifest, null, 2)}\n`);
+      console.log(`M04_BASELINE_WRITTEN: ${path.relative(REPO_ROOT, M04_MANIFEST_PATH)}`);
+    }
+    if (m04Manifest) {
+      for (const cell of CELLS) {
+        const baselinePath = path.join(M04_BASELINE_DIR, `${cell.id}.png`);
+        const entry = m04Manifest.images && m04Manifest.images[cell.id];
+        if (!entry || !fs.existsSync(baselinePath)) { check(`m04 ${cell.id}: committed baseline PNG present`, false, `${path.relative(REPO_ROOT, baselinePath)} missing`); visualDelta = true; continue; }
+        const baselinePng = fs.readFileSync(baselinePath);
+        check(`m04 ${cell.id}: committed baseline PNG bytes match the manifest SHA-256`, sha256(baselinePng) === entry.sha256, `manifest ${entry.sha256} vs file ${sha256(baselinePng)}`);
+        const cmp = await comparer.compare(baselinePng, m04Source[cell.id].png, true);
+        const fingerprintSame = JSON.stringify(entry.fingerprint) === JSON.stringify(m04.cells[cell.id].fingerprint);
+        m04.cells[cell.id].baselineDifferingPixels = cmp.sameDimensions ? cmp.differingPixels : -1;
+        m04.cells[cell.id].fingerprintMatchesBaseline = fingerprintSame;
+        const pixelOk = cmp.sameDimensions && cmp.differingPixels === 0;
+        if (envMismatch.length) {
+          console.log(`m04 ${cell.id}: informational (environment mismatch) DIFFERING_PIXELS=${cmp.sameDimensions ? cmp.differingPixels : 'dimensions differ'} fingerprint=${fingerprintSame ? 'same' : 'DIFFERENT'}`);
+        } else {
+          check(`m04 ${cell.id}: Clean Reader SOURCE vs committed m04-p2-v1 baseline — same dimensions, DIFFERING_PIXELS=${cmp.sameDimensions ? cmp.differingPixels : 'n/a'}`, pixelOk, JSON.stringify({ a: cmp.a, b: cmp.b, differingPixels: cmp.differingPixels }));
+          check(`m04 ${cell.id}: companion fingerprint matches the m04 manifest`, fingerprintSame, JSON.stringify({ expected: entry.fingerprint, actual: m04.cells[cell.id].fingerprint }));
+        }
+        if (!pixelOk) visualDelta = true;
+        if (!fingerprintSame) structuralDelta = true;
+        if (!pixelOk || !fingerprintSame) {
+          const files = [writeArtifact(`m04-${cell.id}-candidate.png`, m04Source[cell.id].png)];
+          if (cmp.diffPng) files.push(writeArtifact(`m04-${cell.id}-diff.png`, Buffer.from(cmp.diffPng, 'base64')));
+          console.log(`FAILURE_ARTIFACTS: ${files.join(', ')}`);
+        }
+        const packedCmp = await comparer.compare(baselinePng, m04Packed[cell.id].png, false);
+        m04.cells[cell.id].packedBaselineDifferingPixels = packedCmp.sameDimensions ? packedCmp.differingPixels : -1;
+        if (!envMismatch.length) check(`m04 ${cell.id}: PACKED vs committed m04 baseline — DIFFERING_PIXELS=${packedCmp.sameDimensions ? packedCmp.differingPixels : 'n/a'}`, packedCmp.sameDimensions && packedCmp.differingPixels === 0);
+      }
+    }
+    check('m04 update mode never rewrote the m03-s5a-v1 baselines', UPDATE_MODE || sha256(fs.readFileSync(path.join(BASELINE_DIR, `${CELLS[0].id}.png`))) === manifest.images[CELLS[0].id].sha256);
+
     if (envMismatch.length) { verdict = 'BASELINE_ENVIRONMENT_MISMATCH'; exitCode = 3; }
     else if (failures) { verdict = structuralDelta ? 'STRUCTURAL_SEMANTIC_DELTA' : (visualDelta ? 'VISUAL_REGRESSION' : 'HARNESS_FAILURE'); exitCode = 1; }
   } finally {
@@ -620,6 +743,7 @@ async function main() {
   }
   summary.baselineDir = BASELINE_REL;
   summary.productBaselineCommit = manifest ? manifest.productBaselineCommit : null;
+  summary.m04.baselineDir = M04_BASELINE_REL;
   finish(verdict, summary, exitCode);
 }
 

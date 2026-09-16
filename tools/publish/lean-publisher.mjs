@@ -110,6 +110,7 @@ const STUDIO_REQUIRED_ORDER = Object.freeze([
   "renderer/semantic/semantic-index.v1.js",
   "renderer/decoration/decoration-contribution.v1.js",
   "renderer/presentation/presentation-profile.v1.js",
+  "renderer/presentation/h2o-clean-reader.v1.js",
   "renderer/content/content-renderer.v1.js",
   "renderer/chat-renderer.studio.js",
   "studio.js",

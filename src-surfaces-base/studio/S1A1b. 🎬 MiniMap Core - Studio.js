@@ -3800,6 +3800,7 @@ function UM_PUBLIC() {
   }
 
   function buildCanonicalTurnCollection(rows, { requireAnswer = false } = {}) {
+    const rt = getTurnRuntimeApi();
     const src = Array.isArray(rows) ? rows : [];
     if (!src.length) return null;
 

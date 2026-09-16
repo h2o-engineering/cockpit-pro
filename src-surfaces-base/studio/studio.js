@@ -149,6 +149,9 @@ const state = {
   currentReaderEditOverrides: null,
   /* S4C: the currently mounted Reader render's { root, semanticIndex, decorationContributions } (read-only bridge; disposed + cleared on unmount). */
   currentReaderRender: null,
+  currentReaderNavigationTarget: null,
+  /* M04 P2 T4: the one application-lifetime Appearance subscription that refreshes an open Reader when the presentation preference changes (unsubscribe handle only; never DOM). */
+  readerPresentationUnsubscribe: null,
   titleStateByChat: {},
   interfaceMetaByChat: {},
 };
@@ -235,6 +238,12 @@ let activeRailPopoverButton = null;
   // See getReaderSemanticIndex / getReaderDecorationContributions.
   H2O.Studio.getReaderSemanticIndex = getReaderSemanticIndex;
   H2O.Studio.getReaderDecorationContributions = getReaderDecorationContributions;
+  H2O.Studio.readerNavigation = Object.freeze({
+    goTo: goToReaderTarget,
+    next: nextReaderTarget,
+    previous: previousReaderTarget,
+    targetForElement: getReaderNavigationTarget,
+  });
 })();
 
 function esc(s){
@@ -338,6 +347,7 @@ function studioHostUnmount(reason = "studio:unmount") {
    * forgotten; a cleanup error is diagnosed and never blocks the teardown. */
   disposeReaderRenderDecorations(reason);
   state.currentReaderRender = null;
+  state.currentReaderNavigationTarget = null;
   try { W.H2O?.studioHost?.unmount?.(reason); } catch {}
 }
 
@@ -355,14 +365,20 @@ function studioHostUnmount(reason = "studio:unmount") {
  * discarded; the lifecycle itself stays Renderer-owned. Nothing else of the
  * render result (navigation, scrolling, Reader internals) is exposed. */
 function bindReaderSemanticIndex(rendererResult){
+  state.currentReaderNavigationTarget = null;
   const root = rendererResult?.root;
   const semanticIndex = rendererResult?.semanticIndex;
   const decorationContributions = rendererResult?.decorationContributions;
+  const presentation = rendererResult?.presentation;
   state.currentReaderRender = root && semanticIndex && typeof semanticIndex === "object"
     ? Object.freeze({
       root,
       semanticIndex,
       decorationContributions: decorationContributions && typeof decorationContributions === "object" ? decorationContributions : null,
+      /* M04 P2 T4: the render's frozen presentation descriptor (effective
+       * profile id, profile version, sealed registry token) - the mounted
+       * configuration the reuse decision compares against. */
+      presentation: presentation && typeof presentation === "object" ? presentation : null,
     })
     : null;
 }
@@ -373,6 +389,109 @@ function getReaderSemanticIndex(root){
   if (root !== undefined && root !== current.root) return null;
   return current.semanticIndex;
 }
+
+/* M01: navigation targets are turn projection keys scoped to one current
+ * render. The Renderer index remains the only transcript/identity authority. */
+function resolveReaderNavigationTarget(target){
+  const root = target?.currentRendererRoot;
+  if (!root || !isCurrentReaderRoot(root, state.currentReaderSnapshot)) return null;
+  const index = getReaderSemanticIndex(root);
+  const turn = index?.getTurn(target.projectionKey);
+  if (!turn?.target?.isConnected || !root.contains(turn.target)) return null;
+  const message = index.getMessage(turn.messageKey);
+  if (!message?.target?.isConnected || !root.contains(message.target) || message.turnKey !== turn.projectionKey) return null;
+  return { root, index, turn };
+}
+
+function getReaderNavigationTarget(element){
+  const root = state.currentReaderRender?.root;
+  if (!element?.isConnected || !root || !root.contains(element)) return null;
+  const turn = getReaderSemanticIndex(root)?.turns().find(record => record.target === element || record.target.contains(element));
+  const target = turn ? Object.freeze({ currentRendererRoot: root, projectionKey: turn.projectionKey }) : null;
+  return resolveReaderNavigationTarget(target) ? target : null;
+}
+
+/* Shared with delegated selection: one visual update and one additive Ribbon
+ * publication. Click selection keeps its existing Edit Mode editor behavior. */
+function publishReaderTurnSelection(root, turnRecord, allTurns){
+  const target = Object.freeze({ currentRendererRoot: root, projectionKey: turnRecord.projectionKey });
+  const resolved = resolveReaderNavigationTarget(target);
+  if (!resolved || resolved.turn !== turnRecord) return null;
+  const turn = turnRecord.target;
+  const turnIdx = allTurns.indexOf(turn) + 1;
+  if (turnIdx <= 0) return null;
+  const message = resolved.index.getMessage(turnRecord.messageKey);
+  const messageId = String(message.sourceRef?.messageId || '').trim();
+  const editModeOn = document.querySelector('.wbReader')?.dataset?.editMode === 'on';
+  if (!editModeOn) {
+    for (const el of allTurns) el.classList.remove('is-ribbon-selected');
+    turn.classList.add('is-ribbon-selected');
+  }
+  state.currentReaderNavigationTarget = target;
+  const ribbon = W.H2O?.Studio?.ribbon;
+  if (typeof ribbon?.setContext === 'function') {
+    ribbon.setContext(Object.assign({}, ribbon.getContext(), {
+      selectedMessageId: messageId || null,
+      selectedTurnIdx: turnIdx,
+    }));
+  }
+  return { turnIdx, editModeOn };
+}
+
+function readerNearestScrollDelta(start, end, viewportStart, viewportEnd){
+  if ((start >= viewportStart && end <= viewportEnd) || (start < viewportStart && end > viewportEnd)) return 0;
+  const smaller = end - start <= viewportEnd - viewportStart;
+  return (start < viewportStart && smaller) || (end > viewportEnd && !smaller)
+    ? start - viewportStart : end - viewportEnd;
+}
+
+function goToReaderTarget(target, options){
+  const resolved = resolveReaderNavigationTarget(target);
+  if (!resolved) return false;
+  const { root, turn } = resolved;
+  // Shell owns this structural scroll context. The Host's transcript
+  // data-scroll-root marker has overflow:visible on the current Reader route.
+  const scrollRoot = root.closest('.wbMain');
+  if (!scrollRoot?.isConnected) return false;
+  const allTurns = Array.from(root.querySelectorAll('[data-turn]'));
+  if (!publishReaderTurnSelection(root, turn, allTurns)) return false;
+  const element = turn.target;
+  if (options?.preserveFocus !== true) {
+    const temporary = !element.hasAttribute('tabindex');
+    if (temporary) {
+      element.setAttribute('tabindex', '-1');
+      element.addEventListener('blur', () => {
+        if (element.getAttribute('tabindex') === '-1') element.removeAttribute('tabindex');
+      }, { once: true });
+    }
+    element.focus({ preventScroll: true });
+  }
+  const viewport = scrollRoot.getBoundingClientRect();
+  const bounds = element.getBoundingClientRect();
+  const top = viewport.top + scrollRoot.clientTop;
+  const left = viewport.left + scrollRoot.clientLeft;
+  const reducedMotion = W.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  scrollRoot.scrollTo({
+    top: scrollRoot.scrollTop + readerNearestScrollDelta(bounds.top, bounds.bottom, top, top + scrollRoot.clientHeight),
+    left: scrollRoot.scrollLeft + readerNearestScrollDelta(bounds.left, bounds.right, left, left + scrollRoot.clientWidth),
+    behavior: options?.behavior === 'smooth' && !reducedMotion ? 'smooth' : 'auto',
+  });
+  return true;
+}
+
+function stepReaderTarget(direction, options){
+  const root = state.currentReaderRender?.root;
+  const turns = getReaderSemanticIndex(root)?.turns();
+  if (!root || !turns?.length) return false;
+  const current = resolveReaderNavigationTarget(state.currentReaderNavigationTarget);
+  const position = current ? turns.indexOf(current.turn) : -1;
+  const next = position < 0 ? (direction > 0 ? 0 : turns.length - 1) : position + direction;
+  const turn = turns[next];
+  return turn ? goToReaderTarget({ currentRendererRoot: root, projectionKey: turn.projectionKey }, options) : false;
+}
+
+function nextReaderTarget(options){ return stepReaderTarget(1, options); }
+function previousReaderTarget(options){ return stepReaderTarget(-1, options); }
 
 function getReaderDecorationContributions(root){
   const current = state.currentReaderRender;
@@ -509,6 +628,37 @@ function haveEquivalentRendererEditOverrides(leftRaw, rightRaw){
   return true;
 }
 
+/* M04 P2 T4 (HDA decision C) - Reader consumption of the presentation
+ * preference. Reader owns the preference's meaning (Appearance
+ * `presentationProfile`, default chatgpt-reference, any string preserved);
+ * the Renderer owns the profile domain and resolves the effective profile and
+ * its fallback per render. Reader passes the current preference into each
+ * render, keeps the render's frozen descriptor with the current-render
+ * binding, and reuses a mounted transcript only when the configuration the
+ * current preference resolves to NOW is the mounted one. */
+function getReaderPresentationPreference(){
+  const appearance = W.H2O?.Studio?.appearance;
+  return typeof appearance?.get === "function" ? appearance.get("presentationProfile") : undefined;
+}
+
+function isReaderPresentationCurrent(request){
+  const mounted = state.currentReaderRender?.presentation;
+  const renderer = getStudioChatRenderer();
+  if (!mounted || typeof renderer.describePresentation !== "function") return false;
+  let expected = null;
+  try { expected = renderer.describePresentation(request); } catch { return false; }
+  /* The mounted descriptor carries the sealed registry token; a pre-seal
+   * (null) token can never equal it, so it never justifies reuse. */
+  return !!(
+    expected
+    && typeof mounted.registryDigest === "string"
+    && mounted.registryDigest
+    && mounted.registryDigest === expected.registryDigest
+    && mounted.effectiveId === expected.effectiveId
+    && mounted.profileVersion === expected.profileVersion
+  );
+}
+
 function canReuseReaderDOM(options){
   options = options && typeof options === "object" ? options : {};
   const renderer = getStudioChatRenderer();
@@ -520,7 +670,34 @@ function canReuseReaderDOM(options){
     && isReusableReaderMountCurrent(options.mount, options.previousSnapshot)
     && renderer.isRenderEquivalent(options.previousSnapshot, options.rendererInput)
     && haveEquivalentRendererEditOverrides(options.previousEditOverrides, options.nextEditOverrides)
+    && isReaderPresentationCurrent(options.presentationProfile)
   );
+}
+
+/* Guarded refresh of an open Reader after the preference changed or hydrated:
+ * only on the Reader route with a mounted current render, and only when the
+ * mounted configuration is no longer the one the preference resolves to. It
+ * goes through the existing renderReader path, so the render token, the
+ * reuse decision and the unmount/disposal paths stay authoritative; an
+ * outstanding render reads the preference at its own decision point. */
+function refreshReaderPresentation(){
+  if (state.activeRoute !== "reader" || !state.currentReaderRender) return;
+  const snapshotId = String(state.currentReaderSnapshot?.snapshotId || "").trim();
+  if (!snapshotId) return;
+  if (isReaderPresentationCurrent(getReaderPresentationPreference())) return;
+  renderReader(snapshotId).catch(console.error);
+}
+
+function subscribeReaderToPresentationPreference(){
+  if (typeof state.readerPresentationUnsubscribe === "function") return;
+  const appearance = W.H2O?.Studio?.appearance;
+  if (typeof appearance?.subscribe !== "function") return;
+  const unsubscribe = appearance.subscribe((event) => {
+    if (!event) return;
+    if (event.type !== "ready" && !(event.type === "change" && event.key === "presentationProfile")) return;
+    refreshReaderPresentation();
+  });
+  state.readerPresentationUnsubscribe = typeof unsubscribe === "function" ? unsubscribe : function () {};
 }
 
 // ─── Edit-override persistence ────────────────────────────────────────────────
@@ -5083,7 +5260,11 @@ function refreshReaderOverlay(root, snap){
 function buildReaderDOM(snap, rendererInputRaw){
   const renderer = getStudioChatRenderer();
   const rendererInput = rendererInputRaw || renderer.normalizeInput(snap);
-  const rendererResult = renderer.render(rendererInput, { getEditOverride });
+  /* M04 P2 T4: the current Appearance preference selects the presentation
+   * profile of THIS render; the Renderer resolves it (unknown -> reference). */
+  const appearance = W.H2O?.Studio?.appearance;
+  const presentationProfile = typeof appearance?.get === "function" ? appearance.get("presentationProfile") : undefined;
+  const rendererResult = renderer.render(rendererInput, { getEditOverride, presentationProfile });
   const {
     root,
     turnsEl: sc,
@@ -5131,36 +5312,16 @@ function buildReaderDOM(snap, rendererInputRaw){
           const allTurns = Array.prototype.slice.call(sc.querySelectorAll('[data-turn]'));
           const turnIdx = allTurns.indexOf(turn) + 1; /* 1-based */
           if (turnIdx <= 0) return;
-          const messageId = String(turn.getAttribute('data-message-id') || '');
-          /* Phase 7b repair 7 — In Edit Mode, skip the selection-class
-           * side-effect entirely. The user explicitly does NOT want any
-           * selection visual (bg tint, ::before bar, outline) to appear
-           * before/while editing. Single-click in Edit Mode goes
-           * STRAIGHT to mounting the editor; no intermediate selected
-           * state. Outside Edit Mode the existing selection behavior
-           * is preserved unchanged. */
-          const readerRoot = document.querySelector('.wbReader');
-          const editModeOn = !!(readerRoot && readerRoot.dataset && readerRoot.dataset.editMode === 'on');
-          if (!editModeOn) {
-            /* Move the visible outline */
-            for (let i = 0; i < allTurns.length; i += 1) {
-              try { allTurns[i].classList.remove('is-ribbon-selected'); } catch (_) {}
-            }
-            turn.classList.add('is-ribbon-selected');
-          }
-          /* Push to ribbon context — additive merge preserves existing
-           * route/title/etc context fields populated by renderRoute.
-           * Done in both modes so the Format-tab actions stay
-           * context-aware regardless of whether selection is visually
-           * rendered. */
-          const ribbon = W?.H2O?.Studio?.ribbon;
-          if (ribbon && typeof ribbon.setContext === 'function') {
-            const ctx = ribbon.getContext();
-            ribbon.setContext(Object.assign({}, ctx, {
-              selectedMessageId: messageId || null,
-              selectedTurnIdx: turnIdx,
-            }));
-          }
+          /* Reader consumes the current Renderer linkage; turn shells need
+           * not carry message identity. Never match a stale turn by position. */
+          const semanticIndex = getReaderSemanticIndex(root);
+          const turnRecord = semanticIndex?.turns().find((record) => record.target === turn);
+          if (!root.isConnected || !turn.isConnected || !turnRecord) return;
+          const messageRecord = semanticIndex.getMessage(turnRecord.messageKey);
+          if (!messageRecord) return;
+          const selection = publishReaderTurnSelection(root, turnRecord, allTurns);
+          if (!selection) return;
+          const { editModeOn } = selection;
           /* Phase 7b repair 7 — single-click-to-edit in Edit Mode. */
           try {
             if (editModeOn && !turn.classList.contains('wbTurn--editing')) {
@@ -5569,6 +5730,9 @@ async function renderReader(snapshotId){
       rendererInput,
       previousEditOverrides,
       nextEditOverrides,
+      /* M04 P2 T4: read at the decision, so a superseded preference can never
+       * keep or install an obsolete selection. */
+      presentationProfile: getReaderPresentationPreference(),
     });
     if (canReuseMountedReader){
       try {
@@ -15144,6 +15308,8 @@ function boot(){
   readUiPrefs();
   applyUiState();
   subscribeLibraryIndexToWorkbenchCache();
+  /* M04 P2 T4: once per application; refreshes an open Reader on presentation preference ready/change. */
+  subscribeReaderToPresentationPreference();
 
   $("#refreshBtn")?.addEventListener("click", () => {
     state.rowsCache = null;

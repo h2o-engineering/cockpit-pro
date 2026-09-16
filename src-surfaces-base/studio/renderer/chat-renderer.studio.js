@@ -795,6 +795,25 @@ function attachUserAttachmentsToTurn(turnEl, messageEl, attachmentsRaw){
  * authority.
  */
 const PRESENTATION_PROFILE_ATTR = "data-h2o-presentation-profile";
+/*
+ * Renderer compatibility vocabulary (M04 P1 T1): `wbRichRoot` is the
+ * transcript-root class the global Studio stylesheet still keys on for both
+ * render modes. It is not a presentation choice a profile may make or drop,
+ * so the Renderer emits it itself, before any profile transcript hook, in
+ * exactly the accepted position (cgScroll wbReaderScroll wbRichRoot ...).
+ */
+const RICH_ROOT_COMPAT_CLASS = "wbRichRoot";
+/*
+ * Rich-replay source compatibility (M04 P1 T1): the captured-source class the
+ * Renderer recognizes inside sanitized provider markup to locate a captured
+ * user bubble. This is recognition of the accepted ChatGPT web capture only -
+ * a Renderer decision about provider input, not a presentation hook and not a
+ * general provider-recognition framework.
+ */
+const RICH_REPLAY_SOURCE_COMPAT = Object.freeze({
+  source: "chatgpt-web-capture",
+  userBubbleMarkerClass: "user-message-bubble-color",
+});
 
 /* S4A: the Semantic Index module is a passive Renderer dependency admitted by
  * the Studio script chain; like the PresentationProfile it has no embedded
@@ -843,12 +862,18 @@ function openContentCollector(){
 
 /* ContentRenderer render context for one message body: the sink tags every
  * report with the H2O body element it belongs to, so the index can attach the
- * projection to its message host by structure (never by provider DOM). */
+ * projection to its message host by structure (never by provider DOM).
+ * M04 P1 T2: the context always names the active PresentationProfile (the
+ * profile of the render or edit in progress), so nested content presentation
+ * follows the same selection as the shells; the projection sink is supplied
+ * only while this render's collection is open. */
 function contentRenderContext(bodyEl){
   const collector = ACTIVE_CONTENT_COLLECTOR;
-  if (!collector) return { document };
+  const presentationProfile = activePresentationProfile();
+  if (!collector) return { document, presentationProfile };
   return {
     document,
+    presentationProfile,
     projectionSink(report){
       if (!report || typeof report !== "object") return;
       collector.projections.push({ report, bodyEl });
@@ -860,12 +885,128 @@ function markContentBody(bodyEl){
   if (ACTIVE_CONTENT_COLLECTOR) ACTIVE_CONTENT_COLLECTOR.bodies.add(bodyEl);
 }
 
-function activePresentationProfile(){
+/*
+ * M04 P1 T2 - per-render presentation authority.
+ *
+ * render() seals both governed registries (PresentationProfile and
+ * ContentRenderer) at the first render in the document, resolves the requested
+ * profile through the registry (explicit / default / unknown-profile-fallback)
+ * and opens that profile as the presentation context for the WHOLE render:
+ * every shell and every nested content body built by this render reads the
+ * same selected profile, and the previous context is restored in `finally`
+ * (nested renders and exceptions included). The actual immutable profile
+ * object and a frozen descriptor are bound to the H2O root in a
+ * Renderer-private WeakMap: that binding - never the root's projected
+ * presentation marker - is the authority for later edits of a mounted render.
+ * The registries stay open for registration until that first render; the
+ * DOM-free describePresentation() observes without sealing. The WeakMap holds
+ * nothing but roots the caller already owns, so discarded roots are collected
+ * with their bindings.
+ */
+const PRESENTATION_DESCRIPTOR_SCHEMA = "h2o.renderer.presentation-descriptor";
+const REGISTRY_DIGEST_SCHEMA = "h2o.renderer.registry-digest";
+const RENDER_PRESENTATION = new WeakMap();
+const BINDING_LOOKUP_MAX_HOPS = 64;
+let ACTIVE_PRESENTATION_PROFILE = null;
+
+function presentationProfileRegistry(){
   const api = Studio.Renderer && Studio.Renderer.presentationProfile;
   if (!api || api.__installed !== true || typeof api.reference !== "function"){
     throw new Error("Studio Chat Renderer requires H2O.Studio.Renderer.presentationProfile (renderer/presentation/presentation-profile.v1.js); no embedded presentation fallback exists");
   }
-  const profile = api.reference();
+  return api;
+}
+
+/* Both governed registries with the M04 registry-lifetime API; a missing
+ * method is a missing dependency, never an embedded fallback. */
+function presentationRegistries(){
+  const profiles = presentationProfileRegistry();
+  for (const name of ["resolve", "seal", "sealed", "registryDigest"]){
+    if (typeof profiles[name] !== "function"){
+      throw new Error(`Studio Chat Renderer requires the governed PresentationProfile registry API (${name}); renderer/presentation/presentation-profile.v1.js is too old`);
+    }
+  }
+  const content = Studio.Renderer && Studio.Renderer.contentRenderer;
+  if (!content || content.__installed !== true){
+    throw new Error("Studio Chat Renderer requires H2O.Studio.Renderer.contentRenderer (renderer/content/content-renderer.v1.js); no embedded content fallback exists");
+  }
+  for (const name of ["seal", "sealed", "registryDigest"]){
+    if (typeof content[name] !== "function"){
+      throw new Error(`Studio Chat Renderer requires the governed ContentRenderer registry API (${name}); renderer/content/content-renderer.v1.js is too old`);
+    }
+  }
+  return { profiles, content };
+}
+
+/* The combined evidence token: both sealed registry tokens under named fields,
+ * unambiguously serialized; null until BOTH registries are sealed. */
+function combinedRegistryDigest(profiles, content){
+  const presentationProfile = profiles.registryDigest();
+  const contentRenderer = content.registryDigest();
+  if (typeof presentationProfile !== "string" || typeof contentRenderer !== "string") return null;
+  return JSON.stringify({ schema: REGISTRY_DIGEST_SCHEMA, schemaVersion: 1, presentationProfile, contentRenderer });
+}
+
+/* Idempotent: the first render closes the registration window of both
+ * registries for this document; later renders find them sealed. */
+function sealPresentationRegistries(registries){
+  registries.profiles.seal();
+  registries.content.seal();
+  const registryDigest = combinedRegistryDigest(registries.profiles, registries.content);
+  if (registryDigest === null){
+    throw new Error("Studio Chat Renderer: the governed registries did not seal");
+  }
+  return registryDigest;
+}
+
+function presentationDescriptor(resolution, registryDigest){
+  return Object.freeze({
+    schema: PRESENTATION_DESCRIPTOR_SCHEMA,
+    schemaVersion: 1,
+    requestedId: resolution.requestedId,
+    effectiveId: resolution.effectiveId,
+    profileVersion: resolution.profile.version,
+    reason: resolution.reason,
+    registryDigest,
+  });
+}
+
+/* DOM-free observation of how a request WOULD resolve: neither seals nor
+ * registers anything. Before the first render `registryDigest` is null (the
+ * combined sealed token does not exist yet); after sealing it is the same token
+ * a render descriptor carries, so an equal request yields an equal effective
+ * configuration (effectiveId, profileVersion, registryDigest). */
+function describePresentation(request){
+  const registries = presentationRegistries();
+  const resolution = registries.profiles.resolve(request);
+  return presentationDescriptor(resolution, combinedRegistryDigest(registries.profiles, registries.content));
+}
+
+function openPresentationContext(profile){
+  const previous = ACTIVE_PRESENTATION_PROFILE;
+  ACTIVE_PRESENTATION_PROFILE = profile;
+  return { restore(){ ACTIVE_PRESENTATION_PROFILE = previous; } };
+}
+
+/* The bound H2O render root that contains `node`, if any: a bounded parent
+ * walk over the Renderer-private WeakMap (never the DOM presentation marker,
+ * never a document-wide search). */
+function boundPresentationRoot(node){
+  let current = node;
+  for (let hops = 0; current && hops < BINDING_LOOKUP_MAX_HOPS; hops += 1){
+    if (RENDER_PRESENTATION.has(current)) return current;
+    current = current.parentNode || null;
+  }
+  return null;
+}
+
+/* The active profile: the render or edit context in progress, else - for
+ * genuinely unbound synthetic hosts edited outside any render - the reference
+ * profile (documented compatibility fallback; it never overrides a mounted
+ * binding because applyEditedMessageBody opens the bound profile first). */
+function activePresentationProfile(){
+  if (ACTIVE_PRESENTATION_PROFILE) return ACTIVE_PRESENTATION_PROFILE;
+  const profile = presentationProfileRegistry().reference();
   if (!profile || typeof profile.id !== "string" || !profile.id){
     throw new Error("Studio Chat Renderer: the reference PresentationProfile is unavailable");
   }
@@ -1002,16 +1143,18 @@ function claimReplayIdentity(el, attrName, preferredRaw, seen){
  *
  * The Renderer decides that a rich user message has exactly one bubble and
  * creates that element itself. Provider markup may still supply the CONTENT
- * inside the bubble, and its `user-message-bubble-color` marker is read only to
- * locate where that bubble sits in the sanitized content; the provider element
- * never survives as the bubble boundary, and several or nested markers cannot
- * create more than one bubble.
+ * inside the bubble, and the captured-source marker class
+ * (RICH_REPLAY_SOURCE_COMPAT.userBubbleMarkerClass) is read only to locate
+ * where that bubble sits in the sanitized content; the provider element never
+ * survives as the bubble boundary, and several or nested markers cannot create
+ * more than one bubble.
  *
  * Presentation stays on the accepted compatibility path: the compatibility
- * class the H2O bubble carries, and the provider marker class that locates a
- * captured bubble, both come from the active PresentationProfile (for the
- * ChatGPT reference profile they are the same token), and nothing else is
- * taken from the provider element except a sanitized `dir` (bidi rendering).
+ * class the H2O bubble carries comes from the active PresentationProfile,
+ * while the provider marker that locates a captured bubble is Renderer-owned
+ * rich-replay source compatibility (for the ChatGPT reference profile the two
+ * are the same token), and nothing else is taken from the provider element
+ * except a sanitized `dir` (bidi rendering).
  * Identity is never copied: the message host owns role and identity, and the
  * bubble is presentation-container structure beneath it.
  *
@@ -1033,7 +1176,7 @@ function buildRichUserBubbleShell(){
 
 function adoptRichUserBubble(messageEl){
   if (!(messageEl instanceof Element)) return false;
-  const markerClass = activePresentationProfile().userBubbleMarkerClass();
+  const markerClass = RICH_REPLAY_SOURCE_COMPAT.userBubbleMarkerClass;
   messageEl.querySelectorAll(USER_BUBBLE_H2O_CLASSES.map((cls) => `.${cls}`).join(", ")).forEach((el) => {
     el.classList.remove(...USER_BUBBLE_H2O_CLASSES);
   });
@@ -1073,15 +1216,34 @@ function applyEditedMessageBody(messageEl, role, text){
   if (!(messageEl instanceof Element)) return;
   const normalizedRole = normalizeRole(role);
   if (!normalizedRole) return;
-  while (messageEl.firstChild) messageEl.removeChild(messageEl.firstChild);
-  messageEl.setAttribute(ROLE_ATTR, normalizedRole);
-  const profile = activePresentationProfile();
-  messageEl.classList.add("cgMsg", ...profile.messageClasses(normalizedRole, "canonical"), ...profile.editedMessageClasses());
+  /* M04 P1 T2: a mounted H2O root's bound profile governs the whole edit path
+   * (host modifiers and the nested content bodies alike). An in-render edit
+   * override runs under the render's own context; an unbound synthetic host
+   * keeps the documented reference fallback. Only the render that is still
+   * collecting projections may index its bodies: an edit of any other root
+   * while a render collects is kept out of that render's collection, and an
+   * edit after a render completes reaches no collection (the index is a
+   * completion snapshot). */
+  const boundRoot = boundPresentationRoot(messageEl);
+  const binding = boundRoot ? RENDER_PRESENTATION.get(boundRoot) : null;
+  const presentation = openPresentationContext(binding ? binding.profile : activePresentationProfile());
+  const collector = ACTIVE_CONTENT_COLLECTOR;
+  const foreignCollection = !!(collector && boundRoot && collector.root !== boundRoot);
+  if (foreignCollection) ACTIVE_CONTENT_COLLECTOR = null;
+  try {
+    while (messageEl.firstChild) messageEl.removeChild(messageEl.firstChild);
+    messageEl.setAttribute(ROLE_ATTR, normalizedRole);
+    const profile = activePresentationProfile();
+    messageEl.classList.add("cgMsg", ...profile.messageClasses(normalizedRole, "canonical"), ...profile.editedMessageClasses());
 
-  const bodyEl = document.createElement("div");
-  bodyEl.className = "cgMsgBody";
-  renderSemanticBody(bodyEl, text);
-  messageEl.appendChild(bodyEl);
+    const bodyEl = document.createElement("div");
+    bodyEl.className = "cgMsgBody";
+    renderSemanticBody(bodyEl, text);
+    messageEl.appendChild(bodyEl);
+  } finally {
+    if (foreignCollection) ACTIVE_CONTENT_COLLECTOR = collector;
+    presentation.restore();
+  }
 }
 function buildCanonicalConversation(container, snap){
   const messages = Array.isArray(snap?.messages) ? snap.messages : [];
@@ -1378,17 +1540,28 @@ function hasCompleteRichCoverage(input){
 
 function render(inputRaw, options){
   options = options && typeof options === "object" ? options : {};
+  /* M04 P1 T2: seal both governed registries, resolve the requested profile
+   * and open it as the presentation context before anything is built. */
+  const registries = presentationRegistries();
+  const registryDigest = sealPresentationRegistries(registries);
+  const resolution = registries.profiles.resolve(options.presentationProfile);
+  const presentation = Object.freeze({
+    profile: resolution.profile,
+    descriptor: presentationDescriptor(resolution, registryDigest),
+  });
+  const presentationContext = openPresentationContext(resolution.profile);
   /* S4A: content projections reported by the ContentRenderer while THIS render
    * builds its bodies are collected privately and folded into the index. */
   const collection = openContentCollector();
   try {
-    return renderWithCollector(inputRaw, options, collection.collector);
+    return renderWithCollector(inputRaw, options, collection.collector, presentation);
   } finally {
     collection.restore();
+    presentationContext.restore();
   }
 }
 
-function renderWithCollector(inputRaw, options, contentCollector){
+function renderWithCollector(inputRaw, options, contentCollector, presentation){
   /* Resolved before normalizeInput so typed v3 content[] is never flattened. */
   const semanticConversation = semanticV3Conversation(inputRaw);
   const input = normalizeInput(inputRaw);
@@ -1396,7 +1569,14 @@ function renderWithCollector(inputRaw, options, contentCollector){
   if (!(turnsEl instanceof Element)){
     throw new Error("Studio Chat Renderer could not create the conversation root");
   }
+  /* M04 P1 T2: the immutable profile + frozen descriptor are bound to the root
+   * as soon as it exists (in-render edit overrides already run under it), and
+   * the collection remembers which root it indexes. */
+  contentCollector.root = root;
+  RENDER_PRESENTATION.set(root, presentation);
   turnsEl.classList.add("wbReaderScroll");
+  /* Compatibility root for both modes (Renderer vocabulary, profile-independent). */
+  turnsEl.classList.add(RICH_ROOT_COMPAT_CLASS);
   const profile = activePresentationProfile();
   const richRootClasses = profile.transcriptClasses("rich");
 
@@ -1470,6 +1650,7 @@ function renderWithCollector(inputRaw, options, contentCollector){
     semanticSource: semanticConversation ? "savedChatSnapshotV3" : "",
     semanticIndex,
     decorationContributions,
+    presentation: presentation.descriptor,
   };
 }
 
@@ -1478,6 +1659,7 @@ Studio.chatRenderer = Object.freeze({
   normalizeRole,
   isRenderEquivalent,
   render,
+  describePresentation,
   applyEditedMessageBody,
 });
 })(window);

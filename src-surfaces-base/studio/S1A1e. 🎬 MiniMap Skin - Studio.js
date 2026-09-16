@@ -102,6 +102,7 @@
     COL: `${SkID}-col`,
     // Top control
     TOGGLE: `${SkID}-toggle`,
+    ACCESS: `${SkID}-access`,
     // Bottom control (legacy alias: AUX)
     DIAL: `${SkID}-aux`,
     AUX: `${SkID}-aux`,
@@ -156,6 +157,7 @@ function CSS_MM_text() {
   const S_MINIMAP     = selScoped(UI_.MINIMAP);
   const S_COL         = selScoped(UI_.COL);
   const S_TOGGLE      = selScoped(UI_.TOGGLE);
+  const S_ACCESS      = selScoped(UI_.ACCESS);
   const S_DIAL        = selScoped(UI_.DIAL);
 
   const S_BTN         = selScoped(UI_.BTN);
@@ -686,12 +688,41 @@ ${S_TOGGLE}:hover {
     0 3px 6px rgba(255, 215, 0, 0.2);
 }
 
+/* The collapsed entry keeps the same footprint and remains recognizable
+   without hover. Expanded counter/pin presentation is preserved. */
 ${S_TOGGLE}[${ATTR_.CGXUI_STATE}~="faded"] {
-  opacity: 0.15;
-  transition: all 0.2s ease;
+  opacity: 1;
+  background: var(--wb-surface, #2f2f2f);
+  border: 1px solid rgba(255,215,0,0.55) !important;
+  color: var(--wb-text, #ececec);
 }
-${S_TOGGLE}[${ATTR_.CGXUI_STATE}~="faded"]:hover {
-  opacity: 0.55;
+${S_ACCESS} {
+  appearance: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0 0 8px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+${S_TOGGLE}[${ATTR_.CGXUI_STATE}~="faded"] ${S_ACCESS} {
+  color: inherit;
+}
+${S_TOGGLE}[${ATTR_.CGXUI_STATE}~="faded"] ${S_COUNT} {
+  visibility: hidden;
+}
+${S_ACCESS}:focus-visible {
+  outline: 2px solid #FFD700;
+  outline-offset: 3px;
 }
 
 /* Inner counter text on toggle */
