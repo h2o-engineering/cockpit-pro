@@ -150,12 +150,16 @@
   function observeRepositoryOnce() {
     return new Promise((resolve) => {
       try {
-        W.chrome.runtime.sendMessage({ type: MSG_P02_OBSERVE }, (response) => {
-          const failure = W.chrome.runtime.lastError;
-          resolve(failure
-            ? { ok: false, error: V.clean(failure.message) || "p02-observe-unavailable" }
-            : (response || { ok: false, error: "p02-observe-no-response" }));
-        });
+        const messaging = W.H2O?.Studio?.platform?.messaging || null;
+        if (!messaging || typeof messaging.send !== "function") {
+          resolve({ ok: false, error: "p02-observe-unavailable" });
+          return;
+        }
+        Promise.resolve(messaging.send(MSG_P02_OBSERVE, { type: MSG_P02_OBSERVE }))
+          .then((response) => resolve(
+            response || { ok: false, error: "p02-observe-no-response" }))
+          .catch((failure) => resolve({ ok: false,
+            error: V.clean(failure?.message ?? failure) || "p02-observe-unavailable" }));
       } catch (error) {
         resolve({ ok: false,
           error: V.clean(error?.message || error) || "p02-observe-unavailable" });

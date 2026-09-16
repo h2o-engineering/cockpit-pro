@@ -479,30 +479,18 @@
   function callArchive(op, payload) {
     return new Promise((resolve, reject) => {
       try {
-        if (!W.chrome || !chrome.runtime || typeof chrome.runtime.sendMessage !== 'function') {
-          reject(new Error('chrome runtime unavailable'));
+        const messaging = W.H2O?.Studio?.platform?.messaging || null;
+        if (!messaging || typeof messaging.send !== 'function') {
+          reject(new Error('platform messaging unavailable'));
           return;
         }
         const message = { type: ARCHIVE_MESSAGE_TYPE, req: { op, payload: payload || {} } };
-        const sent = chrome.runtime.sendMessage(message, (response) => {
-          try {
-            if (chrome.runtime && chrome.runtime.lastError) {
-              reject(new Error(String(chrome.runtime.lastError.message || chrome.runtime.lastError)));
-              return;
-            }
-          } catch {}
-          if (!response || response.ok !== true) {
-            reject(new Error(String(response?.error || `archive op failed: ${op}`)));
-            return;
-          }
-          resolve(response.result);
-        });
-        if (sent && typeof sent.then === 'function') {
-          sent.then((response) => {
+        Promise.resolve(messaging.send(ARCHIVE_MESSAGE_TYPE, message))
+          .then((response) => {
             if (!response || response.ok !== true) reject(new Error(String(response?.error || `archive op failed: ${op}`)));
             else resolve(response.result);
-          }).catch(reject);
-        }
+          })
+          .catch(reject);
       } catch (e) { reject(e); }
     });
   }
