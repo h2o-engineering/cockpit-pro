@@ -159,13 +159,34 @@
     tagFilter: '',
     projectFilter: '',
   };
+  let prefsStoreHydrationStarted = false;
+  function getLibraryStore() {
+    try { return H2O.Library?.Store || null; } catch { return null; }
+  }
   function loadPrefs() {
     try { return Object.assign({}, PREF_DEFAULTS, JSON.parse(W.localStorage.getItem(PREFS_KEY) || '{}')); }
     catch { return Object.assign({}, PREF_DEFAULTS); }
   }
-  function savePrefs(p) { try { W.localStorage.setItem(PREFS_KEY, JSON.stringify(p || {})); } catch (e) { err('savePrefs', e); } }
+  function hydratePrefsFromStore(target) {
+    if (prefsStoreHydrationStarted) return;
+    prefsStoreHydrationStarted = true;
+    const store = getLibraryStore();
+    if (!store || typeof store.get !== 'function') return;
+    Promise.resolve(store.get(PREFS_KEY)).then((stored) => {
+      if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return;
+      Object.assign(target, PREF_DEFAULTS, stored);
+    }).catch((e) => err('loadPrefs.store-read', e));
+  }
+  function savePrefs(p) {
+    try {
+      const store = getLibraryStore();
+      if (!store || typeof store.set !== 'function') throw new Error('Library Store unavailable');
+      Promise.resolve(store.set(PREFS_KEY, { ...(p || {}) })).catch((e) => err('savePrefs.store-write', e));
+    } catch (e) { err('savePrefs', e); }
+  }
 
   const prefs = loadPrefs();
+  hydratePrefsFromStore(prefs);
 
   // ── State ──────────────────────────────────────────────────────────────────
   const state = {
@@ -584,22 +605,18 @@
   function openOriginalUrl(url, setStatus) {
     if (!url) return;
     try { setStatus?.('Opening original...'); } catch {}
-    const platform = H2O.Studio?.platform || null;
-    if (platform && typeof platform.openUrl === 'function') {
-      Promise.resolve(platform.openUrl(url)).then(
-        () => { try { setStatus?.(''); } catch {} },
-        (openErr) => {
-          try { W.open(url, '_blank', 'noopener'); setStatus?.(''); }
-          catch (fallbackErr) {
-            const msg = fallbackErr?.message || openErr?.message || fallbackErr || openErr || 'unknown error';
-            try { setStatus?.(`Open failed: ${String(msg)}`); } catch {}
-          }
-        }
-      );
+    const runtime = H2O.Studio?.platform?.runtime || null;
+    if (!runtime || typeof runtime.openUrl !== 'function') {
+      try { setStatus?.('Could not open original: platform runtime unavailable'); } catch {}
       return;
     }
-    try { W.open(url, '_blank', 'noopener'); setStatus?.(''); }
-    catch (e) { try { setStatus?.(`Open failed: ${String(e?.message || e || 'unknown error')}`); } catch {} }
+    Promise.resolve(runtime.openUrl(url)).then(
+      () => { try { setStatus?.(''); } catch {} },
+      (openErr) => {
+        const msg = openErr?.message || openErr || 'unknown error';
+        try { setStatus?.('Could not open original: ' + String(msg)); } catch {}
+      }
+    );
   }
 
   function extractTitleFromHtml(html) {
@@ -648,25 +665,18 @@
   function callArchiveMetadataFetch(url) {
     return new Promise((resolve) => {
       try {
-        if (!W.chrome || !chrome.runtime || typeof chrome.runtime.sendMessage !== 'function') {
-          resolve(null);
-          return;
-        }
-        chrome.runtime.sendMessage({
+        const messaging = H2O.Studio?.platform?.messaging || null;
+        if (!messaging || typeof messaging.send !== 'function') { resolve(null); return; }
+        const message = {
           type: 'h2o-ext-archive:v1',
           req: { op: 'fetchPageMetadata', payload: { url } },
-        }, (response) => {
-          try {
-            if (chrome.runtime && chrome.runtime.lastError) {
-              resolve({ ok: false, reason: 'background-unavailable' });
-              return;
-            }
-          } catch {}
-          const result = response && response.result ? response.result : response;
-          resolve(result && typeof result === 'object' ? result : null);
-        });
-      } catch {
-        resolve({ ok: false, reason: 'background-unavailable' });
+        };
+        Promise.resolve(messaging.send('h2o-ext-archive:v1', message))
+          .then((response) => resolve(response && response.ok ? response.result : null))
+          .catch(() => resolve(null));
+      } catch (e) {
+        err('callArchiveMetadataFetch', e);
+        resolve(null);
       }
     });
   }

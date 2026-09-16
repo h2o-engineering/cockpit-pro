@@ -38,14 +38,30 @@
     }
   }
 
+  let prefsStoreHydrationStarted = false;
   function loadPrefs() {
     try { return JSON.parse(W.localStorage.getItem(PREFS_KEY) || '{}') || {}; } catch { return {}; }
   }
+  function hydratePrefsFromStore(target) {
+    if (prefsStoreHydrationStarted) return;
+    prefsStoreHydrationStarted = true;
+    const store = getStore();
+    if (!store || typeof store.get !== 'function') return;
+    Promise.resolve(store.get(PREFS_KEY)).then((stored) => {
+      if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return;
+      Object.assign(target, stored);
+    }).catch((e) => err('loadPrefs.store-read', e));
+  }
   function savePrefs(p) {
-    try { W.localStorage.setItem(PREFS_KEY, JSON.stringify(p || {})); } catch (e) { err('savePrefs', e); }
+    try {
+      const store = getStore();
+      if (!store || typeof store.set !== 'function') throw new Error('Library Store unavailable');
+      Promise.resolve(store.set(PREFS_KEY, { ...(p || {}) })).catch((e) => err('savePrefs.store-write', e));
+    } catch (e) { err('savePrefs', e); }
   }
 
   const prefs = loadPrefs();
+  hydratePrefsFromStore(prefs);
   const state = { normalizationDiagnostics: [] };
 
   function rememberNormalization(diag) {

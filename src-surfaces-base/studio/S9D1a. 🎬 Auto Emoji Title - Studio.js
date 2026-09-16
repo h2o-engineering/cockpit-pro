@@ -203,28 +203,33 @@
     return [icon, base].filter(Boolean).join(" ").trim() || base || icon;
   }
 
-  function chromeStorageSet(record){
-    return new Promise((resolve) => {
-      try {
-        if (!(W.chrome?.storage?.local?.set)) { resolve(false); return; }
-        W.chrome.storage.local.set(record, () => resolve(!(W.chrome.runtime?.lastError)));
-      } catch {
-        resolve(false);
+  function getLibraryStore(){
+    try { return W.H2O?.Library?.Store || null; } catch { return null; }
+  }
+
+  async function readSharedRecord(key){
+    const k = String(key || "");
+    if (!k) return {};
+    try {
+      const store = getLibraryStore();
+      if (store && typeof store.get === "function") {
+        const stored = await store.get(k);
+        if (stored && typeof stored === "object" && !Array.isArray(stored)) return stored;
       }
-    });
+    } catch {}
+    try {
+      const legacy = JSON.parse(localStorage.getItem(k) || "{}");
+      return legacy && typeof legacy === "object" && !Array.isArray(legacy) ? legacy : {};
+    } catch { return {}; }
   }
 
   async function writeSharedRecord(key, value){
     const k = String(key || "");
     if (!k) return false;
+    const store = getLibraryStore();
+    if (!store || typeof store.set !== "function") throw new Error("Library Store unavailable");
     const record = value && typeof value === "object" ? value : {};
-    try { localStorage.setItem(k, JSON.stringify(record)); } catch {}
-    const jobs = [chromeStorageSet({ [k]: record })];
-    try {
-      const store = W.H2O?.Library?.Store;
-      if (store && typeof store.set === "function") jobs.push(store.set(k, record).catch(() => false));
-    } catch {}
-    await Promise.allSettled(jobs);
+    await store.set(k, record);
     return true;
   }
 
@@ -235,8 +240,22 @@
       reason: String(reason || "studio-auto-emoji-title"),
       payload: payload && typeof payload === "object" ? payload : null,
     };
-    try { W.H2O?.Library?.Sync?.broadcast?.(body.reason, body.payload); } catch {}
-    chromeStorageSet({ [LIBRARY_SYNC_BROADCAST_KEY]: body }).catch(() => {});
+    let routed = false;
+    try {
+      const sync = W.H2O?.Library?.Sync;
+      if (sync && typeof sync.broadcast === "function") {
+        sync.broadcast(body.reason, body.payload);
+        routed = true;
+      }
+    } catch {}
+    if (!routed) {
+      try {
+        const emitRaw = W.H2O?.Studio?.platform?.broadcast?.emitRaw;
+        if (typeof emitRaw === "function") {
+          Promise.resolve(emitRaw(LIBRARY_SYNC_BROADCAST_KEY, body)).catch(() => {});
+        }
+      } catch {}
+    }
     try {
       W.dispatchEvent(new CustomEvent("evt:h2o:library:cross-surface-sync", {
         detail: { reasons: [body.reason], t: body.ts, surface: "studio" },
@@ -275,8 +294,7 @@
     const id = String(chatId || "").trim();
     if (!id) return false;
     const key = `${INTERFACE_META_KEY_PREFIX}${id}`;
-    let prev = {};
-    try { prev = JSON.parse(localStorage.getItem(key) || "{}") || {}; } catch {}
+    const prev = await readSharedRecord(key);
     const meta = {
       ...(prev && typeof prev === "object" ? prev : {}),
       ...(patch && typeof patch === "object" ? patch : {}),
@@ -295,10 +313,10 @@
     if (mode === "heat") {
       const level = normalizeHeatLevel(target.dataset.level || "auto");
       const key = `${HEAT_OVERRIDE_KEY_PREFIX}${chatId}`;
-      try {
-        if (level === "auto") localStorage.removeItem(key);
-        else localStorage.setItem(key, level);
-      } catch {}
+      const store = getLibraryStore();
+      if (!store || typeof store.set !== "function" || typeof store.del !== "function") throw new Error("Library Store unavailable");
+      if (level === "auto") await store.del(key);
+      else await store.set(key, level);
       await persistInterfaceMeta(chatId, { heatOverride: level }, "studio-title-palette-heat");
       row.heatOverride = level;
       row.heatLevel = level;
@@ -307,10 +325,10 @@
       const current = toRowTintIndex(row.rowTint, -1);
       const next = current === idx ? -1 : toRowTintIndex(idx, -1);
       const key = `${ROW_TINT_KEY_PREFIX}${chatId}`;
-      try {
-        if (next < 0) localStorage.removeItem(key);
-        else localStorage.setItem(key, String(next));
-      } catch {}
+      const store = getLibraryStore();
+      if (!store || typeof store.set !== "function" || typeof store.del !== "function") throw new Error("Library Store unavailable");
+      if (next < 0) await store.del(key);
+      else await store.set(key, String(next));
       await persistInterfaceMeta(chatId, { rowTint: next }, "studio-title-palette-row-tint");
       row.rowTint = next;
     }

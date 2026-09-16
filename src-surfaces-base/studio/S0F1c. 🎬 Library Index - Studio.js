@@ -557,20 +557,12 @@
   function callArchiveExportFullBundle() {
     return new Promise((resolve) => {
       try {
-        if (!W.chrome || !chrome.runtime || typeof chrome.runtime.sendMessage !== 'function') {
-          resolve(null);
-          return;
-        }
+        const messaging = H2O.Studio?.platform?.messaging || null;
+        if (!messaging || typeof messaging.send !== 'function') { resolve(null); return; }
         const message = { type: ARCHIVE_MESSAGE_TYPE, req: { op: 'exportFullBundle', payload: {} } };
-        const sent = chrome.runtime.sendMessage(message, (response) => {
-          try {
-            if (chrome.runtime && chrome.runtime.lastError) { resolve(null); return; }
-          } catch {}
-          resolve(response && response.ok ? response.result : null);
-        });
-        if (sent && typeof sent.then === 'function') {
-          sent.then((response) => resolve(response && response.ok ? response.result : null)).catch(() => resolve(null));
-        }
+        Promise.resolve(messaging.send(ARCHIVE_MESSAGE_TYPE, message))
+          .then((response) => resolve(response && response.ok ? response.result : null))
+          .catch(() => resolve(null));
       } catch (e) {
         err('callArchiveExportFullBundle', e);
         resolve(null);
