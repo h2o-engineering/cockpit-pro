@@ -1,5 +1,9 @@
 // @version 1.0.0
+import { resolveChromeBuildVisibilityFromEnvironment } from "../chrome-live-build-context.mjs";
+
 export function makeChromeLivePopupCss() {
+  // T03 (leased, additive): identity-surface styles are appended only for opt-in builds.
+  const buildVisibility = resolveChromeBuildVisibilityFromEnvironment();
   return `:root {
   --bg: #121314;
   --panel: #1a1c1f;
@@ -2044,5 +2048,33 @@ button.mini {
   color: var(--muted);
 }
 .error { color: #ffd4d4; border-color: rgba(255,122,122,.35); }
-`;
+` + (buildVisibility.enabled ? LOADED_BUILD_IDENTITY_CSS : "");
 }
+
+const LOADED_BUILD_IDENTITY_CSS = `.h2o-env-badge {
+  margin-top: 4px;
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 11px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+.h2o-env-identity-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 10px;
+  margin: 6px 0 0;
+  font-size: 11px;
+}
+.h2o-env-identity-list dt { color: var(--muted); }
+.h2o-env-identity-list dd {
+  margin: 0;
+  word-break: break-all;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+`;

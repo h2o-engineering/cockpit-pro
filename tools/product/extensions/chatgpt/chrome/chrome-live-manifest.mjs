@@ -3,6 +3,8 @@
 //                  the public key instead of the load-path string. The
 //                  build orchestrator looks up the per-variant key from
 //                  config/extension-keys.json.)
+import { resolveChromeBuildVisibility } from "./chrome-live-build-context.mjs";
+
 const STUDIO_LAUNCHER_EXTENSION_ID = "bpobkkppdlldlkccaehmpfclmkhiemhg";
 
 export function makeChromeLiveManifest({
@@ -24,6 +26,10 @@ export function makeChromeLiveManifest({
   TITLE_CONTRACT_BRIDGE_FILE = null,
   STUDIO_ONLY = false,
   EXTENSION_KEY = null,
+  // T03 (leased, additive): optional human build identity. When the caller passes
+  // nothing, the opt-in build-visibility context decides; production and
+  // studio-launcher builds never emit it (see resolveChromeBuildVisibility).
+  DEV_VERSION_NAME = undefined,
 }) {
   function originWildcard(urlStr) {
     try {
@@ -76,10 +82,19 @@ export function makeChromeLiveManifest({
   // Accepted object-sync: the alarm-driven background reconcile owner is a production-profile capability only.
   if (manifestProfile === "production") permissions.push("alarms");
   if (TITLE_DIAGNOSTIC_ENABLED === true) permissions.push("webNavigation", "scripting");
+  const versionName = DEV_VERSION_NAME !== undefined
+    ? DEV_VERSION_NAME
+    : resolveChromeBuildVisibility({
+      manifestProfile,
+      studioOnly: STUDIO_ONLY,
+      devHasControls: DEV_HAS_CONTROLS,
+      devVersion: DEV_VERSION,
+    }).versionName;
   const manifest = {
     manifest_version: 3,
     name: DEV_NAME,
     version: DEV_VERSION,
+    ...(versionName ? { version_name: String(versionName) } : {}),
     description: DEV_DESCRIPTION,
     ...(EXTENSION_KEY ? { key: EXTENSION_KEY } : {}),
     permissions,

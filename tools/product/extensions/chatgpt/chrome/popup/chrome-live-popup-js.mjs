@@ -2,6 +2,7 @@
 import { makeChromeLivePopupDataSource } from "./chrome-live-popup-data.mjs";
 import { makeChromeLivePopupStorageSource } from "./chrome-live-popup-storage.mjs";
 import { makeChromeLivePopupViewPreludeSource, makeChromeLivePopupViewRenderSource } from "./chrome-live-popup-view.mjs";
+import { resolveChromeBuildVisibilityFromEnvironment } from "../chrome-live-build-context.mjs";
 
 export function makeChromeLivePopupJs({
   PROXY_PACK_URL,
@@ -10,6 +11,27 @@ export function makeChromeLivePopupJs({
   DEV_ORDER_SECTIONS_SNAPSHOT,
   DEV_ALIAS_FILENAME_MAP,
 }) {
+  // T03 (leased, additive; semantic owner L-DEVELOPER-CONTROLS): loaded-build identity
+  // renderer. Emitted only for opt-in build-visibility builds; the embedded constants
+  // are the deterministic build stamp of THIS artifact, and runtime facts
+  // (getManifest(), chrome.runtime.id, user agent) are always shown as loaded truth.
+  const buildVisibility = resolveChromeBuildVisibilityFromEnvironment();
+  const buildIdentitySource = buildVisibility.enabled
+    ? makeLoadedBuildIdentitySource({
+      version: buildVisibility.version,
+      versionName: buildVisibility.versionName,
+      sourceRevision: buildVisibility.sourceRevision,
+      sourceRevisionShort: buildVisibility.sourceRevisionShort,
+      channel: buildVisibility.channel,
+      variant: buildVisibility.variant,
+      registeredExtensionId: buildVisibility.registeredExtensionId,
+      laneKey: buildVisibility.laneKey,
+      surfaceSet: buildVisibility.surfaceSet,
+      btpKey: buildVisibility.btpKey,
+      profileRole: buildVisibility.profileRole,
+      promotionState: buildVisibility.promotionState,
+    })
+    : "";
   return `(() => {
   "use strict";
 
@@ -1083,6 +1105,66 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
   refreshProviderPermissionUi().catch(() => {
     setProviderPermissionPanelVisible(false);
   });
-})();
+${buildIdentitySource}})();
+`;
+}
+
+function makeLoadedBuildIdentitySource(identity) {
+  return `
+  // T03 loaded build identity (read-only). Build stamp of this artifact:
+  const H2O_BUILD_IDENTITY = Object.freeze(${JSON.stringify(identity)});
+  (function renderLoadedBuildIdentity() {
+    const badge = document.getElementById("h2o-env-badge");
+    const list = document.getElementById("h2o-env-identity-list");
+    const section = document.getElementById("h2o-env-identity");
+    if (!badge && !list) return;
+    let manifest = {};
+    try { manifest = chrome.runtime.getManifest() || {}; } catch {}
+    let runtimeId = "UNKNOWN";
+    try { runtimeId = chrome.runtime.id || "UNKNOWN"; } catch {}
+    const loadedVersion = String(manifest.version || "UNKNOWN");
+    const loadedVersionName = String(manifest.version_name || "NOT_ESTABLISHED");
+    const built = H2O_BUILD_IDENTITY;
+    const stampAgrees = built.versionName === loadedVersionName;
+    const idAgrees = built.registeredExtensionId ? built.registeredExtensionId === runtimeId : null;
+    const chromeMatch = /Chrome\\/(\\d+\\.\\d+\\.\\d+\\.\\d+)/.exec(String(navigator.userAgent || ""));
+    const chromeVersion = chromeMatch ? chromeMatch[1] : "UNKNOWN";
+    if (badge) {
+      badge.textContent = built.laneKey + " \\u00b7 " + built.surfaceSet + " \\u00b7 " + loadedVersionName;
+      badge.dataset.loadedVersionName = loadedVersionName;
+      badge.dataset.stampAgrees = stampAgrees ? "1" : "0";
+      badge.dataset.runtimeId = runtimeId;
+    }
+    if (list) {
+      const diagnosticsBuild = section && section.dataset.h2oDiagnosticsBuild === "1" ? "ENABLED" : "DISABLED";
+      const rows = [
+        ["canonical_lane_key", built.laneKey],
+        ["btp_key", built.btpKey],
+        ["profile_role", built.profileRole],
+        ["surface_set", built.surfaceSet],
+        ["extension_family", built.variant || "UNKNOWN"],
+        ["extension_id", runtimeId + (idAgrees === false ? " (loaded id differs from registered " + built.registeredExtensionId + ")" : "")],
+        ["promotion_state", built.promotionState],
+        ["version", loadedVersion],
+        ["version_name", loadedVersionName + (stampAgrees ? "" : " (build stamp: " + built.versionName + ")")],
+        ["channel", built.channel],
+        ["source_revision", built.sourceRevision],
+        ["artifact_identity", (built.variant || "UNKNOWN") + "/" + runtimeId + "/" + loadedVersionName + "/g" + built.sourceRevisionShort],
+        ["artifact_digest", "registry-side (see h2o-browser)"],
+        ["chrome_version", chromeVersion + " (observed)"],
+        ["diagnostics_build", diagnosticsBuild],
+      ];
+      list.textContent = "";
+      for (const [key, value] of rows) {
+        const dt = document.createElement("dt");
+        dt.textContent = key;
+        const dd = document.createElement("dd");
+        dd.textContent = String(value);
+        dd.dataset.h2oIdentityKey = key;
+        list.appendChild(dt);
+        list.appendChild(dd);
+      }
+    }
+  })();
 `;
 }

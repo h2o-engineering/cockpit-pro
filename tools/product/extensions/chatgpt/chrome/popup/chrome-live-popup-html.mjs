@@ -1,4 +1,6 @@
 // @version 1.1.0
+import { resolveChromeBuildVisibilityFromEnvironment } from "../chrome-live-build-context.mjs";
+
 const SETTINGS_ICON = `<svg class="settings-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
      stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
   <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/>
@@ -9,6 +11,24 @@ export function makeChromeLivePopupHtml({
   panelLogoPath = "panel-icons/icon128.png",
   titleDiagnosticEnabled = false,
 } = {}) {
+  // T03 (leased, additive; semantic owner L-DEVELOPER-CONTROLS): opt-in loaded-build
+  // identity surface plus stable qualification anchors. Without the opt-in build
+  // context every byte below is unchanged.
+  const visibility = resolveChromeBuildVisibilityFromEnvironment();
+  const q = (name) => (visibility.enabled ? ` data-h2o-qual="${name}"` : "");
+  const escapeAttr = (value) => String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  const envBadge = visibility.enabled
+    ? `
+            <div class="h2o-env-badge" id="h2o-env-badge" data-h2o-qual="env-identity-badge" title="Loaded environment · surface · build (read-only)" aria-label="Loaded environment identity" data-built-for-lane="${escapeAttr(visibility.laneKey)}" data-built-for-surface="${escapeAttr(visibility.surfaceSet)}" data-build-version-name="${escapeAttr(visibility.versionName)}" data-source-revision="${escapeAttr(visibility.sourceRevision)}">${escapeAttr(visibility.laneKey)} · ${escapeAttr(visibility.surfaceSet)} · ${escapeAttr(visibility.versionName)}</div>`
+    : "";
+  const envIdentityDetail = visibility.enabled
+    ? `
+              <section class="info-panel h2o-env-identity" id="h2o-env-identity" data-h2o-qual="env-identity-detail" data-h2o-diagnostics-build="${titleDiagnosticEnabled ? "1" : "0"}" aria-labelledby="h2o-env-identity-head">
+                <div class="info-head" id="h2o-env-identity-head">Loaded build identity</div>
+                <dl class="h2o-env-identity-list" id="h2o-env-identity-list" aria-live="off"></dl>
+              </section>
+`
+    : "";
   return `<!doctype html>
 <html>
 <head>
@@ -18,7 +38,7 @@ export function makeChromeLivePopupHtml({
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <div class="app" id="app">
+  <div class="app" id="app"${q("popup-root")}>
     <aside class="leftbar-rail" id="leftbar-rail" aria-label="Collapsed leftbar" hidden>
       <div class="leftbar-rail-top">
         <button type="button" class="logo-toggle rail-logo-toggle" id="rail-logo-toggle" title="Open leftbar" aria-label="Open leftbar" aria-pressed="true">
@@ -85,8 +105,8 @@ export function makeChromeLivePopupHtml({
               <button type="button" class="project-color-dot is-blue" title="Project blue"></button>
               <button type="button" class="project-color-dot is-red" title="Project red"></button>
               <button type="button" class="project-color-dot is-green" title="Project green"></button>
-              <button type="button" class="project-color-dot is-yellow" title="Open Diagnostics Workspace" aria-label="Open Diagnostics Workspace" data-popup-action="open-diagnostics"></button>
-            </div>
+              <button type="button" class="project-color-dot is-yellow" title="Open Diagnostics Workspace" aria-label="Open Diagnostics Workspace" data-popup-action="open-diagnostics"${q("yellow-action")}></button>
+            </div>${envBadge}
           </div>
         </div>
       </header>
@@ -124,13 +144,13 @@ export function makeChromeLivePopupHtml({
         </div>
 
         <div class="controls-pages">
-          <div class="controls-page is-active" id="controls-page-main" data-controls-page="main" role="tabpanel">
+          <div class="controls-page is-active" id="controls-page-main" data-controls-page="main" role="tabpanel"${q("main-page")}>
             <div class="controls-page-scroll">
               <section class="actions-panel">
                 <div class="actions-head">Quick Actions</div>
                 <div class="actions">
-                  <button id="all-on" type="button">All On</button>
-                  <button id="all-off" type="button">All Off</button>
+                  <button id="all-on" type="button"${q("action-all-on")}>All On</button>
+                  <button id="all-off" type="button"${q("action-all-off")}>All Off</button>
                   <button id="page-off" type="button" title="Reload the active tab once with H2O scripts disabled">This Page Off</button>
                   <button id="reload" type="button">Reload Tab</button>
                   <button id="reset" type="button">Reset</button>
@@ -138,7 +158,7 @@ export function makeChromeLivePopupHtml({
                 </div>
               </section>
 
-              <section class="actions-panel" id="identity-provider-permission-panel" hidden>
+              <section class="actions-panel" id="identity-provider-permission-panel" hidden${q("identity-provider-panel")}>
                 <div class="actions-head">Dev Auth</div>
                 <div class="actions">
                   <button id="grant-supabase-permission" type="button">Grant Supabase Permission</button>
@@ -151,14 +171,14 @@ export function makeChromeLivePopupHtml({
                   <div class="sets-title">Sets</div>
                   <div id="sets-meta" class="sets-meta">0 saved</div>
                 </div>
-                <div class="set-slots" id="set-slots"></div>
+                <div class="set-slots" id="set-slots"${q("set-slots")}></div>
                 <label class="set-click-opt">
                   <input id="set-click-reload" type="checkbox" checked>
                   <span>Reload on set click</span>
                 </label>
                 <div class="sets-subtitle">Save to Set</div>
                 <div class="set-actions">
-                  <button id="set-save" type="button">Save</button>
+                  <button id="set-save" type="button"${q("set-save")}>Save</button>
                   <button id="set-edit" type="button">Edit</button>
                   <button id="set-clear" type="button">Clear</button>
                 </div>
@@ -199,7 +219,7 @@ export function makeChromeLivePopupHtml({
             <div class="controls-tail-anchor" data-settings-anchor="main"></div>
           </div>
 
-          <div class="controls-page" id="controls-page-info" data-controls-page="info" role="tabpanel" hidden>
+          <div class="controls-page" id="controls-page-info" data-controls-page="info" role="tabpanel" hidden${q("info-page")}>
             <div class="controls-page-scroll">
               <div class="meta">
                 <div class="meta-head">Info</div>
@@ -214,9 +234,9 @@ export function makeChromeLivePopupHtml({
                   <input id="advanced-runtime" type="checkbox">
                   <span>Advanced runtime (load last + ewma)</span>
                 </label>
-                <div class="info-grid" id="info-grid"></div>
+                <div class="info-grid" id="info-grid"${q("info-grid")}></div>
               </section>
-
+${envIdentityDetail}
             </div>
             <div class="controls-tail-anchor" data-settings-anchor="info"></div>
           </div>
@@ -240,11 +260,11 @@ export function makeChromeLivePopupHtml({
       </div>
     </aside>
 
-    <div class="list" id="list">
+    <div class="list" id="list"${q("controls-inventory")}>
       <div class="table-shell" id="table-shell"></div>
     </div>
 
-    ${titleDiagnosticEnabled ? `<section class="diagnostics-workspace" id="diagnostics-workspace" aria-labelledby="diagnostics-workspace-title" hidden>
+    ${titleDiagnosticEnabled ? `<section class="diagnostics-workspace" id="diagnostics-workspace" aria-labelledby="diagnostics-workspace-title" hidden${q("diagnostics-workspace")}>
       <aside class="diagnostics-sidebar" id="diagnostics-sidebar" aria-label="Diagnostics navigation and controls">
         <div class="diagnostics-sidebar-head">
           <div class="diagnostics-eyebrow">Developer tools</div>

@@ -1,6 +1,8 @@
 // @version 1.1.0  (Phase 0J: README content is now deterministic — no longer embeds OUT_DIR absolute path)
 import path from "node:path";
 
+import { resolveChromeBuildVisibilityFromEnvironment } from "./chrome-live-build-context.mjs";
+
 export function makeChromeLiveReadme({
   OUT_DIR,
   PROXY_PACK_URL,
@@ -18,7 +20,7 @@ export function makeChromeLiveReadme({
   // removing the legacy import. (`path` was previously used at this site.)
   void path; void OUT_DIR;
   if (!DEV_HAS_CONTROLS) {
-    return `H2O Dev Loader Extension (Lean, Unpacked)
+    return appendBuildIdentityLines(`H2O Dev Loader Extension (Lean, Unpacked)
 ==========================================
 
 This is the DEV-only lean loader extension button (no popup toggles).
@@ -44,10 +46,10 @@ Daily workflow:
 1) Run Common / 3
 2) Run the lean DEV build task (or lean combined task)
 3) Refresh chatgpt.com tab
-`;
+`);
   }
 
-  return `H2O Dev Controls Extension (Unpacked)
+  return appendBuildIdentityLines(`H2O Dev Controls Extension (Unpacked)
 =====================================
 
 This is the DEV-only extension button with per-script toggles.
@@ -76,5 +78,31 @@ Daily workflow:
 2) Reload this extension (if loader changed)
 3) Use the popup to toggle scripts
 4) Refresh chatgpt.com tab
+`);
+}
+
+// T03 (leased, additive; semantic owner L-DEVELOPER-CONTROLS): identity lines are
+// appended only for opt-in development-profile Developer Controls family builds, so
+// production / studio-launcher README bytes are unchanged. The artifact digest is
+// deliberately NOT embedded (it would be self-referential); the Browser Testing
+// artifact registry computes it over the emitted tree and records it beside the
+// promotion state.
+function appendBuildIdentityLines(readme) {
+  const visibility = resolveChromeBuildVisibilityFromEnvironment();
+  if (!visibility.enabled) return readme;
+  return `${readme}
+Build identity (T03 build visibility, opt-in):
+- version:            ${visibility.version}
+- version_name:       ${visibility.versionName}
+- source_revision:    ${visibility.sourceRevision}
+- variant:            ${visibility.variant} (manifest profile ${visibility.manifestProfile}, channel ${visibility.channel})
+- registered_ext_id:  ${visibility.registeredExtensionId || "NOT_REGISTERED"}
+- built_for_lane:     ${visibility.laneKey}
+- built_for_btp:      ${visibility.btpKey} (role ${visibility.profileRole})
+- built_for_surface:  ${visibility.surfaceSet}
+- promotion_state:    ${visibility.promotionState}
+- artifact_digest:    computed by the Browser Testing artifact registry as
+                      sha256 over sorted "<relpath>\\0<sha256(file)>" lines of every
+                      regular file in this directory (never embedded here)
 `;
 }

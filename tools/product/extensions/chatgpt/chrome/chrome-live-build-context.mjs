@@ -18,6 +18,7 @@ import {
   extensionBuildDir,
 } from "../../../../paths.mjs";
 import { resolveChromeBuildStamp } from "./chrome-live-build-stamp.mjs";
+import { deriveVariantFromOutDir, getExtensionId } from "./chrome-extension-keys.mjs";
 
 export function createChromeLiveBuildContext() {
   // paths.REPO_ROOT honors H2O_SRC_DIR identically to the previous inline
@@ -114,9 +115,21 @@ export function createChromeLiveBuildContext() {
   // localStorage.H2O_LOADER_V3_DISPATCHER_PILOT === "1".
   const PAGE_PILOT_OBSERVER_FILE = "pilot-observer-page.js";
 
+  // T03 build visibility (additive; see resolveChromeBuildVisibility below). Resolved
+  // from the same source-revision stamp so no second git/clock read is involved.
+  const BUILD_VISIBILITY = resolveChromeBuildVisibility({
+    manifestProfile: MANIFEST_PROFILE,
+    studioOnly: STUDIO_ONLY,
+    devHasControls: DEV_HAS_CONTROLS,
+    devVersion: DEV_VERSION,
+    variant: deriveVariantFromOutDir(OUT_DIR),
+    sourceRevision: CHROME_BUILD_IDENTITY.sourceRevision,
+  });
+
   return {
     SRC,
     CHROME_BUILD_IDENTITY,
+    BUILD_VISIBILITY,
     OUT_DIR,
     PROXY_PACK_URL,
     CHAT_MATCH,
@@ -136,4 +149,108 @@ export function createChromeLiveBuildContext() {
     PAGE_FOLDER_BRIDGE_FILE,
     PAGE_PILOT_OBSERVER_FILE,
   };
+}
+
+// ---------------------------------------------------------------------------
+// T03 build visibility — leased additive input (semantic owner L-DEVELOPER-CONTROLS,
+// implementing Lane L-DEVELOPER-BROWSER-TEST-ENVIRONMENT; Mission
+// establish-governed-lane-browser-test-profiles-and-build-visibility, T03).
+//
+// Opt-in only: nothing is emitted unless H2O_EXT_BUILD_CHANNEL is set AND the
+// build is a development-profile Developer Controls family build. Production and
+// studio-launcher outputs therefore stay byte-identical (owner condition C4).
+// Every value derives from the deterministic source-revision stamp — never from
+// the wall clock — so version_name is a fact about the committed source:
+//   version_name = <DEV_VERSION>-<channel>+g<sha8>
+// Optional environment identity (lane / surface / BTP / role) describes the
+// environment this artifact was BUILT FOR; consumers still display runtime facts
+// (chrome.runtime.getManifest(), chrome.runtime.id) as the loaded truth.
+export const CHROME_BUILD_VISIBILITY = Object.freeze({
+  CHANNEL_ENV: "H2O_EXT_BUILD_CHANNEL",
+  LANE_KEY_ENV: "H2O_EXT_ENV_LANE_KEY",
+  SURFACE_SET_ENV: "H2O_EXT_ENV_SURFACE_SET",
+  BTP_KEY_ENV: "H2O_EXT_ENV_BTP_KEY",
+  PROFILE_ROLE_ENV: "H2O_EXT_ENV_PROFILE_ROLE",
+  NOT_ESTABLISHED: "NOT_ESTABLISHED",
+  CHANNEL_PATTERN: /^[a-z][a-z0-9-]{0,23}$/,
+  LANE_KEY_PATTERN: /^L-[A-Z0-9]+(?:-[A-Z0-9]+)*$/,
+  SURFACE_SETS: Object.freeze(["CHAT", "STUDIO", "DUAL"]),
+  BTP_KEY_PATTERN: /^BTP:L-[A-Z0-9]+(?:-[A-Z0-9]+)*:(?:PRIMARY|ALT\d{2}|ACCEPTANCE\d{2})$/,
+  PROFILE_ROLE_PATTERN: /^(?:PRIMARY|ALT\d{2}|ACCEPTANCE\d{2})$/,
+  FULL_COMMIT_SHA: /^[0-9a-f]{40}$/,
+  PROMOTION_STATE_NOTE: "REGISTRY_SIDE_NOT_EMBEDDED",
+});
+
+function readOptionalIdentityInput(environment, envName, pattern, label) {
+  const raw = String(environment?.[envName] || "").trim();
+  if (!raw || raw === CHROME_BUILD_VISIBILITY.NOT_ESTABLISHED) return CHROME_BUILD_VISIBILITY.NOT_ESTABLISHED;
+  if (!pattern.test(raw)) {
+    throw new Error(`[H2O] ${envName} is not a valid ${label}: ${JSON.stringify(raw)}`);
+  }
+  return raw;
+}
+
+export function resolveChromeBuildVisibility({
+  environment = process.env,
+  manifestProfile = "development",
+  studioOnly = false,
+  devHasControls = false,
+  devVersion = "1.3.0",
+  variant = null,
+  sourceRevision = null,
+} = {}) {
+  const channel = String(environment?.[CHROME_BUILD_VISIBILITY.CHANNEL_ENV] || "").trim();
+  const enabled = channel !== "" && manifestProfile === "development" && studioOnly !== true;
+  const disabled = Object.freeze({
+    enabled: false,
+    channel: null,
+    version: devVersion,
+    versionName: null,
+    sourceRevision: null,
+    sourceRevisionShort: null,
+    variant: variant || null,
+    registeredExtensionId: variant ? getExtensionId(variant) : null,
+    manifestProfile,
+    devHasControls,
+    laneKey: CHROME_BUILD_VISIBILITY.NOT_ESTABLISHED,
+    surfaceSet: CHROME_BUILD_VISIBILITY.NOT_ESTABLISHED,
+    btpKey: CHROME_BUILD_VISIBILITY.NOT_ESTABLISHED,
+    profileRole: CHROME_BUILD_VISIBILITY.NOT_ESTABLISHED,
+    promotionState: CHROME_BUILD_VISIBILITY.PROMOTION_STATE_NOTE,
+  });
+  if (!enabled) return disabled;
+  if (!CHROME_BUILD_VISIBILITY.CHANNEL_PATTERN.test(channel)) {
+    throw new Error(
+      `[H2O] ${CHROME_BUILD_VISIBILITY.CHANNEL_ENV} must match ${CHROME_BUILD_VISIBILITY.CHANNEL_PATTERN}: ${JSON.stringify(channel)}`,
+    );
+  }
+  const revision = String(sourceRevision || resolveChromeBuildStamp().sourceRevision || "").trim().toLowerCase();
+  if (!CHROME_BUILD_VISIBILITY.FULL_COMMIT_SHA.test(revision)) {
+    throw new Error("[H2O] build visibility requires the exact full source revision from the build stamp");
+  }
+  const V = CHROME_BUILD_VISIBILITY;
+  return Object.freeze({
+    ...disabled,
+    enabled: true,
+    channel,
+    versionName: `${devVersion}-${channel}+g${revision.slice(0, 8)}`,
+    sourceRevision: revision,
+    sourceRevisionShort: revision.slice(0, 8),
+    laneKey: readOptionalIdentityInput(environment, V.LANE_KEY_ENV, V.LANE_KEY_PATTERN, "canonical Lane key"),
+    surfaceSet: (() => {
+      const raw = String(environment?.[V.SURFACE_SET_ENV] || "").trim();
+      if (!raw || raw === V.NOT_ESTABLISHED) return V.NOT_ESTABLISHED;
+      if (!V.SURFACE_SETS.includes(raw)) throw new Error(`[H2O] ${V.SURFACE_SET_ENV} must be one of ${V.SURFACE_SETS.join("|")}: ${JSON.stringify(raw)}`);
+      return raw;
+    })(),
+    btpKey: readOptionalIdentityInput(environment, V.BTP_KEY_ENV, V.BTP_KEY_PATTERN, "BTP key"),
+    profileRole: readOptionalIdentityInput(environment, V.PROFILE_ROLE_ENV, V.PROFILE_ROLE_PATTERN, "profile role"),
+  });
+}
+
+// Convenience for the leased generator modules (manifest, README, popup), which
+// receive no orchestrator plumbing: resolve the same context the orchestrator
+// resolved and hand back its BUILD_VISIBILITY.
+export function resolveChromeBuildVisibilityFromEnvironment() {
+  return createChromeLiveBuildContext().BUILD_VISIBILITY;
 }
