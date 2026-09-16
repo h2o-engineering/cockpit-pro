@@ -14,7 +14,12 @@
 // conflict-snapshot-id, conflict-chat-id, and tombstoned. K.4.3 extends it again
 // to archive relink: relink-ready -> relinked, typed-confirm rejection,
 // already-relinked, target-missing/deleted/tombstoned/conflict, exact pointer
-// UPDATE bounds, and old snapshot/turn preservation.
+// UPDATE bounds, and old snapshot/turn preservation. O1 (bounded residual-debt
+// correction) extends the import-as-new proof to the recovered chat row's
+// summary counters — derived by the importer from the persisted turns and
+// written in the INITIAL INSERT — and drives the REAL Desktop read model
+// (LibraryIndexCore + S0F1c projection + the studio.js Workbench/card seam)
+// over the recovered row to prove the list card reads "1 answer".
 //
 //   [I.0]      = the harness contract (doc assertions).
 //   [SCAFFOLD] = scaffold artifacts + the deterministic fixture is well-formed.
@@ -33,6 +38,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
 import { DatabaseSync } from 'node:sqlite';
 import { createRequire } from 'node:module';
 
@@ -52,6 +58,16 @@ const FIXTURE_PKG_REL = FIXTURE_DIR_REL + '/i-harness-source.h2ochat';
 const V3_FIXTURE_PKG_REL = 'tools/validation/fixtures/saved-chat-archive/v3/t06-canonical-assets.h2ochat';
 const V3_GZIP_FIXTURE_PKG_REL = 'tools/validation/fixtures/saved-chat-archive/v3/gzip/t06-canonical-assets.h2ochat';
 const IMPORTER_REL = 'src-surfaces-base/studio/ingestion/saved-chat-archive-importer.studio.js';
+/* O1: the REAL Desktop read model the list card is fed from. Loaded as source
+ * into a vm context over the harness's own temp DB (the same pattern the P02
+ * imported-chat timestamp-authority validator uses), never re-implemented. */
+const READ_MODEL_SOURCES = {
+  chats: 'src-surfaces-base/studio/store/chats.tauri.js',
+  snapshots: 'src-surfaces-base/studio/store/snapshots.tauri.js',
+  libraryIndexCore: 'shared/library/library-index-core.js',
+  libraryIndex: 'src-surfaces-base/studio/S0F1c. 🎬 Library Index - Studio.js',
+  studio: 'src-surfaces-base/studio/studio.js',
+};
 const LIB_RS_REL = 'apps/studio/desktop/src-tauri/src/lib.rs';
 const WRITER_IDENTITY_RS_REL = 'apps/studio/desktop/src-tauri/src/sqlite_writer_identity.rs';
 const STORE_MODULES = [
@@ -340,6 +356,117 @@ function generateConflictFreeFixture(srcDir, dstDir, newChat, newSnap) {
 
 function dirSig(dir) {
   return fs.readdirSync(dir).sort().map((f) => f + ':' + crypto.createHash('sha256').update(fs.readFileSync(path.join(dir, f))).digest('hex').slice(0, 12)).join('|');
+}
+
+/* ── O1: the REAL Desktop read model over the harness DB ────────────────────
+ * Boots the real chats/snapshots store adapters, the shared LibraryIndexCore
+ * and the real S0F1c Library Index module inside a vm context whose Tauri
+ * invoke is the harness's own mock (same temp DB, same write ledger), then
+ * slices the real studio.js seam functions the list card is rendered through.
+ * Nothing here projects a counter itself: a wrong number can only come from
+ * the product modules. */
+async function bootReadModel(invoke) {
+  const src = {};
+  for (const k of Object.keys(READ_MODEL_SOURCES)) src[k] = readRepo(READ_MODEL_SOURCES[k]);
+  const listeners = new Map();
+  const sb = {
+    console, crypto: crypto.webcrypto, TextEncoder, TextDecoder, structuredClone, setTimeout, clearTimeout, Date, performance,
+    CustomEvent: class CustomEvent { constructor(type, init) { this.type = type; this.detail = init && init.detail; } },
+    document: { querySelectorAll() { return []; } },
+    addEventListener(type, fn) { listeners.set(type, fn); },
+    dispatchEvent() { return true; },
+    H2O: { Studio: { platform: { env: { isTauri: true }, __sqliteStatus: () => ({ backend: 'sqlite', ready: true }) }, store: {} }, Library: {} },
+  };
+  sb.__TAURI_INTERNALS__ = { invoke };
+  sb.globalThis = sb;
+  sb.window = sb;
+  sb.H2O.Studio.store.__registerEntity = function (name, api) { sb.H2O.Studio.store[name] = api; };
+  vm.createContext(sb);
+  vm.runInContext(src.chats, sb, { filename: 'chats.tauri.js' });
+  vm.runInContext(src.snapshots, sb, { filename: 'snapshots.tauri.js' });
+  await sb.H2O.Studio.store.chats.init();
+  await sb.H2O.Studio.store.snapshots.init();
+  vm.runInContext(src.libraryIndexCore, sb, { filename: 'library-index-core.js' });
+  assert.ok(sb.H2O.Library.LibraryIndexCore, 'O1 read model: shared LibraryIndexCore must load');
+  for (const name of ['folders', 'labels', 'tags', 'categories']) {
+    if (!sb.H2O.Studio.store[name]) sb.H2O.Studio.store[name] = { isReady: () => true, subscribe() { return () => {}; } };
+  }
+  sb.H2O.LibraryCore = { registerOwner() {}, registerService() {}, getService() { return null; } };
+  vm.runInContext(src.libraryIndex, sb, { filename: 'S0F1c-library-index.js' });
+  assert.ok(sb.H2O.LibraryIndex && typeof sb.H2O.LibraryIndex.refresh === 'function', 'O1 read model: real Library Index module must boot');
+  await sb.H2O.LibraryIndex.ready;
+  return { libraryIndex: sb.H2O.LibraryIndex, seam: loadStudioCardSeam(src.studio) };
+}
+
+/* The REAL studio.js seam functions the Workbench list card is rendered
+ * through, sliced by name from the shell source with a small lexer (quotes,
+ * template literals with ${} expressions, comments) so a template in a
+ * default parameter (pluralize) or a label template (rowMetaParts) cannot
+ * unbalance the brace count. A mis-slice surfaces as a SyntaxError. */
+function sliceStudioFunction(source, name) {
+  const marker = `\nfunction ${name}(`;
+  const start = source.indexOf(marker);
+  if (start < 0) throw new Error(`studio.js: function ${name} not found`);
+  let i = start + marker.length;
+  const stack = [];
+  let paren = 1;
+  let depth = 0;
+  let inBody = false;
+  for (; i < source.length; i += 1) {
+    const ch = source[i];
+    const next = source[i + 1];
+    const top = stack[stack.length - 1];
+    if (top === 'sq') { if (ch === '\\') i += 1; else if (ch === "'") stack.pop(); continue; }
+    if (top === 'dq') { if (ch === '\\') i += 1; else if (ch === '"') stack.pop(); continue; }
+    if (top === 'tpl') {
+      if (ch === '\\') i += 1;
+      else if (ch === '`') stack.pop();
+      else if (ch === '$' && next === '{') { stack.push('expr'); stack.push(0); i += 1; }
+      continue;
+    }
+    if (ch === "'") { stack.push('sq'); continue; }
+    if (ch === '"') { stack.push('dq'); continue; }
+    if (ch === '`') { stack.push('tpl'); continue; }
+    if (ch === '/' && next === '/') { i = source.indexOf('\n', i); if (i < 0) break; continue; }
+    if (ch === '/' && next === '*') { i = source.indexOf('*/', i) + 1; continue; }
+    if (typeof top === 'number') {
+      if (ch === '{') stack[stack.length - 1] = top + 1;
+      else if (ch === '}') { if (top === 0) { stack.pop(); stack.pop(); } else stack[stack.length - 1] = top - 1; }
+      continue;
+    }
+    if (!inBody) {
+      if (ch === '(') paren += 1;
+      else if (ch === ')') paren -= 1;
+      else if (ch === '{' && paren === 0) { inBody = true; depth = 1; }
+      continue;
+    }
+    if (ch === '{') depth += 1;
+    else if (ch === '}') { depth -= 1; if (depth === 0) return source.slice(start + 1, i + 1); }
+  }
+  throw new Error(`studio.js: function ${name} unterminated`);
+}
+function loadStudioCardSeam(studioSource) {
+  const names = ['toTimestampMs', 'timestampToIso', 'firstTimestamp', 'messageTimestamp', 'earliestMessageTimestamp',
+    'latestMessageTimestamp', 'resolveOriginalChatCreatedAt', 'resolveLastTurnAt', 'resolveStudioAddedAt',
+    'projectLibraryIndexRowToWorkbenchInput', 'normalizeWorkbenchRow', 'rowMetaParts', 'fmtDateMeta', 'pluralize', 'toWholeCount'];
+  const stubs = `
+    function buildExcerptFromMessages(){ return ''; }
+    function countAssistantTurns(list){ return (Array.isArray(list) ? list : []).filter((m) => String(m && m.role).toLowerCase() === 'assistant').length; }
+    function normalizeSidebarIconColor(v){ return String(v || ''); }
+    function normalizeTags(v){ return Array.isArray(v) ? v.slice() : []; }
+    function normalizeOriginSource(v){ return v || null; }
+    function normalizeProjectRef(v){ return v || null; }
+    function normalizeCategoryAssignment(v){ return v || null; }
+    function normalizeLabelAssignments(v){ return Array.isArray(v) ? v.slice() : []; }
+    function normalizeKeywords(v){ return Array.isArray(v) ? v.slice() : []; }
+  `;
+  const code = stubs + names.map((n) => sliceStudioFunction(studioSource, n)).join('\n') +
+    '\nglobalThis.__seam = { ' + names.join(', ') + ' };';
+  const ctx = { console, Date, Intl };
+  ctx.globalThis = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(code, ctx, { filename: 'studio-card-seam.js' });
+  return ctx.__seam;
 }
 
 async function runHarness() {
@@ -809,6 +936,58 @@ async function runHarness() {
     const newChatRow = imp.recovered && imp.recovered.newChatId ? db.prepare('SELECT id, title FROM chats WHERE id=?').get(imp.recovered.newChatId) : null;
     const newTurns = newSnapId ? db.prepare('SELECT count(*) c FROM snapshot_turns WHERE snapshot_id=?').get(newSnapId).c : 0;
     const prov = newSnapRow ? (JSON.parse(newSnapRow.meta_json || '{}').recovered || {}) : {};
+
+    /* ── O1: the recovered chat row's summary counters ────────────────────
+     * Expectations are derived HERE, independently, from the import-ready
+     * package's own snapshot.json: count roles, and take the latest valid
+     * per-turn createdAt as epoch ms. The importer's derivation is the thing
+     * under test, so nothing below reuses it. */
+    const readySnapJson = JSON.parse(fs.readFileSync(path.join(readyDir, 'snapshot.json'), 'utf8'));
+    const readyMsgs = Array.isArray(readySnapJson.messages) ? readySnapJson.messages : [];
+    const roleOf = (m) => String((m && (m.role || m.author)) || '').trim().toLowerCase();
+    const expectedUser = readyMsgs.filter((m) => roleOf(m) === 'user').length;
+    const expectedAssistant = readyMsgs.filter((m) => roleOf(m) === 'assistant').length;
+    const expectedLastMessageAt = readyMsgs.reduce((max, m) => {
+      const ms = Date.parse(String((m && m.createdAt) || ''));
+      return Number.isFinite(ms) && ms > max ? ms : max;
+    }, 0);
+    const recoveredChatRow = imp.recovered && imp.recovered.newChatId
+      ? normRow(db.prepare('SELECT * FROM chats WHERE id=?').get(imp.recovered.newChatId)) : null;
+    const recoveredChatMeta = recoveredChatRow ? JSON.parse(recoveredChatRow.meta_json || '{}') : {};
+    /* The exact bound INSERT of the recovered chat row: the counters must be in
+     * the INITIAL insert, not supplied by a later statement. */
+    const chatInsertPayload = sqlPayloads
+      .map((j) => JSON.parse(j))
+      .find((pl) => /^\s*INSERT INTO chats\b/i.test(pl.query) && pl.values.indexOf(imp.recovered && imp.recovered.newChatId) === 0);
+    const insertedColumns = chatInsertPayload
+      ? String((chatInsertPayload.query.match(/INSERT INTO chats \(([^)]*)\)/i) || [])[1] || '').split(',').map((c) => c.trim())
+      : [];
+    const insertedValue = (col) => insertedColumns.indexOf(col) >= 0 ? chatInsertPayload.values[insertedColumns.indexOf(col)] : undefined;
+    const insertedMeta = insertedColumns.indexOf('meta_json') >= 0 ? JSON.parse(String(insertedValue('meta_json') || '{}')) : {};
+
+    /* The REAL read model over the same temp DB: chat row -> current Library
+     * Index projection -> current Workbench input -> rendered card metadata. */
+    const wReadModel = writes.length;
+    const readModel = await bootReadModel(mockInvoke);
+    await readModel.libraryIndex.refresh('o1-harness');
+    const liRow = readModel.libraryIndex.getAll().find((r) => r && r.chatId === (imp.recovered && imp.recovered.newChatId)) || null;
+    const wbInput = liRow ? readModel.seam.projectLibraryIndexRowToWorkbenchInput(liRow) : null;
+    const wbRow = wbInput ? readModel.seam.normalizeWorkbenchRow(wbInput) : null;
+    const cardParts = wbRow ? readModel.seam.rowMetaParts(wbRow) : [];
+    const readModelWrites = writes.length - wReadModel;
+    const o1 = {
+      expected: { messageCount: readyMsgs.length, userTurnCount: expectedUser, assistantTurnCount: expectedAssistant, answerCount: expectedAssistant, lastMessageAt: expectedLastMessageAt,
+        latestTurnCreatedAt: readyMsgs.map((m) => String((m && m.createdAt) || '')).sort().slice(-1)[0] || '' },
+      row: recoveredChatRow ? { message_count: recoveredChatRow.message_count, user_turn_count: recoveredChatRow.user_turn_count, assistant_turn_count: recoveredChatRow.assistant_turn_count,
+        last_message_at: recoveredChatRow.last_message_at, created_at: recoveredChatRow.created_at, updated_at: recoveredChatRow.updated_at, is_saved: recoveredChatRow.is_saved, is_linked: recoveredChatRow.is_linked,
+        snapshot_count: recoveredChatRow.snapshot_count, last_snapshot_id: recoveredChatRow.last_snapshot_id, last_captured_at: recoveredChatRow.last_captured_at } : null,
+      meta: { answerCount: recoveredChatMeta.answerCount, recoveredFromPackage: recoveredChatMeta.recovered && recoveredChatMeta.recovered.recoveredFromPackage,
+        recoveredAtMs: Date.parse(String((recoveredChatMeta.recovered && recoveredChatMeta.recovered.recoveredAt) || '')), originalChatId: recoveredChatMeta.recovered && recoveredChatMeta.recovered.originalChatId },
+      insert: { found: !!chatInsertPayload, columns: insertedColumns, message_count: insertedValue('message_count'), user_turn_count: insertedValue('user_turn_count'),
+        assistant_turn_count: insertedValue('assistant_turn_count'), last_message_at: insertedValue('last_message_at'), metaAnswerCount: insertedMeta.answerCount },
+      readModel: { liRowFound: !!liRow, li: liRow ? { messageCount: liRow.messageCount, userTurnCount: liRow.userTurnCount, assistantTurnCount: liRow.assistantTurnCount, answerCount: liRow.answerCount, lastMessageAt: liRow.lastMessageAt, view: liRow.view } : null,
+        workbench: wbRow ? { answerCount: wbRow.answerCount, messageCount: wbRow.messageCount, lastTurnAt: wbRow.lastTurnAt } : null, cardParts, writes: readModelWrites },
+    };
 
     // already-imported path (source fixture, original ids seeded)
     const wAI = writes.length;
@@ -1402,6 +1581,7 @@ async function runHarness() {
           liveDbUntouchedWitness: true,
         },
       },
+      o1,
       liveDb: { present: !!liveBefore, untouched: !liveBefore || (!!liveAfter && liveBefore.mtimeMs === liveAfter.mtimeMs && liveBefore.size === liveAfter.size), seedIsTemp: seedDbPath.startsWith(os.tmpdir()) },
     };
   } finally {
@@ -1864,6 +2044,91 @@ check('[I.2] live Desktop DB untouched (seed DB is a temp file; live studio-v1.d
   assert.ok(H);
   assert.equal(H.liveDb.seedIsTemp, true, 'seed DB must be a temp file');
   assert.equal(H.liveDb.untouched, true, 'live studio-v1.db mtime/size must be unchanged (or absent in CI)');
+});
+
+// --- D-O1. Recovered chat summary counters (bounded residual-debt correction) ---
+check('[O1] the fixture really is 2 turns / 1 user / 1 assistant with deterministic per-turn times', () => {
+  assert.ok(H);
+  assert.equal(H.o1.expected.messageCount, 2);
+  assert.equal(H.o1.expected.userTurnCount, 1);
+  assert.equal(H.o1.expected.assistantTurnCount, 1);
+  assert.ok(H.o1.expected.lastMessageAt > 0, 'the fixture carries a parseable latest turn createdAt');
+  assert.equal(H.o1.expected.lastMessageAt, Date.parse(H.o1.expected.latestTurnCreatedAt), 'expected epoch derives from the fixture\'s latest turn createdAt');
+  assert.equal(new Date(H.o1.expected.lastMessageAt).toISOString(), H.o1.expected.latestTurnCreatedAt);
+});
+
+check('[O1] recovered chats row carries message_count = 2, user_turn_count = 1, assistant_turn_count = 1, meta.answerCount = 1', () => {
+  assert.ok(H && H.o1.row, 'recovered chat row present');
+  assert.equal(H.o1.row.message_count, H.o1.expected.messageCount, 'message_count');
+  assert.equal(H.o1.row.user_turn_count, H.o1.expected.userTurnCount, 'user_turn_count');
+  assert.equal(H.o1.row.assistant_turn_count, H.o1.expected.assistantTurnCount, 'assistant_turn_count');
+  assert.equal(H.o1.meta.answerCount, H.o1.expected.answerCount, 'meta_json.answerCount');
+  assert.equal(H.o1.row.message_count, 2); assert.equal(H.o1.row.user_turn_count, 1);
+  assert.equal(H.o1.row.assistant_turn_count, 1); assert.equal(H.o1.meta.answerCount, 1);
+});
+
+check('[O1] last_message_at is the latest fixture turn time, not the recovery moment', () => {
+  assert.ok(H && H.o1.row);
+  assert.equal(H.o1.row.last_message_at, H.o1.expected.lastMessageAt, 'last_message_at = latest fixture turn createdAt (epoch ms)');
+  assert.ok(H.o1.meta.recoveredAtMs > 0, 'provenance recoveredAt is a real time');
+  assert.notEqual(H.o1.row.last_message_at, H.o1.meta.recoveredAtMs, 'not the recovery moment');
+  assert.notEqual(H.o1.row.last_message_at, H.o1.row.created_at, 'not the row creation time');
+  assert.notEqual(H.o1.row.last_message_at, H.o1.row.updated_at, 'not updatedAt');
+  assert.ok(H.o1.row.last_message_at < H.o1.row.created_at, 'the fixture turn precedes the recovery');
+});
+
+check('[O1] the counters ride the INITIAL INSERT of the recovered row — no later statement supplies them', () => {
+  assert.ok(H && H.o1.insert.found, 'the recovered chat INSERT payload was captured');
+  for (const col of ['message_count', 'user_turn_count', 'assistant_turn_count', 'last_message_at', 'meta_json']) {
+    assert.ok(H.o1.insert.columns.indexOf(col) >= 0, 'INSERT names ' + col);
+  }
+  assert.equal(H.o1.insert.message_count, 2); assert.equal(H.o1.insert.user_turn_count, 1);
+  assert.equal(H.o1.insert.assistant_turn_count, 1); assert.equal(H.o1.insert.last_message_at, H.o1.expected.lastMessageAt);
+  assert.equal(H.o1.insert.metaAnswerCount, 1, 'answerCount travels inside meta_json');
+  assert.equal(H.noUpdate, true, 'import write verbs still contain NO UPDATE: ' + JSON.stringify(H.writeVerbs));
+  assert.equal(H.writeVerbs.filter((w) => w.startsWith('INSERT chats')).length, 1, 'exactly one chats INSERT');
+});
+
+check('[O1] provenance and recovery identity are preserved; the write shape is not widened', () => {
+  assert.ok(H && H.o1.row);
+  assert.equal(H.o1.meta.recoveredFromPackage, true, 'meta.recovered provenance intact');
+  assert.equal(H.o1.meta.originalChatId, H.pkg.readyChat, 'original id still recorded in provenance only');
+  assert.equal(H.o1.row.is_saved, 1); assert.equal(H.o1.row.is_linked, 0);
+  assert.equal(H.o1.row.snapshot_count, 0, 'snapshot_count not written by O1');
+  assert.equal(H.o1.row.last_snapshot_id, null, 'last_snapshot_id not written by O1');
+  assert.equal(H.o1.row.last_captured_at, 0, 'last_captured_at not written by O1');
+  assert.equal(H.o1.insert.columns.indexOf('snapshot_count'), -1);
+  assert.equal(H.o1.insert.columns.indexOf('last_snapshot_id'), -1);
+  assert.equal(H.o1.insert.columns.indexOf('last_captured_at'), -1);
+});
+
+check('[O1] importer derives the counters from the persisted turns, not from package count metadata', () => {
+  assert.ok(importerCode.includes('function deriveRecoveredChatSummary(turns)'), 'derivation takes the normalized turns');
+  assert.ok(/var summary = deriveRecoveredChatSummary\(turns\);/.test(importerCode), 'called on the same turns snapStore.create persists');
+  assert.ok(/meta: \{ recovered: provenance, answerCount: summary\.answerCount \}/.test(importerCode), 'answerCount sits inside meta beside the provenance');
+  assert.ok(/if \(summary\.lastMessageAt > 0\) chatPatch\.lastMessageAt = summary\.lastMessageAt;/.test(importerCode), 'lastMessageAt only from a trustworthy turn time');
+  const body = importerCode.slice(importerCode.indexOf('function deriveRecoveredChatSummary(turns)'), importerCode.indexOf('function importCandidate('));
+  for (const banned of ['metadata.messageCount', 'snapshotJson', 'identity.', 'manifest']) assert.ok(!body.includes(banned), 'derivation must not read ' + banned);
+  assert.ok(!/answerCount:\s*summary\.answerCount,\s*\n\s*meta:/.test(importerCode), 'no top-level answerCount patch field');
+});
+
+check('[O1] REAL read model: recovered row -> current Library Index projection carries the counters', () => {
+  assert.ok(H && H.o1.readModel.liRowFound, 'the real Library Index projects the recovered chat');
+  assert.equal(H.o1.readModel.li.answerCount, 1, 'LI answerCount');
+  assert.equal(H.o1.readModel.li.userTurnCount, 1, 'LI userTurnCount');
+  assert.equal(H.o1.readModel.li.assistantTurnCount, 1, 'LI assistantTurnCount');
+  assert.equal(H.o1.readModel.li.messageCount, 2, 'LI messageCount');
+  assert.equal(H.o1.readModel.li.lastMessageAt, H.o1.expected.lastMessageAt, 'LI lastMessageAt = latest fixture turn');
+  assert.equal(H.o1.readModel.li.view, 'saved', 'a saved row');
+  assert.equal(H.o1.readModel.writes, 0, 'the read model performed zero writes');
+});
+
+check('[O1] REAL read model: current Workbench input answerCount = 1 and the rendered card reads "1 answer", not "0 answers"', () => {
+  assert.ok(H && H.o1.readModel.workbench, 'the LI row projects to a Workbench row');
+  assert.equal(H.o1.readModel.workbench.answerCount, 1, 'workbench answerCount');
+  assert.equal(H.o1.readModel.workbench.lastTurnAt, new Date(H.o1.expected.lastMessageAt).toISOString(), 'Last turn from the turn authority');
+  assert.equal(H.o1.readModel.cardParts[1], '1 answer', 'card metadata: ' + JSON.stringify(H.o1.readModel.cardParts));
+  assert.ok(!H.o1.readModel.cardParts.some((p) => p === '0 answers'), 'never "0 answers"');
 });
 
 // --- E. Restore-original-ids harness (K.3) ----------------------------------
