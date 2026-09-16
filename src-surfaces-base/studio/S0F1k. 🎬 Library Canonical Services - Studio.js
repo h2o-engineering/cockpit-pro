@@ -75,34 +75,25 @@
   }
 
   // ── Native-link-opener adapter ─────────────────────────────────────────────
-  // Studio runs in chrome-extension origin. We attempt chrome.tabs.create first
-  // (the right call from an extension page) and fall back to window.open so
-  // anonymous test consoles still work. Phase 7 will tighten this further.
   const nativeLinkOpener = Object.freeze({
     __canonicalName: 'native-link-opener',
     __surface: SURFACE,
     open(url, opts = {}) {
-      const target = (opts && opts.target) || '_blank';
-      const features = (opts && opts.features) || 'noopener,noreferrer';
       const u = String(url || '');
-      try {
-        if (W.chrome?.tabs?.create) {
-          W.chrome.tabs.create({ url: u, active: !(opts && opts.background) });
-          return null;
-        }
-      } catch (e) { err('native-link-opener.chrome-tabs', e); }
-      try {
-        return W.open(u, target, features);
-      } catch (e) {
-        err('native-link-opener.window-open', e);
-        return null;
+      const runtime = H2O.Studio?.platform?.runtime || null;
+      if (!runtime || typeof runtime.openUrl !== 'function') {
+        const error = new Error('H2O.Studio.platform.runtime.openUrl unavailable');
+        err('native-link-opener.runtime-open-url', error);
+        return Promise.resolve(null);
       }
+      return Promise.resolve(runtime.openUrl(u, { active: !(opts && opts.background) }))
+        .catch((e) => { err('native-link-opener.runtime-open-url', e); return null; });
     },
     diagnose() {
       return {
         name: 'native-link-opener',
         surface: SURFACE,
-        hasChromeTabs: !!W.chrome?.tabs?.create,
+        hasRuntimeOpenUrl: typeof H2O.Studio?.platform?.runtime?.openUrl === 'function',
         ok: true,
       };
     },
@@ -2098,52 +2089,15 @@
   }
 
   function sendRuntimeArchiveMessage(op = STORAGE_BACKGROUND_DIAG_OP, payload = {}) {
-    return new Promise((resolve, reject) => {
-      try {
-        if (!W.chrome?.runtime || typeof W.chrome.runtime.sendMessage !== 'function') {
-          reject(new Error('chrome.runtime.sendMessage unavailable'));
-          return;
-        }
-        W.chrome.runtime.sendMessage({
-          type: STORAGE_ARCHIVE_MSG,
-          req: { op: String(op || ''), payload: payload && typeof payload === 'object' ? payload : {} },
-        }, (response) => {
-          const le = W.chrome?.runtime?.lastError;
-          if (le) {
-            reject(new Error(String(le.message || le)));
-            return;
-          }
-          resolve(response);
-        });
-      } catch (e) {
-        reject(e);
-      }
-    });
-  }
-
-  async function getBackgroundHealth() {
-    try {
-      const bridge = safeCall('storage-adapter.background.bridge.get', () => H2O.archiveBoot?._getExtensionBridge?.(), null);
-      if (bridge && typeof bridge.libraryStorageDiagnose === 'function') {
-        const out = await bridge.libraryStorageDiagnose();
-        return normalizeBackgroundHealthEnvelope(out, 'extension-archive-bridge');
-      }
-      if (W.chrome?.runtime && typeof W.chrome.runtime.sendMessage === 'function') {
-        const out = await sendRuntimeArchiveMessage(STORAGE_BACKGROUND_DIAG_OP, {});
-        return normalizeBackgroundHealthEnvelope(out, 'chrome.runtime.sendMessage');
-      }
-      return rememberBackgroundHealth({
-        ok: false,
-        status: 'background-diagnostic-unavailable',
-        reason: 'no extension archive bridge or chrome.runtime transport available',
-      }, 'none');
-    } catch (e) {
-      return rememberBackgroundHealth({
-        ok: false,
-        status: 'background-diagnostic-error',
-        reason: String(e?.message || e || ''),
-      }, 'error');
+    const messaging = H2O.Studio?.platform?.messaging || null;
+    if (!messaging || typeof messaging.send !== 'function') {
+      return Promise.reject(new Error('platform messaging unavailable'));
     }
+    const message = {
+      type: STORAGE_ARCHIVE_MSG,
+      req: { op: String(op || ''), payload: payload && typeof payload === 'object' ? payload : {} },
+    };
+    return Promise.resolve(messaging.send(STORAGE_ARCHIVE_MSG, message));
   }
 
   function rememberSchemaCreationResult(result, transport) {

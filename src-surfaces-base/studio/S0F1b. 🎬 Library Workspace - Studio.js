@@ -1125,218 +1125,47 @@
   }
 
   // ── Layout persistence ─────────────────────────────────────────────────────
-  function loadLayout() {
-    if (cache.layout) return cache.layout;
+  let layoutStoreHydrationStarted = false;
+  function getLibraryStore() {
+    try { return H2O.Library?.Store || null; } catch { return null; }
+  }
+  function readLegacyLayout() {
     try {
       const raw = W.localStorage.getItem(LAYOUT_KEY);
-      cache.layout = raw ? JSON.parse(raw) : { sidebarExpanded: true, view: 'saved' };
-    } catch (e) { err('loadLayout', e); cache.layout = { sidebarExpanded: true, view: 'saved' }; }
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { err('loadLayout.legacy-read', e); return null; }
+  }
+  function hydrateLayoutFromStore() {
+    if (layoutStoreHydrationStarted) return;
+    layoutStoreHydrationStarted = true;
+    const store = getLibraryStore();
+    if (!store || typeof store.get !== 'function') return;
+    Promise.resolve(store.get(LAYOUT_KEY)).then((stored) => {
+      if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return;
+      cache.layout = { sidebarExpanded: true, view: 'saved', ...stored };
+      emitUpdated('layout-store-hydrate', { layout: { ...cache.layout } });
+    }).catch((e) => err('loadLayout.store-read', e));
+  }
+  function loadLayout() {
+    if (!cache.layout) {
+      const legacy = readLegacyLayout();
+      cache.layout = legacy && typeof legacy === 'object'
+        ? { sidebarExpanded: true, view: 'saved', ...legacy }
+        : { sidebarExpanded: true, view: 'saved' };
+    }
+    hydrateLayoutFromStore();
     return cache.layout;
   }
   function saveLayout(patch) {
     try {
       const next = { ...loadLayout(), ...(patch || {}) };
       cache.layout = next;
-      W.localStorage.setItem(LAYOUT_KEY, JSON.stringify(next));
+      const store = getLibraryStore();
+      if (!store || typeof store.set !== 'function') throw new Error('Library Store unavailable');
+      Promise.resolve(store.set(LAYOUT_KEY, next)).catch((e) => err('saveLayout.store-write', e));
       step('saveLayout', JSON.stringify(next));
       return true;
     } catch (e) { err('saveLayout', e); return false; }
-  }
-
-  // ── Cache helpers ──────────────────────────────────────────────────────────
-  function isFresh(slot) {
-    return slot && slot.value != null && (Date.now() - slot.ts) < slot.ttl;
-  }
-  function setCache(slot, value) {
-    slot.value = value;
-    slot.ts = Date.now();
-  }
-  function itemCount(value) {
-    if (Array.isArray(value)) return value.length;
-    if (value && typeof value === 'object') return Object.keys(value).length;
-    return 0;
-  }
-  function cacheAge(slot) {
-    return slot && slot.ts ? Math.max(0, Date.now() - slot.ts) : null;
-  }
-  function recordRead(name, payload) {
-    try {
-      state.lastReads[String(name || '')] = {
-        ...(payload || {}),
-        at: Date.now(),
-      };
-    } catch {}
-  }
-  function recordWrite(name, payload) {
-    try {
-      const clean = { ...(payload || {}) };
-      if (clean.result && typeof clean.result === 'object') {
-        clean.resultSummary = {
-          ok: clean.result.ok,
-          status: clean.result.status || clean.result.reason || '',
-          keys: Object.keys(clean.result).slice(0, 16),
-        };
-        delete clean.result;
-      }
-      state.lastWrites[String(name || '')] = {
-        ...clean,
-        at: Date.now(),
-      };
-    } catch {}
-  }
-  function bustCaches(reason) {
-    cache.folders.value = null;
-    cache.categories.value = null;
-    cache.labels.value = null;
-    step('cache-bust', String(reason || ''));
-    // Notify subscribers that derived caches were invalidated. Library Sync uses
-    // this to coordinate cross-surface refreshes; Insights uses it to re-render.
-    try {
-      W.dispatchEvent(new CustomEvent('evt:h2o:library-workspace:cache-bust', {
-        detail: { reason: String(reason || ''), surface: 'studio', t: Date.now() },
-      }));
-    } catch {}
-  }
-
-  // ── Desktop (Tauri) catalog source — M2c-1 ───────────────────────────────
-  // On Tauri Studio Desktop, the chat-list service (MV3 archive bridge) is
-  // unavailable, so the original getFolders/getCategories/getLabels paths
-  // silently return []. Branch each getter on LW_isTauri() and source the
-  // catalog rows from the SQLite-backed entity stores instead:
-  //   store.folders.list()    → workspace folder shape (id, name, kind, …)
-  //   store.categories.list() → workspace category shape (id, name, status, …)
-  //   store.labels.list()     → workspace label shape (id, name, type, …)
-  // Cache invalidation already piggybacks on the existing bindIndex →
-  // bustCaches chain: any SQLite write fires LibraryIndex subscribers
-  // (M2a-3g), which fires the Index subscriber inside Workspace, which
-  // calls bustCaches — clearing the desktop-sourced cache too. No new
-  // subscription required.
-  function LW_isTauri() {
-    try {
-      return !!(W.H2O && W.H2O.Studio && W.H2O.Studio.platform
-        && W.H2O.Studio.platform.env && W.H2O.Studio.platform.env.isTauri === true);
-    } catch { return false; }
-  }
-  function getStudioStores() {
-    try { return (W.H2O && W.H2O.Studio && W.H2O.Studio.store) || {}; }
-    catch { return {}; }
-  }
-  function epochToIso(ms) {
-    if (!ms || typeof ms !== 'number' || ms <= 0) return '';
-    try { return new Date(ms).toISOString(); }
-    catch { return ''; }
-  }
-  /* Map SQLite folder row → MV3 chat-list folder shape consumed by
-   * S0Z1g sidebar sections + studio.js folder picker + S0F3a Folders. */
-  function projectFolderRowForWorkspace(row) {
-    if (!row || !row.folderId) return null;
-    const meta = (row.meta && typeof row.meta === 'object' && !Array.isArray(row.meta)) ? row.meta : {};
-    const color = row.color || meta.iconColor || meta.color || '';
-    const sourceKind = meta.sourceKind || meta.kind || row.sourceKind || row.kind || row.source || meta.source || 'local';
-    return {
-      id: row.folderId,
-      name: row.name || '',
-      createdAt: epochToIso(row.createdAt),
-      updatedAt: epochToIso(row.updatedAt),
-      kind: sourceKind,
-      sourceKind,
-      parentId: row.parentId || meta.parentId || '',
-      source: row.source || meta.source || 'desktop-sqlite',
-      sortOrder: (typeof row.sortOrder === 'number') ? row.sortOrder : ((typeof meta.sortOrder === 'number') ? meta.sortOrder : 0),
-      projectRef: (meta.projectRef && typeof meta.projectRef === 'object') ? meta.projectRef : null,
-      color,
-      iconColor: color,
-      icon: meta.icon || meta.iconKey || '',
-      meta,
-      userCreated: row.userCreated === true || meta.userCreated === true,
-      materializedUserFolder: row.materializedUserFolder === true || meta.materializedUserFolder === true,
-      trustedFolderDisplay: row.trustedFolderDisplay === true || meta.trustedFolderDisplay === true,
-      shownInNormalMode: row.shownInNormalMode === true || meta.shownInNormalMode === true,
-    };
-  }
-  function deriveFolderRowsFromIndex() {
-    const index = getIndex();
-    const rows = index && typeof index.getAll === 'function' ? index.getAll() : [];
-    const byId = new Map();
-    for (const row of Array.isArray(rows) ? rows : []) {
-      const id = String(row?.folderId || row?.folder || '').trim();
-      if (!id) continue;
-      const name = String(row?.folderName || row?.folderLabel || row?.folderTitle || id).trim() || id;
-      const prev = byId.get(id) || {};
-      byId.set(id, {
-        ...prev,
-        id,
-        folderId: id,
-        name: prev.name && prev.name !== id ? prev.name : name,
-        kind: prev.kind || 'local',
-        projectRef: prev.projectRef || null,
-        iconColor: prev.iconColor || '',
-        source: 'library-index-derived',
-      });
-    }
-    return Array.from(byId.values()).sort((a, b) => (
-      String(a.name || a.id).localeCompare(String(b.name || b.id))
-      || String(a.id).localeCompare(String(b.id))
-    ));
-  }
-  /* Map SQLite category row → MV3 chat-list category shape. status defaults
-   * to 'active' since our V1 schema has no separate replacement model. */
-  function projectCategoryRowForWorkspace(row) {
-    if (!row || !row.categoryId) return null;
-    const meta = (row.meta && typeof row.meta === 'object' && !Array.isArray(row.meta)) ? row.meta : {};
-    return {
-      id: row.categoryId,
-      name: row.name || '',
-      description: meta.description || '',
-      color: meta.color || '',
-      sortOrder: (typeof meta.sortOrder === 'number') ? meta.sortOrder : 0,
-      createdAt: epochToIso(row.createdAt),
-      updatedAt: epochToIso(row.updatedAt),
-      status: meta.status || 'active',
-      replacementCategoryId: meta.replacementCategoryId || null,
-      aliases: Array.isArray(meta.aliases) ? meta.aliases.slice() : [],
-    };
-  }
-  /* Map SQLite label row → MV3 chat-list label shape. type defaults to
-   * 'custom' (the MV3 fallback bucket) when not present in meta. */
-  function projectLabelRowForWorkspace(row) {
-    if (!row || !row.labelId) return null;
-    const meta = (row.meta && typeof row.meta === 'object' && !Array.isArray(row.meta)) ? row.meta : {};
-    return {
-      id: row.labelId,
-      name: row.name || '',
-      type: meta.type || 'custom',
-      color: row.color || '',
-      sortOrder: (typeof meta.sortOrder === 'number') ? meta.sortOrder : 0,
-      createdAt: epochToIso(row.createdAt),
-    };
-  }
-  /* Shared Desktop catalog fetcher used by all three getters. Caches the
-   * result and records the read source so diagnose() reports it. On error,
-   * falls back to the prior cache value (rather than throwing) so UI stays
-   * stable. */
-  async function desktopFetchCatalog(slot, name, sqliteFetcher) {
-    try {
-      const list = await sqliteFetcher();
-      const safe = Array.isArray(list) ? list : [];
-      setCache(slot, safe);
-      /* Tag the slot so the cache fast-path in getFolders/Categories/Labels
-       * can tell Desktop-sourced cache from MV3-sourced cache. Without this,
-       * a stale [] left over from an MV3-fallback call would shadow the
-       * Desktop branch on subsequent reads. */
-      slot.source = 'desktop-sqlite';
-      recordRead(name, { source: 'desktop-sqlite', count: safe.length, fresh: true });
-      return safe;
-    } catch (e) {
-      recordRead(name, {
-        source: 'desktop-sqlite-error',
-        count: itemCount(slot.value),
-        fresh: true,
-        error: String((e && e.message) || e),
-      });
-      err('desktopFetch.' + name, e);
-      return slot.value || [];
-    }
   }
 
   // ── Model fetchers ─────────────────────────────────────────────────────────
