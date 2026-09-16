@@ -3309,6 +3309,20 @@ body[data-route="reader"] :is(
   z-index:1 !important;
 }
 
+html[data-h2o-runtime="tauri"] body[data-route="reader"] :is(
+  [data-cgxui="mnmp-root"][data-cgxui-owner="mnmp"],
+  [data-cgxui="mnmp-minimap"][data-cgxui-owner="mnmp"],
+  [data-cgxui="mm-root"][data-cgxui-owner="mnmp"],
+  [data-cgxui="mm-minimap"][data-cgxui-owner="mnmp"],
+  [data-h2o-owner="minimap-v10"],
+  .cgxui-mnmp-root,
+  .cgxui-mnmp-minimap,
+  .cgxui-mm-root,
+  .cgxui-mm-minimap
+){
+  z-index:75 !important;
+}
+
 /* Cited sources list at bottom of web-search turns */
 .citations-list,
 .citation-source {
