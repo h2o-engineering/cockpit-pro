@@ -88,6 +88,27 @@ Retained unchanged: protocol-relative (`//host`) rejection, and rejection of
 `chrome-extension:`, `tauri:`, `asset:`, `ipc:`, `ws:`, `wss:`, `ftp:` and every
 unknown scheme. Rejected URI attributes are removed, never rewritten.
 
+### policyVersion 2 - admitted native disclosure (M04-P2-R02, HDA decision F)
+
+policyVersion 2 **intentionally admits** the semantic `details` / `summary`
+elements and the `open` attribute of `details`. That admission is interactive
+by design: an admitted `summary` (and the user-agent default disclosure control
+of a `details` without an explicit `summary`) is a native, low-capability
+disclosure that pointer, keyboard and assistive-technology users operate
+consistently, and an authored `open` state is preserved. This policy is the
+**single provider-interaction authority** for captured content; admitted
+disclosure semantics must not be neutralized by presentation-profile
+stylesheets or global Shell CSS (pointer-events suppression is not an
+interaction boundary and the former global `.wbRichRoot` pointer rule was
+deleted under Decision F).
+
+The blocked-control and unsafe-attribute boundary is unchanged: `form`,
+`input`, `button`, `select`, `textarea`, `label`, `fieldset` and the other
+blocked tags are removed; `tabindex`, event-handler (`on*`) attributes, `id`,
+`name`, `style` and the other blocked attributes are stripped; rejected URI
+attributes (e.g. `javascript:` links) are removed, never rewritten. Nothing
+here widens admission.
+
 ## 6. Owner-sanitized HTML
 
 Saved-Chat `sanitized: true` is an **ingress admission signal**, not a Renderer

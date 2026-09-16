@@ -22,6 +22,8 @@ const ARCHIVE_REL = 'src-surfaces-base/studio/S0D3a. 🎬 Transcript Archive Eng
 const SANITIZER_REL = 'src-surfaces-base/studio/platform/html-sanitizer.js';
 const PRESENTATION_PROFILE_REL = 'src-surfaces-base/studio/renderer/presentation/presentation-profile.v1.js';
 const PRESENTATION_CSS_REL = 'src-surfaces-base/studio/renderer/presentation/chatgpt-reference.v1.css';
+/* M04 P2 T3: the second production profile stylesheet (Clean Reader). */
+const CLEAN_READER_CSS_REL = 'src-surfaces-base/studio/renderer/presentation/h2o-clean-reader.v1.css';
 const STUDIO_CSS_REL = 'src-surfaces-base/studio/studio.css';
 /* Semantic sources: parse/ingress/IR. The content renderer is the DOM
  * presentation sink downstream of accepted IR and may consult the profile. */
@@ -2038,7 +2040,20 @@ function validateFinalRendererCssBoundary() {
   assert.ok(studioRules.some((r) => r.selector === '.wbReader [data-turn].is-in-collapsed-section' && r.decls.includes('display:none')), 'F: Reader collapsed-section rule still global');
   /* H: provider outer structure stays global; I: replay interaction safety stays global and out of the profile. */
   for (const sel of ['.text-message', '.agent-turn', '.user-turn', '[data-testid^="conversation-turn"]', '.result-streaming']) assert.ok(studioRules.some((r) => cssMembersOf(r.selector).includes(sel)), `H: provider outer-structure rule stays global: ${sel}`);
-  assert.deepEqual(cssDeclarationsOf(studioCss, '.wbRichRoot :where(button, input, textarea, select, summary)'), ['pointer-events:none'], 'I: replay interaction safety stays global, verbatim');
+  /* I (old -> new, M04-P2-R02 / HDA decision F): the global rich-root pointer
+   * rule `.wbRichRoot :where(button, input, textarea, select, summary){ pointer-events:none }`
+   * is deleted under EXT-SHELL-CSS-R02 - it was origin-blind and neutralized
+   * sanitizer-admitted native disclosure (and any H2O control in the rich root)
+   * for pointer users only. The sanitizer policy is the single
+   * provider-interaction authority; no stylesheet may suppress admitted
+   * disclosure interaction, and the rule is not relocated into a profile. */
+  assert.equal(cssDeclarationsOf(studioCss, '.wbRichRoot :where(button, input, textarea, select, summary)'), null, 'I: the global replay pointer-suppression rule is absent from studio.css');
+  assert.equal(studioRules.some((r) => cssMembersOf(r.selector).some((m) => /\bsummary\b|\bdetails\b/.test(m)) && r.decls.some((d) => /^pointer-events\s*:\s*none/.test(d))), false, 'I: studio.css suppresses no disclosure pointer interaction');
+  for (const [label, css] of [['chatgpt-reference', profileCss], ['h2o-clean-reader', readRepo(CLEAN_READER_CSS_REL)]]) {
+    const suppressing = cssRulesOf(css).filter((r) => cssMembersOf(r.selector).some((m) => /\bsummary\b|\bdetails\b/.test(m)) && r.decls.some((d) => /^pointer-events\s*:\s*none/.test(d)));
+    assert.deepEqual(suppressing.map((r) => r.selector), [], `I: the ${label} profile stylesheet suppresses no summary / details pointer interaction`);
+    assert.equal(cssRulesOf(css).some((r) => r.decls.some((d) => /^pointer-events\s*:\s*none/.test(d)) && /\bsummary\b/.test(r.selector)), false, `I: no ${label} rule targets summary with pointer-events:none`);
+  }
   assert.equal(profileRules.filter((r) => /:where\(button, input, textarea, select, summary\)|^\.text-message$|^\.agent-turn$|^\.user-turn$/.test(r.selector.replace(`${scope} `, ''))).length, 0, 'H/I: structural and safety rules are absent from the profile stylesheet');
   /* K: profile stylesheet unchanged at 1.0.6 and referenced as such. */
   assert.match(profileCss, /@version 1\.0\.6\b/, 'K: profile stylesheet version 1.0.6');

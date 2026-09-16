@@ -839,9 +839,16 @@ check('global studio.css keeps no duplicate of the migrated provider-content lay
   assert.ok(roots.length >= 1, 'global :root theme block exists');
   for (const v of PROVIDER_ALIAS_VARIABLES) assert.ok(!roots.some((r) => v in r.declarations), `C: provider alias ${v} no longer on global :root`);
   for (const v of SHARED_THEME_INPUTS) assert.ok(roots.some((r) => v in r.declarations), `D: shared theme input ${v} stays on global :root`);
-  /* K: replay-interaction safety stays global; J: image/media and attachment presentation moved in slice F. */
+  /* K (old -> new, M04-P2-R02 / HDA decision F): the global rich-root pointer
+   * rule `.wbRichRoot :where(button, input, textarea, select, summary){ pointer-events:none }`
+   * was origin-blind and only blocked pointer hit testing of sanitizer-admitted
+   * native disclosure (and any H2O control in the rich root); it is deleted
+   * under EXT-SHELL-CSS-R02. The sanitizer policy is the single
+   * provider-interaction authority, so no stylesheet may suppress it.
+   * J: image/media and attachment presentation moved in slice F. */
   const safety = glob.filter((r) => r.selector === '.wbRichRoot :where(button, input, textarea, select, summary)');
-  assert.equal(safety.length, 1); assert.deepEqual(safety[0].declarations, { 'pointer-events': 'none' }, 'K: replay-interaction safety rule unchanged and global');
+  assert.equal(safety.length, 0, 'K: the global rich-root pointer-suppression rule is absent (decision F)');
+  assert.equal(glob.some((r) => splitMembers(r.selector).some((m) => /\bsummary\b|\bdetails\b/.test(m)) && /none/.test(String(r.declarations['pointer-events'] || ''))), false, 'K: studio.css suppresses no disclosure pointer interaction');
   assert.equal(glob.some((r) => r.selector === '.wbRichRoot :where(img, video, canvas, svg)'), false, 'J: rich media containment no longer global');
   assert.equal(glob.some((r) => splitMembers(r.selector).some((m) => m.includes('.dalle-image-container img'))), false, 'J: provider image rules no longer global');
   /* L: canonical table members and .cgMsgBody img no longer global. */
@@ -915,7 +922,8 @@ check('global studio.css keeps only the Reader-route attachment alignment and no
   assert.equal([...globalMembers].some((m) => DEAD_USER_FALLBACK.test(m) || m.includes('.cgMsg--rich')), false, 'slice G: dead fallback / .cgMsg--rich not resurrected globally');
   /* I: cgTurn--has-attachments has no rule anywhere; the safety rule is untouched. */
   assert.equal(glob.filter((r) => r.selector.includes('.cgTurn--has-attachments')).length, 0, 'I: cgTurn--has-attachments unstyled in studio.css');
-  assert.ok(glob.some((r) => r.selector === '.wbRichRoot :where(button, input, textarea, select, summary)'), 'replay-interaction safety stays global');
+  /* old -> new (decision F): the replay pointer-suppression rule is deleted from studio.css, not kept global. */
+  assert.equal(glob.some((r) => r.selector === '.wbRichRoot :where(button, input, textarea, select, summary)'), false, 'the replay pointer-suppression rule is gone from studio.css');
 });
 
 /* S3C slice H: the final Renderer / Reader CSS boundary. Every remaining
@@ -929,7 +937,7 @@ const BOUNDARY_CATEGORIES = [
   ['OTHER_LANE_OWNED_FEATURE_INTEGRATION', (sel) => /data-cgxui|cgxui-|data-at-collapsed/.test(sel)],
   ['APPLICATION_SHELL_STRUCTURE', (sel) => /^\.cgFrame$|^\.cgBody$|^\.cgThread$|^\.cgScroll(::-webkit-scrollbar[\w-]*(:hover)?)?$|^\.cgScroll > \*$|^body\[data-layout="wide"\] \.cgScroll > \*$|^\.wbHistory::-webkit-scrollbar|^\.wbSideLabel$|^\.wbSideMeta$|^\.wbRouteEyebrow$|^\.cgKicker$|^\.cgMsgMeta$|^\.wbTurn$|^\.wbTurn:hover \.wbEditBtn$|^\.wbTurn--editing \.wbEditBtn$/.test(sel)],
   /* Replay interaction safety: inert replayed controls and hidden provider action affordances (edit / response actions / action buttons). */
-  ['RENDERER_REPLAY_INTERACTION_SAFETY_NON_PROFILE', (sel) => /^\.wbRichRoot :where\(button, input, textarea, select, summary\)$|^\.wbRichRoot \[data-testid(="[\w-]+-turn-action-button"|\*="action-button")\]$|^\.wbRichRoot \[aria-label="(Edit message|Response actions|Your message actions)"\](\[role="group"\])?$|^\.result-streaming$/.test(sel)],
+  ['RENDERER_REPLAY_INTERACTION_SAFETY_NON_PROFILE', (sel) => /^\.wbRichRoot \[data-testid(="[\w-]+-turn-action-button"|\*="action-button")\]$|^\.wbRichRoot \[aria-label="(Edit message|Response actions|Your message actions)"\](\[role="group"\])?$|^\.result-streaming$/.test(sel)],
   ['RENDERER_STRUCTURAL_OR_REPLAY_COMPATIBILITY_NON_PROFILE', (sel) => /^\.cgTurn$|^\.cgTurn--user$|^\.cgMsg$|^\.wbRichRoot \.cgTurn--user\[data-testid\^="conversation-turn"\]$|^\.text-message$|^\.agent-turn$|^\.user-turn$|^\[data-testid\^="conversation-turn"\]$|^\[data-message-author-role="(assistant|user)"\] \.relative$|^\.wbRichRoot (\[data-message-author-role(="(user|assistant)")?\](\.text-message| \.text-message( > \*)?| :where\(\.markdown, \.prose, ul, ol, li\)| > div| \.flex-col)|\.text-message|\.result-streaming::after|\[class\*="streaming"\])$/.test(sel)],
 ];
 const DEAD_SELECTORS = [DEAD_NO_BUBBLE_FALLBACK, '.cgMsg--rich'];
@@ -951,7 +959,11 @@ check('final Renderer / Reader CSS boundary: no reference-profile presentation i
   for (const dead of DEAD_SELECTORS) assert.equal(rules.filter((r) => splitMembers(r.selector).includes(norm(dead))).length, 0, `B: dead rule absent from studio.css: ${dead}`);
   const global = (sel) => rules.filter((r) => r.media === null && r.selector === norm(sel));
   assert.deepEqual(global('.wbRichRoot .cgTurn--user[data-testid^="conversation-turn"]')[0]?.declarations, { display: 'flex', 'flex-direction': 'column', 'align-items': 'flex-end', 'justify-content': 'flex-start' }, 'D: H1 structural placement stays global, verbatim');
-  assert.deepEqual(global('.wbRichRoot :where(button, input, textarea, select, summary)')[0]?.declarations, { 'pointer-events': 'none' }, 'I: replay interaction safety stays global, verbatim');
+  /* I (old -> new, decision F): the replay pointer-suppression rule is deleted, not relocated. */
+  assert.equal(global('.wbRichRoot :where(button, input, textarea, select, summary)').length, 0, 'I: the replay pointer-suppression rule is absent from studio.css');
+  for (const [label, css] of [['reference', read(PROFILE_CSS_REL)], ['clean-reader', read(CLEAN_READER_CSS_REL)]]) {
+    assert.equal(parseRules(css).some((r) => splitMembers(r.selector).some((m) => /\bsummary\b|\bdetails\b/.test(m)) && /none/.test(String(r.declarations['pointer-events'] || ''))), false, `I: the ${label} profile stylesheet suppresses no disclosure pointer interaction`);
+  }
   for (const sel of ['.text-message', '.agent-turn', '.user-turn', '[data-testid^="conversation-turn"]', '.result-streaming', '.wbRichRoot .text-message']) assert.ok(rules.some((r) => splitMembers(r.selector).includes(sel)), `H: provider outer-structure rule stays global: ${sel}`);
   assert.ok(rules.some((r) => splitMembers(r.selector).includes('[data-message-author-role="assistant"] .relative')), 'H: provider .relative position normalization stays global');
   const readerRich = rules.filter((r) => splitMembers(r.selector).some((m) => m.startsWith('body[data-route="reader"]') && /wbRichRoot|cgMsg--user|cgUserAttachmentGrid|cgTurn/.test(m)));
@@ -1906,15 +1918,22 @@ if (!chromium) {
     const richTurn = (role, idx, inner) => ({ role, turnIdx: idx, messageId: `r-${idx}`, turnId: `rt-${idx}`, outerHTML: '<article data-testid="conversation-turn-' + idx + '"><div data-message-author-role="' + role + '" data-message-id="p-' + idx + '">' + inner + '</div></article>' });
     const richInput = (id) => ({ chatId: 'c-rich', snapshotId: id, messages: [ { role: 'user', text: 'q', messageId: 'r-1' }, { role: 'assistant', text: 'a', messageId: 'r-2' } ], richTurns: [
       richTurn('user', 1, '<div class="flex w-full flex-col"><div class="user-message-bubble-color">q <span tabindex="0">t</span></div></div>'),
-      richTurn('assistant', 2, '<div class="markdown prose"><p class="text-token-text-secondary">a <a href="https://example.test/p">provider link</a> <code>c</code></p><ul><li>item</li></ul><pre><code>code</code></pre><details><summary>more</summary><p>hidden</p></details><button type="button">act</button><input type="text"><span tabindex="0">focusable?</span></div>'),
+      /* M04-P2-R02 (decision F) interaction matrix: an admitted https link, a
+       * javascript: link, an event handler, tabindex, a details with an explicit
+       * summary, an authored open details, a details WITHOUT a summary (user-agent
+       * default disclosure control), and blocked provider form / controls. */
+      richTurn('assistant', 2, '<div class="markdown prose"><p class="text-token-text-secondary">a <a href="https://example.test/p">provider link</a> <a href="javascript:window.__providerJs=1">js link</a> <span tabindex="0" onclick="window.__providerHandler=1">handler</span> <code>c</code></p><ul><li>item</li></ul><pre><code>code</code></pre>'
+        + '<details><summary>Explicit summary</summary><p>hidden one</p></details><details open><summary>Authored open</summary><p>visible two</p></details><details><p>no summary content</p></details>'
+        + '<form action="https://example.test/submit"><input type="text" name="q"><select><option>o</option></select><textarea>t</textarea><button type="submit">Go</button></form><button type="button" onclick="window.__providerButton=1">provider button</button></div>'),
     ] });
     const RC = mount(cr.render(richInput('RC'), { presentationProfile: 'h2o-clean-reader', getEditOverride: () => null }));
     const RR = mount(cr.render(richInput('RR'), { presentationProfile: 'chatgpt-reference', getEditOverride: () => null }));
     const bubble = RC.root.querySelector('.cgBubble');
     out.rich = { mode: RC.renderMode, descriptor: { effectiveId: RC.presentation.effectiveId, reason: RC.presentation.reason }, transcript: RC.turnsEl.className, userTurn: RC.root.querySelector('.cgTurn--user').className, bubble: bubble.className, providerMarkerLeft: RC.root.querySelectorAll('.user-message-bubble-color').length, referenceBubble: RR.root.querySelector('.cgBubble').className,
       bubbleStyle: cs(bubble, ['border-top-width', 'border-top-left-radius']), referenceBubbleStyle: cs(RR.root.querySelector('.cgBubble'), ['border-top-width', 'border-top-left-radius']),
-      textEqual: RC.root.textContent === RR.root.textContent, blocked: { buttons: RC.root.querySelectorAll('button, input').length, tabindex: RC.root.querySelectorAll('[tabindex]').length, summaries: RC.root.querySelectorAll('summary').length },
-      pointer: { summary: getComputedStyle(RC.root.querySelector('summary')).pointerEvents, link: getComputedStyle(RC.root.querySelector('[data-message-author-role="assistant"] a')).pointerEvents, referenceSummary: getComputedStyle(RR.root.querySelector('summary')).pointerEvents },
+      textEqual: RC.root.textContent === RR.root.textContent,
+      /* Decision F: sanitizer negatives (policyVersion 2) and the admitted native disclosure facts under both profiles. */
+      sanitizer: Object.fromEntries([['clean', RC], ['reference', RR]].map(([label, r]) => { const provider = r.root.querySelector('[data-message-author-role="assistant"]'); const q = (sel) => provider.querySelectorAll(sel).length; return [label, { button: q('button'), input: q('input'), form: q('form'), select: q('select'), textarea: q('textarea'), tabindex: q('[tabindex]'), handlers: [...provider.querySelectorAll('*')].filter((el) => [...el.attributes].some((a) => /^on/i.test(a.name))).length, javascriptLinks: [...provider.querySelectorAll('a')].filter((a) => /^\s*javascript:/i.test(a.getAttribute('href') || '')).length, hrefs: [...provider.querySelectorAll('a')].map((a) => a.getAttribute('href')), details: q('details'), summaries: q('summary'), authoredOpen: [...provider.querySelectorAll('details')].map((d) => d.open), summaryPointer: [...provider.querySelectorAll('summary')].map((el) => getComputedStyle(el).pointerEvents), detailsPointer: [...provider.querySelectorAll('details')].map((el) => getComputedStyle(el).pointerEvents), linkPointer: getComputedStyle(provider.querySelector('a[href]')).pointerEvents }]; })),
       /* Residual provider-utility behaviour, measured: the reference bridges the token class, the Clean Reader inherits the root text colour. */
       tokenClass: { clean: getComputedStyle(RC.root.querySelector('.text-token-text-secondary')).color, cleanRoot: getComputedStyle(RC.turnsEl).color, reference: getComputedStyle(RR.root.querySelector('.text-token-text-secondary')).color, referenceSoft: getComputedStyle(RR.turnsEl).getPropertyValue('--wb-text-soft').trim() },
       richPre: cs(RC.root.querySelector('[data-message-author-role="assistant"] pre'), ['border-top-width', 'border-top-left-radius']) };
@@ -1924,23 +1943,78 @@ if (!chromium) {
     out.readerRoute = { cleanCanonical: edge(C.root.querySelector('.cgTurn--user'), userHost(C)), referenceCanonical: edge(Rf.root.querySelector('.cgTurn--user'), userHost(Rf)), cleanRich: edge(RC.root.querySelector('.cgTurn--user'), bubble), referenceRich: edge(RR.root.querySelector('.cgTurn--user'), RR.root.querySelector('.cgBubble')) };
     document.body.removeAttribute('data-route');
     out.rendererGlobals = Object.keys(R).filter((k) => /clean|profile|presentation/i.test(k));
-    window.__t3 = { RC };
+    window.__t3 = { RC, RR };
     return out;
   });
-  /* Keyboard focus, inspected separately from pointer suppression: Tab through the
-   * Clean Reader rich render and record which provider-origin elements take focus. */
-  const t3Focus = await (async () => {
-    await t3Page.evaluate(() => { document.getElementById('host').replaceChildren(window.__t3.RC.root); document.body.focus(); });
-    const seen = [];
+  /* M04-P2-R02 (HDA decision F): the enforceable disclosure-interaction matrix,
+   * run for each profile with that render alone mounted. Real sequential focus
+   * (Tab), real pointer clicks, Enter / Space, programmatic activation, the
+   * authored open state, the user-agent default disclosure control of a
+   * summary-less details (the target browser decides the exposed focus target;
+   * only the association with that details is asserted), the Chromium
+   * accessibility tree (CDP) and an H2O-owned positive-control button placed in
+   * the rich root outside the provider-content subtree. */
+  const cdp = await t3Page.context().newCDPSession(t3Page);
+  async function disclosureMatrix(profileKey) {
+    await t3Page.evaluate((key) => {
+      const r = window.__t3[key]; const host = document.getElementById('host'); host.replaceChildren(r.root);
+      window.__providerJs = 0; window.__providerHandler = 0; window.__providerButton = 0; window.__h2oClicks = 0;
+      let control = r.turnsEl.querySelector(':scope > .h2oR02PositiveControl');
+      if (!control) { control = document.createElement('button'); control.type = 'button'; control.className = 'h2oR02PositiveControl'; control.textContent = 'H2O control'; control.addEventListener('click', () => { window.__h2oClicks += 1; }); r.turnsEl.appendChild(control); }
+      const details = [...r.root.querySelectorAll('[data-message-author-role="assistant"] details')];
+      window.__r02 = { root: r.root, details, explicit: details[0], authored: details[1], summaryless: details[2], control };
+      document.body.focus();
+    }, profileKey);
+    const out = {};
+    const detailsState = () => t3Page.evaluate(() => window.__r02.details.map((d) => d.open));
+    out.initialOpen = await detailsState();
+    /* sequential focus: everything Tab reaches inside the render, classified */
+    const focus = [];
     for (let i = 0; i < 12; i += 1) {
       await t3Page.keyboard.press('Tab');
-      const info = await t3Page.evaluate(() => { const el = document.activeElement; if (!el || el === document.body) return null; const inRoot = window.__t3.RC.root.contains(el); return { tag: el.tagName.toLowerCase(), href: el.getAttribute('href'), inRoot, providerOrigin: inRoot && !!el.closest('[data-message-author-role]') }; });
-      if (!info) break;
-      if (seen.some((s) => JSON.stringify(s) === JSON.stringify(info))) break;
-      seen.push(info);
+      const f = await t3Page.evaluate(() => { const el = document.activeElement; const R = window.__r02; if (!el || el === document.body || !R.root.contains(el)) return null; const owner = R.details.findIndex((d) => d === el || d.contains(el)); return { tag: el.tagName.toLowerCase(), href: el.getAttribute('href'), providerOrigin: !!el.closest('[data-message-author-role]'), h2oControl: el === R.control, details: owner === -1 ? null : ['explicit', 'authored', 'summaryless'][owner], isDetailsHost: el.tagName.toLowerCase() === 'details' }; });
+      if (!f || focus.some((x) => JSON.stringify(x) === JSON.stringify(f))) break;
+      focus.push(f);
     }
-    return seen;
-  })();
+    out.focus = focus;
+    /* explicit summary: real pointer click, Enter, Space, programmatic, each from the closed state */
+    const summaryPoint = (which) => t3Page.evaluate((w) => { const d = window.__r02[w]; d.open = false; const s = d.querySelector(':scope > summary'); const b = s.getBoundingClientRect(); s.blur(); return { x: b.x + 12, y: b.y + b.height / 2 }; }, which);
+    const open = (which) => t3Page.evaluate((w) => window.__r02[w].open, which);
+    let pt = await summaryPoint('explicit'); await t3Page.mouse.click(pt.x, pt.y); out.explicitClick = await open('explicit');
+    await t3Page.evaluate(() => { const d = window.__r02.explicit; d.open = false; d.querySelector(':scope > summary').focus(); }); await t3Page.keyboard.press('Enter'); out.explicitEnter = await open('explicit');
+    await t3Page.evaluate(() => { const d = window.__r02.explicit; d.open = false; d.querySelector(':scope > summary').focus(); }); await t3Page.keyboard.press('Space'); out.explicitSpace = await open('explicit');
+    await t3Page.evaluate(() => { const d = window.__r02.explicit; d.open = false; d.querySelector(':scope > summary').click(); }); out.explicitProgrammatic = await open('explicit');
+    /* authored open: preserved before interaction, then a real click closes and a second reopens */
+    out.authoredPreserved = await t3Page.evaluate(() => window.__r02.authored.open);
+    pt = await t3Page.evaluate(() => { const s = window.__r02.authored.querySelector(':scope > summary'); const b = s.getBoundingClientRect(); return { x: b.x + 12, y: b.y + b.height / 2 }; });
+    await t3Page.mouse.click(pt.x, pt.y); out.authoredClosedByClick = await open('authored');
+    await t3Page.mouse.click(pt.x, pt.y); out.authoredReopened = await open('authored');
+    /* summary-less details: the user-agent default disclosure control */
+    pt = await t3Page.evaluate(() => { const d = window.__r02.summaryless; d.open = false; const b = d.getBoundingClientRect(); return { x: b.x + 12, y: b.y + Math.min(9, b.height / 2) }; });
+    await t3Page.mouse.click(pt.x, pt.y); out.summarylessClick = await open('summaryless');
+    await t3Page.evaluate(() => { window.__r02.summaryless.open = false; document.body.focus(); });
+    let reached = null;
+    for (let i = 0; i < 12 && !reached; i += 1) { await t3Page.keyboard.press('Tab'); reached = await t3Page.evaluate(() => { const el = document.activeElement; const d = window.__r02.summaryless; return el && (el === d || d.contains(el)) ? { tag: el.tagName.toLowerCase(), isHost: el === d } : null; }); }
+    out.summarylessFocus = reached;
+    await t3Page.keyboard.press('Enter'); out.summarylessEnter = await open('summaryless');
+    await t3Page.keyboard.press('Space'); out.summarylessSpace = await open('summaryless');
+    /* accessibility tree: disclosure roles, names and expanded state (Chromium CDP) */
+    const axOf = async () => { const tree = await cdp.send('Accessibility.getFullAXTree'); return tree.nodes.filter((n) => n.role?.value === 'DisclosureTriangle').map((n) => ({ name: n.name?.value, focusable: (n.properties || []).find((p) => p.name === 'focusable')?.value?.value ?? null, expanded: (n.properties || []).find((p) => p.name === 'expanded')?.value?.value ?? null })); };
+    await t3Page.evaluate(() => { window.__r02.explicit.open = false; window.__r02.authored.open = true; window.__r02.summaryless.open = false; });
+    out.axBefore = await axOf();
+    await t3Page.evaluate(() => { window.__r02.explicit.open = true; window.__r02.summaryless.open = true; });
+    out.axAfter = await axOf();
+    /* H2O-owned positive control: real pointer click, Enter, Space */
+    pt = await t3Page.evaluate(() => { const b = window.__r02.control.getBoundingClientRect(); return { x: b.x + b.width / 2, y: b.y + b.height / 2, pointer: getComputedStyle(window.__r02.control).pointerEvents }; });
+    out.controlPointer = pt.pointer;
+    await t3Page.mouse.click(pt.x, pt.y); out.controlAfterClick = await t3Page.evaluate(() => window.__h2oClicks);
+    await t3Page.evaluate(() => window.__r02.control.focus()); await t3Page.keyboard.press('Enter'); await t3Page.keyboard.press('Space'); out.controlAfterKeys = await t3Page.evaluate(() => window.__h2oClicks);
+    out.providerHandlersFired = await t3Page.evaluate(() => [window.__providerJs, window.__providerHandler, window.__providerButton]);
+    await t3Page.evaluate(() => { window.__r02.explicit.open = false; window.__r02.authored.open = true; window.__r02.summaryless.open = false; });
+    return out;
+  }
+  await t3Page.evaluate(() => { window.__t3.RR = window.__t3.RR || null; });
+  const matrix = { clean: await disclosureMatrix('RC'), reference: await disclosureMatrix('RR') };
   await t3Page.close();
 
   check('M04 P2 T3: on the production chain the Clean Reader module registers synchronously before the first render while both registries are open; its stylesheet is loaded; the first render seals both, the profile stays admitted and late registration is rejected', () => {
@@ -1977,27 +2051,76 @@ if (!chromium) {
     assert.deepEqual(t3.rendererGlobals, ['presentationProfile'], 'no Clean Reader state on the Renderer namespace');
   });
 
-  check('M04 P2 T3: semantic / text / index neutrality against the reference, Reader-route end alignment under both profiles, and the rich-content pointer / keyboard-focus baseline (AC05b inspection, not weakened)', () => {
+  check('M04 P2 T3: semantic / text / index neutrality against the reference and Reader-route end alignment under both profiles', () => {
     assert.deepEqual({ text: t3.neutral.text, keys: t3.neutral.keys, skeleton: t3.neutral.skeleton, sameDigest: t3.neutral.sameDigest }, { text: true, keys: true, skeleton: true, sameDigest: true }, 'A: same textContent, Semantic Index keys / roles and DOM skeleton (class attributes and the root marker excepted) under Clean Reader, reference and default');
     assert.ok(t3.neutral.blocks >= 6, 'A: the fixture exercises heading / paragraph / list / quote / code / table blocks'); assert.equal(t3.neutral.links[0], t3.neutral.links[1], 'A: identical admitted links');
     for (const [label, edge] of Object.entries(t3.readerRoute)) { assert.equal(edge.alignItems, 'flex-end', `B: ${label}: user turn end-aligned on the Reader route`); assert.ok(edge.rightGap <= 1 && edge.rightGap >= -1, `B: ${label}: the user block hugs the column end (gap ${edge.rightGap}px)`); assert.equal(edge.narrower, true, `B: ${label}: shrink-to-fit block`); }
-    assert.deepEqual(t3.rich.blocked, { buttons: 0, tabindex: 0, summaries: 1 }, 'C: the sanitizer admits no provider button / input / tabindex; details/summary is admitted');
-    assert.deepEqual(t3.rich.pointer, { summary: 'none', link: 'auto', referenceSummary: 'none' }, 'C: pointer suppression of provider control-like content is the global baseline (both profiles); admitted links stay pointer-active');
     assert.equal(t3.rich.tokenClass.clean, t3.rich.tokenClass.cleanRoot, 'C: accepted limitation measured - a provider token utility class is NOT bridged under Clean Reader (inherits the root text colour)');
     assert.notEqual(t3.rich.tokenClass.reference, t3.rich.tokenClass.clean, 'C: the same captured markup IS bridged by the reference profile (provider fidelity stays with chatgpt-reference)');
-    const providerFocus = t3Focus.filter((f) => f.providerOrigin);
-    assert.ok(providerFocus.some((f) => f.tag === 'a' && f.href === 'https://example.test/p'), 'D: the sanitizer-admitted provider link is keyboard-focusable');
-    assert.ok(providerFocus.every((f) => f.tag === 'a' || f.tag === 'summary'), `D: no provider-origin control (button / input / tabindex) can take keyboard focus (observed: ${JSON.stringify(providerFocus)})`);
-    /* AC05b as written requires provider-origin keyboard focus limited to
-     * sanitizer-admitted links. The sanitizer also admits <details>/<summary>,
-     * and a <summary> is natively focusable while the global baseline only
-     * suppresses its pointer events. That gap is reported here as an explicit
-     * observation for the owning boundary (sanitizer policy) - neither hidden
-     * nor asserted away by this check. */
-    const nonLinkFocus = providerFocus.filter((f) => f.tag !== 'a');
-    console.log(nonLinkFocus.length
-      ? `    AC05B_OBSERVATION provider-origin keyboard focus is not limited to admitted links: ${JSON.stringify(nonLinkFocus)} (pointer-events suppressed, keyboard focus not)`
-      : '    AC05B provider-origin keyboard focus limited to admitted links');
+  });
+
+  /* M04-P2-R02 / AC05b (HDA decision F): enforceable, not observational. The
+   * sanitizer policy (policyVersion 2) is the single provider-interaction
+   * authority: only admitted links and native disclosure controls survive and
+   * they must be consistently operable by pointer, keyboard and assistive
+   * technology under both profiles; nothing suppresses them. */
+  check('AC05b (decision F): the sanitizer admits only links and native disclosure - provider button / input / form / select / textarea / tabindex / event handler / javascript: link do not survive, under both profiles', () => {
+    for (const [label, facts] of Object.entries(t3.rich.sanitizer)) {
+      assert.deepEqual({ button: facts.button, input: facts.input, form: facts.form, select: facts.select, textarea: facts.textarea, tabindex: facts.tabindex, handlers: facts.handlers, javascriptLinks: facts.javascriptLinks }, { button: 0, input: 0, form: 0, select: 0, textarea: 0, tabindex: 0, handlers: 0, javascriptLinks: 0 }, `${label}: blocked provider controls and forbidden attributes / URLs do not survive`);
+      assert.deepEqual(facts.hrefs, ['https://example.test/p', null], `${label}: the https link keeps its href; the javascript: link keeps none`);
+      assert.deepEqual({ details: facts.details, summaries: facts.summaries, authoredOpen: facts.authoredOpen }, { details: 3, summaries: 2, authoredOpen: [false, true, false] }, `${label}: native details / summary and the authored open state are admitted verbatim`);
+    }
+    for (const profile of ['clean', 'reference']) assert.deepEqual(matrix[profile].providerHandlersFired, [0, 0, 0], `${profile}: no provider script hook ever ran`);
+  });
+
+  check('AC05b (decision F): admitted summaries have computed pointer-events auto under both profiles; nothing else in the render suppresses disclosure or the H2O control', () => {
+    for (const [label, facts] of Object.entries(t3.rich.sanitizer)) {
+      assert.deepEqual(facts.summaryPointer, ['auto', 'auto'], `${label}: explicit summaries are pointer-operable`);
+      assert.deepEqual(facts.detailsPointer, ['auto', 'auto', 'auto'], `${label}: details (incl. the summary-less one carrying the user-agent disclosure) are pointer-operable`);
+      assert.equal(facts.linkPointer, 'auto', `${label}: the admitted link stays pointer-active`);
+    }
+    for (const profile of ['clean', 'reference']) assert.equal(matrix[profile].controlPointer, 'auto', `${profile}: the H2O-owned control in the rich root is not pointer-suppressed`);
+  });
+
+  check('AC05b (decision F): only sanitizer-admitted links, native disclosure controls and the H2O-owned control take sequential focus; the user-agent default disclosure of a summary-less details is reachable without a fixed host assumption', () => {
+    for (const profile of ['clean', 'reference']) {
+      const m = matrix[profile];
+      const provider = m.focus.filter((f) => f.providerOrigin);
+      assert.ok(provider.some((f) => f.tag === 'a' && f.href === 'https://example.test/p'), `${profile}: the admitted link is focusable`);
+      assert.ok(provider.every((f) => (f.tag === 'a' && f.href === 'https://example.test/p') || f.details !== null), `${profile}: every provider-origin focus stop is the admitted link or a native disclosure control (observed: ${JSON.stringify(provider)})`);
+      assert.deepEqual(provider.filter((f) => f.details !== null).map((f) => f.details), ['explicit', 'authored', 'summaryless'], `${profile}: each of the three disclosures exposes exactly one focus stop, in document order`);
+      assert.ok(provider.every((f) => f.tag !== 'button' && f.tag !== 'input' && f.tag !== 'span'), `${profile}: no blocked control takes focus`);
+      assert.ok(m.focus.some((f) => f.h2oControl), `${profile}: the H2O-owned positive control is in the sequential focus order`);
+      assert.ok(m.summarylessFocus && (m.summarylessFocus.isHost || m.summarylessFocus.tag === 'summary'), `${profile}: sequential focus reaches the summary-less details' user-agent disclosure (host or its default summary; observed ${JSON.stringify(m.summarylessFocus)})`);
+    }
+  });
+
+  check('AC05b (decision F): real pointer click, Enter, Space and programmatic activation each toggle disclosure from a reset state; the authored open state is preserved before interaction; the user-agent default control toggles too - identically under both profiles', () => {
+    for (const profile of ['clean', 'reference']) {
+      const m = matrix[profile];
+      assert.deepEqual(m.initialOpen, [false, true, false], `${profile}: authored open state preserved before any interaction`);
+      assert.deepEqual({ click: m.explicitClick, enter: m.explicitEnter, space: m.explicitSpace, programmatic: m.explicitProgrammatic }, { click: true, enter: true, space: true, programmatic: true }, `${profile}: explicit summary toggles by pointer, Enter, Space and programmatic activation`);
+      assert.deepEqual({ preserved: m.authoredPreserved, closedByClick: m.authoredClosedByClick, reopened: m.authoredReopened }, { preserved: true, closedByClick: false, reopened: true }, `${profile}: authored open disclosure closes and reopens by real clicks`);
+      assert.deepEqual({ click: m.summarylessClick, enter: m.summarylessEnter, space: m.summarylessSpace }, { click: true, enter: true, space: false }, `${profile}: the user-agent default disclosure toggles by pointer, Enter (open) and Space (close)`);
+      assert.deepEqual({ afterClick: m.controlAfterClick, afterKeys: m.controlAfterKeys }, { afterClick: 1, afterKeys: 3 }, `${profile}: the H2O-owned control receives a real click and keyboard activation`);
+    }
+    const semantics = (m) => JSON.stringify({ focus: m.focus.map((f) => [f.tag, f.details, f.h2oControl, f.providerOrigin]), initialOpen: m.initialOpen, explicit: [m.explicitClick, m.explicitEnter, m.explicitSpace, m.explicitProgrammatic], authored: [m.authoredPreserved, m.authoredClosedByClick, m.authoredReopened], summaryless: [m.summarylessClick, m.summarylessEnter, m.summarylessSpace, m.summarylessFocus?.isHost, m.summarylessFocus?.tag], control: [m.controlAfterClick, m.controlAfterKeys], ax: [m.axBefore, m.axAfter] });
+    assert.equal(semantics(matrix.clean), semantics(matrix.reference), 'both presentation profiles produce equivalent interaction semantics');
+  });
+
+  check('AC05b (decision F): the accessibility tree exposes disclosure controls with names, focusability and expanded state under both profiles', () => {
+    for (const profile of ['clean', 'reference']) {
+      const m = matrix[profile];
+      const byName = (list, name) => list.find((n) => n.name === name);
+      for (const [phase, list, explicitExpanded, summarylessExpanded] of [['before', m.axBefore, false, false], ['after', m.axAfter, true, true]]) {
+        assert.ok(byName(list, 'Explicit summary') && byName(list, 'Authored open') && byName(list, 'Details'), `${profile}/${phase}: disclosure nodes for the explicit, authored and user-agent default ("Details") summaries`);
+        assert.deepEqual([byName(list, 'Explicit summary').focusable, byName(list, 'Authored open').focusable, byName(list, 'Details').focusable], [true, true, true], `${profile}/${phase}: all three disclosure controls are focusable`);
+        assert.equal(byName(list, 'Explicit summary').expanded, explicitExpanded, `${profile}/${phase}: explicit summary expanded state`);
+        assert.equal(byName(list, 'Authored open').expanded, true, `${profile}/${phase}: authored open stays expanded`);
+        const ua = byName(list, 'Details').expanded;
+        if (ua !== null) assert.equal(ua, summarylessExpanded, `${profile}/${phase}: user-agent default disclosure expanded state, where the browser exposes it`);
+      }
+    }
   });
 
   /* M03 P4 S4C T8 slice B: the Answer Timestamp consumer on a real Studio-mode

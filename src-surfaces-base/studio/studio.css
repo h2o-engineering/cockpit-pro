@@ -2394,9 +2394,6 @@ body[data-layout="wide"] .cgScroll > *{
 /* Rich media containment (.wbRichRoot :where(img, video, canvas, svg)) is
    owned by the Renderer stylesheet renderer/presentation/chatgpt-reference.v1.css. */
 
-.wbRichRoot :where(button, input, textarea, select, summary){
-  pointer-events:none;
-}
 
 .cgMiniMapDock{
   position:sticky;
