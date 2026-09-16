@@ -232,7 +232,7 @@ await vector('FIX', 'V-G4', 'reconciled reason partition and static route domina
     { hasBinding: true, activeRoute: 'reader', destination: 'reader' },
   ]) assert.equal(M.classifyPreLeave(row), M.OUT.NOT_CAPTURED);
   assert.equal(M.classifyFunnel('studio:reader-replace'), M.OUT.CAPTURED);
-  const non = ['studio:list','studio:route-library','studio:route-migrate','studio:route-settings','studio:library-folders-visible-body','studio:reader-missing','studio:reader-error','studio:unmount','studio:route-leave','test:leave','memory:teardown','unknown'];
+  const non = ['studio:list','studio:route-library','studio:route-migrate','studio:route-settings','studio:library-folders-visible-body','studio:reader-missing','studio:reader-error','studio:unmount','studio:route-leave','test:leave','memory:teardown','benchmark:teardown','unknown'];
   for (const reason of non) assert.equal(M.classifyFunnel(reason), M.OUT.NOT_CAPTURED, reason);
 
   const renderList = extractFunction(source, 'renderList');
@@ -391,7 +391,7 @@ try {
     const subControl = await page.evaluate(placement => m02.vpRoute('studio:route-library',placement,false,true), placement);
     sub.controlEqual = JSON.stringify(sub.final) === JSON.stringify(subControl.final); vpRows.push(sub);
   }
-  const negatives = await page.evaluate(() => ['studio:reader-missing','studio:reader-error','studio:route-scope:reader','test:leave','memory:teardown','unknown:reason'].map(reason=>m02.vpNegative(reason)));
+  const negatives = await page.evaluate(() => ['studio:reader-missing','studio:reader-error','studio:route-scope:reader','test:leave','memory:teardown','benchmark:teardown','unknown:reason'].map(reason=>m02.vpNegative(reason)));
   vpFacts = { rows: vpRows.map(row => ({ reason:row.reason,placement:row.placement,subscriber:row.subscriber,pre:row.seeded.pre,captured:row.ledger?.viewport||null,capturedCount:row.capturedCount,later:row.later.outcome,ledgerUnchanged:row.ledgerUnchanged,controlEqual:row.controlEqual,subscriberStable:!row.subscriber||JSON.stringify(row.seeded.preSubscriber)===JSON.stringify(row.seeded.pre) })), negatives };
   assert.deepEqual(pageErrors, [], 'browser fixture page errors');
 } catch (error) {
