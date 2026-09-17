@@ -1,0 +1,347 @@
+{
+  "schema": "h2o.validation.localBackupSeed.v1",
+  "note": "Deterministic synthetic Saved-Chat dataset for the Local Backup permanent harness. No user data. {{INLINE_PNG}} is replaced at seed time by a data:image/png URI of inlinePngBase64 (the same 20-byte synthetic asset the v3 fixture carries).",
+  "inlinePngBase64": "aDJvLXQwNi1wbmctZml4dHVyZQo=",
+  "inlinePngSha256": "sha256-b6a38573d3cd8607b3cda428df2c4b2d05d976c58f55e47eeac8ffb0c34f780b",
+  "chats": [
+    {
+      "id": "bk-alpha",
+      "title": "Alpha (asset-bearing)",
+      "is_saved": 1,
+      "is_linked": 0,
+      "is_deleted": 0,
+      "created_at": 1789000000000,
+      "updated_at": 1789000001000,
+      "message_count": 2,
+      "href": "https://chatgpt.com/c/bk-alpha",
+      "source_id": "src-bk-alpha"
+    },
+    {
+      "id": "bk-bravo",
+      "title": "Bravo (text only)",
+      "is_saved": 1,
+      "is_linked": 0,
+      "is_deleted": 0,
+      "created_at": 1789000000000,
+      "updated_at": 1789000001000,
+      "message_count": 1,
+      "href": "https://chatgpt.com/c/bk-bravo",
+      "source_id": "src-bk-bravo"
+    },
+    {
+      "id": "bk-charlie",
+      "title": "Charlie (deleted)",
+      "is_saved": 1,
+      "is_linked": 0,
+      "is_deleted": 1,
+      "created_at": 1789000000000,
+      "updated_at": 1789000001000,
+      "message_count": 1,
+      "href": "https://chatgpt.com/c/bk-charlie",
+      "source_id": "src-bk-charlie"
+    },
+    {
+      "id": "bk-delta",
+      "title": "Delta (active tombstone, restored_at NULL)",
+      "is_saved": 1,
+      "is_linked": 0,
+      "is_deleted": 0,
+      "created_at": 1789000000000,
+      "updated_at": 1789000001000,
+      "message_count": 1,
+      "href": "https://chatgpt.com/c/bk-delta",
+      "source_id": "src-bk-delta"
+    },
+    {
+      "id": "bk-delta2",
+      "title": "Delta2 (active tombstone, restored_at empty string)",
+      "is_saved": 1,
+      "is_linked": 0,
+      "is_deleted": 0,
+      "created_at": 1789000000000,
+      "updated_at": 1789000001000,
+      "message_count": 1,
+      "href": "https://chatgpt.com/c/bk-delta2",
+      "source_id": "src-bk-delta2"
+    },
+    {
+      "id": "bk-echo",
+      "title": "Echo (no snapshot)",
+      "is_saved": 1,
+      "is_linked": 0,
+      "is_deleted": 0,
+      "created_at": 1789000000000,
+      "updated_at": 1789000001000,
+      "message_count": 0,
+      "href": "https://chatgpt.com/c/bk-echo",
+      "source_id": "src-bk-echo"
+    },
+    {
+      "id": "bk-foxtrot",
+      "title": "Foxtrot (zero-turn snapshot)",
+      "is_saved": 1,
+      "is_linked": 0,
+      "is_deleted": 0,
+      "created_at": 1789000000000,
+      "updated_at": 1789000001000,
+      "message_count": 0,
+      "href": "https://chatgpt.com/c/bk-foxtrot",
+      "source_id": "src-bk-foxtrot"
+    },
+    {
+      "id": "bk-golf",
+      "title": "Golf (two snapshots)",
+      "is_saved": 1,
+      "is_linked": 0,
+      "is_deleted": 0,
+      "created_at": 1789000000000,
+      "updated_at": 1789000001000,
+      "message_count": 1,
+      "href": "https://chatgpt.com/c/bk-golf",
+      "source_id": "src-bk-golf"
+    },
+    {
+      "id": "bk-hotel",
+      "title": "Hotel (restored tombstone)",
+      "is_saved": 1,
+      "is_linked": 0,
+      "is_deleted": 0,
+      "created_at": 1789000000000,
+      "updated_at": 1789000001000,
+      "message_count": 1,
+      "href": "https://chatgpt.com/c/bk-hotel",
+      "source_id": "src-bk-hotel"
+    },
+    {
+      "id": "link-only-1",
+      "title": "Linked only",
+      "is_saved": 0,
+      "is_linked": 1,
+      "is_deleted": 0,
+      "created_at": 1789000000000,
+      "updated_at": 1789000001000,
+      "message_count": 0,
+      "href": "https://chatgpt.com/c/link-only-1",
+      "source_id": "src-link-only-1"
+    }
+  ],
+  "snapshots": [
+    {
+      "id": "snap-alpha-1",
+      "chat_id": "bk-alpha",
+      "title": "bk-alpha",
+      "digest": "digest-alpha-1",
+      "message_count": 2,
+      "captured_at": 1789000002000,
+      "updated_at": 1789000002000,
+      "turns": [
+        {
+          "turn_idx": 0,
+          "role": "user",
+          "outer_html": "<p>Please look at this image.</p>",
+          "text": "Please look at this image.",
+          "meta_json": "{\"messageId\": \"m-alpha-0\"}"
+        },
+        {
+          "turn_idx": 1,
+          "role": "assistant",
+          "outer_html": "<p>Here it is: <img src=\"{{INLINE_PNG}}\" alt=\"fixture\"></p>",
+          "text": "Here it is:",
+          "meta_json": "{\"messageId\": \"m-alpha-1\"}"
+        }
+      ]
+    },
+    {
+      "id": "snap-bravo-1",
+      "chat_id": "bk-bravo",
+      "title": "bk-bravo",
+      "digest": "digest-bravo-1",
+      "message_count": 1,
+      "captured_at": 1789000002000,
+      "updated_at": 1789000002000,
+      "turns": [
+        {
+          "turn_idx": 0,
+          "role": "user",
+          "outer_html": "<p>Hello bravo</p>",
+          "text": "Hello bravo",
+          "meta_json": "{\"messageId\": \"m-bravo-0\"}"
+        }
+      ]
+    },
+    {
+      "id": "snap-charlie-1",
+      "chat_id": "bk-charlie",
+      "title": "bk-charlie",
+      "digest": null,
+      "message_count": 1,
+      "captured_at": 1789000002000,
+      "updated_at": 1789000002000,
+      "turns": [
+        {
+          "turn_idx": 0,
+          "role": "user",
+          "outer_html": "<p>deleted chat</p>",
+          "text": "deleted chat",
+          "meta_json": "{\"messageId\": \"m-charlie-0\"}"
+        }
+      ]
+    },
+    {
+      "id": "snap-delta-1",
+      "chat_id": "bk-delta",
+      "title": "bk-delta",
+      "digest": null,
+      "message_count": 1,
+      "captured_at": 1789000002000,
+      "updated_at": 1789000002000,
+      "turns": [
+        {
+          "turn_idx": 0,
+          "role": "user",
+          "outer_html": "<p>tombstoned chat</p>",
+          "text": "tombstoned chat",
+          "meta_json": "{\"messageId\": \"m-delta-0\"}"
+        }
+      ]
+    },
+    {
+      "id": "snap-delta2-1",
+      "chat_id": "bk-delta2",
+      "title": "bk-delta2",
+      "digest": null,
+      "message_count": 1,
+      "captured_at": 1789000002000,
+      "updated_at": 1789000002000,
+      "turns": [
+        {
+          "turn_idx": 0,
+          "role": "user",
+          "outer_html": "<p>tombstoned chat (empty restored_at)</p>",
+          "text": "tombstoned chat",
+          "meta_json": "{\"messageId\": \"m-delta2-0\"}"
+        }
+      ]
+    },
+    {
+      "id": "snap-foxtrot-1",
+      "chat_id": "bk-foxtrot",
+      "title": "bk-foxtrot",
+      "digest": null,
+      "message_count": 0,
+      "captured_at": 1789000002000,
+      "updated_at": 1789000002000,
+      "turns": []
+    },
+    {
+      "id": "snap-golf-old",
+      "chat_id": "bk-golf",
+      "title": "bk-golf",
+      "digest": "digest-golf-old",
+      "message_count": 1,
+      "captured_at": 1789000001000,
+      "updated_at": 1789000001000,
+      "turns": [
+        {
+          "turn_idx": 0,
+          "role": "user",
+          "outer_html": "<p>golf old</p>",
+          "text": "golf old",
+          "meta_json": "{\"messageId\": \"m-golf-old-0\"}"
+        }
+      ]
+    },
+    {
+      "id": "snap-golf-new",
+      "chat_id": "bk-golf",
+      "title": "bk-golf",
+      "digest": "digest-golf-new",
+      "message_count": 1,
+      "captured_at": 1789000005000,
+      "updated_at": 1789000005000,
+      "turns": [
+        {
+          "turn_idx": 0,
+          "role": "user",
+          "outer_html": "<p>golf new</p>",
+          "text": "golf new",
+          "meta_json": "{\"messageId\": \"m-golf-new-0\"}"
+        }
+      ]
+    },
+    {
+      "id": "snap-hotel-1",
+      "chat_id": "bk-hotel",
+      "title": "bk-hotel",
+      "digest": "digest-hotel-1",
+      "message_count": 1,
+      "captured_at": 1789000002000,
+      "updated_at": 1789000002000,
+      "turns": [
+        {
+          "turn_idx": 0,
+          "role": "user",
+          "outer_html": "<p>hotel</p>",
+          "text": "hotel",
+          "meta_json": "{\"messageId\": \"m-hotel-0\"}"
+        }
+      ]
+    }
+  ],
+  "tombstones": [
+    {
+      "tombstone_id": "tomb-delta",
+      "record_kind": "chat",
+      "record_id": "bk-delta",
+      "deleted_at": "2026-09-10T00:00:00.000Z",
+      "deleted_by_sync_peer_id": "peer-fixture",
+      "delete_reason": "user-delete",
+      "restored_at": null
+    },
+    {
+      "tombstone_id": "tomb-delta2",
+      "record_kind": "chat",
+      "record_id": "bk-delta2",
+      "deleted_at": "2026-09-10T00:00:00.000Z",
+      "deleted_by_sync_peer_id": "peer-fixture",
+      "delete_reason": "user-delete",
+      "restored_at": ""
+    },
+    {
+      "tombstone_id": "tomb-hotel",
+      "record_kind": "chat",
+      "record_id": "bk-hotel",
+      "deleted_at": "2026-09-10T00:00:00.000Z",
+      "deleted_by_sync_peer_id": "peer-fixture",
+      "delete_reason": "user-delete",
+      "restored_at": "2026-09-11T00:00:00.000Z"
+    }
+  ],
+  "expected": {
+    "enumeratedCount": 9,
+    "eligible": [
+      [
+        "bk-alpha",
+        "snap-alpha-1"
+      ],
+      [
+        "bk-bravo",
+        "snap-bravo-1"
+      ],
+      [
+        "bk-golf",
+        "snap-golf-new"
+      ],
+      [
+        "bk-hotel",
+        "snap-hotel-1"
+      ]
+    ],
+    "skipped": {
+      "deleted": 1,
+      "tombstoned": 2,
+      "linkedOnly": 1,
+      "noSnapshot": 2
+    }
+  }
+}

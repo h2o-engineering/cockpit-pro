@@ -701,6 +701,17 @@
       }
     } catch (_) { /* recovery center card must never break the read-only health card */ }
 
+    // Backup v1 T03: mount the Desktop-only Local Backup card (its own module)
+    // as a sibling beneath this card. It exposes one non-destructive action and
+    // a read-only Verify; this health card is unchanged and still performs no
+    // mutation. Desktop-only message when the native surface is absent.
+    try {
+      var localBackupApi = H2O.Studio && H2O.Studio.localBackupUi;
+      if (localBackupApi && typeof localBackupApi.mountLocalBackupCard === 'function') {
+        localBackupApi.mountLocalBackupCard(container);
+      }
+    } catch (_) { /* local backup card must never break the read-only health card */ }
+
     return { run: run, getState: function () { return card.state; } };
   }
 

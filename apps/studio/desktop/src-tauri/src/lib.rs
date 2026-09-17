@@ -225,6 +225,16 @@ pub mod archive_instance_lock;
 // while the renderer still holds broad archive mutation authority.
 pub mod archive_generation_publish;
 
+/// Backup v1 T02 — immutable Saved-Chat local-backup root policy. Exposes one
+/// read-only query and no path/root mutation input.
+pub mod saved_chat_backup_root_policy;
+
+/// Backup v1 T02 — native session-bound, create-only Saved-Chat local backup
+/// publisher. Composes the landed filesystem primitives, the trusted package
+/// verifier and the trusted package scanner; owns no retention, deletion or
+/// restore authority.
+pub mod saved_chat_local_backup;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum F5g4ProofFailure {
     TombstoneInsert,
@@ -3156,6 +3166,16 @@ macro_rules! h2o_studio_invoke_handler {
             archive_residue_probe::h2o_archive_durable_temp_residue,
             archive_reclamation_preview::h2o_archive_reclamation_preview,
             archive_reclaim_execute::h2o_archive_reclamation_execute,
+            saved_chat_backup_root_policy::h2o_saved_chat_backup_root_policy,
+            saved_chat_local_backup::h2o_saved_chat_backup_begin,
+            saved_chat_local_backup::h2o_saved_chat_backup_package_begin,
+            saved_chat_local_backup::h2o_saved_chat_backup_write_member,
+            saved_chat_local_backup::h2o_saved_chat_backup_package_finish,
+            saved_chat_local_backup::h2o_saved_chat_backup_package_abort,
+            saved_chat_local_backup::h2o_saved_chat_backup_finalize,
+            saved_chat_local_backup::h2o_saved_chat_backup_abort,
+            saved_chat_local_backup::h2o_saved_chat_backup_list,
+            saved_chat_local_backup::h2o_saved_chat_backup_verify,
             archive_occupant_quarantine::h2o_archive_occupant_quarantine,
             dev_seed_f5h_final_validation_synthetic_rows,
             dev_teardown_f5h_final_validation_synthetic_rows
@@ -3249,6 +3269,16 @@ macro_rules! h2o_studio_invoke_handler {
             archive_residue_probe::h2o_archive_durable_temp_residue,
             archive_reclamation_preview::h2o_archive_reclamation_preview,
             archive_reclaim_execute::h2o_archive_reclamation_execute,
+            saved_chat_backup_root_policy::h2o_saved_chat_backup_root_policy,
+            saved_chat_local_backup::h2o_saved_chat_backup_begin,
+            saved_chat_local_backup::h2o_saved_chat_backup_package_begin,
+            saved_chat_local_backup::h2o_saved_chat_backup_write_member,
+            saved_chat_local_backup::h2o_saved_chat_backup_package_finish,
+            saved_chat_local_backup::h2o_saved_chat_backup_package_abort,
+            saved_chat_local_backup::h2o_saved_chat_backup_finalize,
+            saved_chat_local_backup::h2o_saved_chat_backup_abort,
+            saved_chat_local_backup::h2o_saved_chat_backup_list,
+            saved_chat_local_backup::h2o_saved_chat_backup_verify,
             archive_occupant_quarantine::h2o_archive_occupant_quarantine
         ]
     };
@@ -3267,6 +3297,7 @@ pub fn run() {
         .manage(saved_chat_portable_verify::PortableVerifyState::default())
         .manage(archive_transport_handoff::HandoffState::default())
         .manage(archive_instance_lock::ArchiveInstanceState::default())
+        .manage(saved_chat_local_backup::BackupState::default())
         // M06 T1.1: instance-lifetime participation in the archive presence
         // protocol. Established here, at startup, rather than lazily on the
         // first archive mutation: the contract requires every M06-aware
