@@ -28,6 +28,7 @@ import {
   validateStagedAliases,
   validateStagedDevOutput,
   validateStagedExtension,
+  validateStagedStudioLauncher,
   validateCrossOutput,
   publisherTargetPolicy,
   DEV_CONTROLS_TARGET,
@@ -52,7 +53,7 @@ const PUBLICATION_AUTHORITY_ROUND_PATHS = Object.freeze([
   "tools/validation/publish/validate-lean-activator-v1.mjs",
   "tools/validation/publish/validate-lean-payload-transaction-v1.mjs",
 ].sort());
-const EXPECTED_RUNTIME_SCENARIOS = 64;
+const EXPECTED_RUNTIME_SCENARIOS = 65;
 const EXPECTED_SCOPE_SCENARIOS = 9;
 const LOCK_PENDING_PREFIX = ".h2o-publisher-lock.pending-";
 const FORBIDDEN_STALE_PREFIX = ".h2o-publisher-lock.stale-";
@@ -731,6 +732,24 @@ async function runRuntimeScenarios() {
     for (const flag of ["activationPerformed", "runtimeActivationPerformed", "browserReloadPerformed",
       "browserCanaryPerformed", "deploymentPerformed", "releasePerformed", "pushPerformed"]) {
       assert.equal(receipt[flag], false, flag);
+    }
+  });
+  await test("Studio exact inventory rejects one synthetic unauthorized extra", () => {
+    const extensionRoot = studioStaged.receipt.outputPaths.extension;
+    const unauthorizedRelative = "surfaces/studio/unauthorized-extra.mjs";
+    const unauthorized = path.join(extensionRoot, ...unauthorizedRelative.split("/"));
+    fs.writeFileSync(unauthorized, "export const unauthorized = true;\n");
+    try {
+      const error = expectPublisherError("studio-stage-file-set", () =>
+        validateStagedStudioLauncher(
+          { extensionRoot },
+          { repository: fixture.repository, sourceRoot: fixture.repository },
+          [fixture.repository],
+        ));
+      assert.deepEqual(error.details.missing, []);
+      assert.deepEqual(error.details.unexpected, [unauthorizedRelative]);
+    } finally {
+      fs.rmSync(unauthorized, { force: true });
     }
   });
   await test("Studio staging rejects an older ancestral source before building", () => {
