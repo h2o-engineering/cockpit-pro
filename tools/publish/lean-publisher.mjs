@@ -899,6 +899,7 @@ function stageExtension(stage, buildTimestamp, sourceRoot, policy = publisherTar
     return runBuilder("studio-launcher", "tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs", {
       H2O_EXT_OUT_DIR: stage.extensionRoot,
       H2O_EXT_DEV_VARIANT: STUDIO_LAUNCHER_TARGET,
+      H2O_EXT_BUILD_CHANNEL: "candidate",
       H2O_BUILD_TS: buildTimestamp,
     }, sourceRoot);
   }
@@ -1250,6 +1251,17 @@ function studioGenerationId({ source, artifactManifest, buildTimestamp }) {
   }));
 }
 
+function sourceCommitTimestampMilliseconds(sourceRoot) {
+  const seconds = git(sourceRoot, ["log", "-1", "--format=%ct", "HEAD"]);
+  if (!/^\d+$/u.test(seconds) || Number(seconds) <= 0) {
+    fail("source-commit-timestamp-invalid", "Studio staging requires a deterministic source commit timestamp.", {
+      sourceRoot,
+      observed: seconds,
+    });
+  }
+  return String(Number(seconds) * 1000);
+}
+
 export function validateCrossOutput(stage) {
   const stagingRoot = realAware(stage.root);
   const required = [stage.aliasDir, stage.devOutputDir, stage.proxyPackFile, stage.extensionRoot];
@@ -1387,8 +1399,10 @@ export async function runLeanPublisher({ argv = [] } = {}) {
   const policy = publisherTargetPolicy(parsed.targetId);
 
   const startedAt = new Date().toISOString();
-  const buildTimestamp = String(Date.now());
   const source = runSourcePreflight({ sourceWorktree: parsed.sourceWorktree });
+  const buildTimestamp = policy.targetId === STUDIO_LAUNCHER_TARGET
+    ? sourceCommitTimestampMilliseconds(source.sourceRoot)
+    : String(Date.now());
   if (policy.exactCanonicalHeadRequired &&
       (source.sourceHead !== parsed.authorizedHead || source.approvedHead !== parsed.authorizedHead)) {
     fail("authorized-head-mismatch", "Studio source, authorized HEAD and canonical main must be exactly equal.", {
