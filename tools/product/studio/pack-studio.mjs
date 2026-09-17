@@ -404,6 +404,10 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   // partition, coverage and the read-only inspector. No ordering, hashing,
   // validity, classification or recovery-eligibility authority; no mutation.
   "ingestion/saved-chat-recovery-center-ui.studio.js",
+  // Saved Chat Local Backup card (Backup v1 T03). Desktop-only manual backup
+  // action over the native T02 publisher; no path, root, overwrite or source
+  // mutation authority. Keep parallel to ARCHIVE_WORKBENCH_OUT_FILES below.
+  "ingestion/saved-chat-local-backup.studio.js",
   "ingestion/archive-health-ui.studio.js",
   // Chrome: saved-chat archive request delivery UI (Phase D.3C.2). Minimal
   // manual Settings utility card wiring the D.3C.1 delivery APIs under an
@@ -1644,6 +1648,7 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   // partition, coverage and the read-only inspector. No ordering, hashing,
   // validity, classification or recovery-eligibility authority; no mutation.
   "ingestion/saved-chat-recovery-center-ui.studio.js",
+  "ingestion/saved-chat-local-backup.studio.js",
   "ingestion/archive-health-ui.studio.js",
   // Chrome: saved-chat archive request delivery UI (Phase D.3C.2). Minimal
   // manual Settings utility card wiring the D.3C.1 delivery APIs under an
