@@ -392,6 +392,21 @@ class NativeBackupDouble {
 
   invoke(cmd, args, extra) {
     this.record(cmd, args, extra);
+    const rejects = this.faults.rejectInvokes || {};
+    if (Number(rejects[cmd] || 0) > 0) {
+      rejects[cmd] -= 1;
+      return Promise.reject(new Error('native double rejected ' + cmd));
+    }
+    const pause = this.faults.pauseInvoke;
+    if (pause && pause.command === cmd && pause.used !== true) {
+      pause.used = true;
+      if (typeof pause.onReached === 'function') pause.onReached();
+      return Promise.resolve(pause.wait).then(() => this.dispatch(cmd, args, extra));
+    }
+    return this.dispatch(cmd, args, extra);
+  }
+
+  dispatch(cmd, args, extra) {
     const options = (args && args.options) || {};
     switch (cmd) {
       case 'h2o_saved_chat_backup_root_policy':
@@ -1031,13 +1046,16 @@ async function main() {
     assertClosedVocabulary(env.api, run, env.double);
   });
 
-  await checkAsync('empty eligible set → no BEGIN, no false success; enumeration errors → indeterminate', async () => {
+  await checkAsync('empty eligible set → neutral local result, no BEGIN/publish/source error; enumeration errors → indeterminate', async () => {
     const env = await bootScenario('empty', {}, { moduleSourceOverride: activeModule });
     env.scratch.db.prepare('UPDATE chats SET is_deleted = 1 WHERE is_saved = 1').run();
     env.before.db = dbDigest(env.scratch.db);
     const run = await env.api.runLocalBackup(runDeps(env));
-    assert.equal(run.status, 'failed');
-    assert.equal(run.code, 'backup-nothing-to-back-up');
+    assert.equal(run.status, 'empty');
+    assert.equal(run.code, '');
+    assert.equal(run.committed, false);
+    assert.equal(run.complete, null);
+    assert.equal(env.api.formatRunResult(run).headline, 'Nothing to back up — no eligible saved chats were found.');
     assert.equal(env.double.calls.length, 0, 'no native command for an empty set');
     assert.ok(!fs.existsSync(env.scratch.backupRoot), 'no root created');
     assertSourceUntouched(env, 'empty');
@@ -1065,6 +1083,112 @@ async function main() {
     assert.equal(fs.readdirSync(env.scratch.backupRoot).length, 0, 'own staging removed, nothing published');
     assert.equal(env.api.formatRunResult(run).headline, 'Backup cancelled — nothing was published.');
     assertSourceUntouched(env, 'cancel');
+  });
+
+  await checkAsync('post-BEGIN rejected invoke → exactly one best-effort session abort, truthful runtime failure, immediate retry; abort rejection preserves the primary failure and warns', async () => {
+    const packageBegin = 'h2o_saved_chat_backup_package_begin';
+    const abort = 'h2o_saved_chat_backup_abort';
+    const finalize = 'h2o_saved_chat_backup_finalize';
+    const env = await bootScenario('runtime-reject', { rejectInvokes: { [packageBegin]: 1 } }, { moduleSourceOverride: activeModule });
+    const run = await env.api.runLocalBackup(runDeps(env));
+    assert.equal(run.status, 'failed');
+    assert.equal(run.runtimeError, true);
+    assert.equal(run.code, '', 'no invented backup-* runtime code');
+    assert.equal(run.cleanupUnconfirmed, false);
+    assert.equal(run.failures.length, 0, 'the exception is not a per-entry FINALIZE failure');
+    assert.ok(!run.failures.some((f) => f.code === 'backup-projection-failed'));
+    assert.equal(env.double.calls.filter((c) => c.cmd === abort).length, 1, 'one best-effort abort for the owned token');
+    assert.equal(env.double.calls.filter((c) => c.cmd === finalize).length, 0, 'no FINALIZE after the rejected invoke');
+    assert.equal(env.double.session.state, 'ABORTED', 'the native double has no live session after cleanup');
+    assert.equal(env.api.formatRunResult(run).headline, 'Backup stopped because the Desktop backup service returned an unexpected error.');
+    assert.ok(!env.api.formatRunResult(run).lines.join(' ').includes('backup-projection-failed'));
+    assert.ok(!env.api.formatRunResult(run).lines.join(' ').includes('native double rejected'), 'raw runtime diagnostic is not rendered on the card');
+    assert.ok(Buffer.byteLength(run.diagnostic, 'utf8') <= 512, 'runtime diagnostic remains bounded');
+    const retry = await env.api.runLocalBackup(runDeps(env));
+    assert.equal(retry.status, 'complete', JSON.stringify(retry));
+    assert.notEqual(retry.code, 'backup-session-busy');
+    assert.equal(env.double.calls.filter((c) => c.cmd === 'h2o_saved_chat_backup_begin').length, 2, 'immediate retry opens one new session');
+
+    const env2 = await bootScenario('runtime-abort-reject', {
+      rejectInvokes: { [packageBegin]: 1, [abort]: 1 },
+    }, { moduleSourceOverride: activeModule });
+    const unconfirmed = await env2.api.runLocalBackup(runDeps(env2));
+    assert.equal(unconfirmed.status, 'failed');
+    assert.equal(unconfirmed.runtimeError, true, 'original renderer/IPC runtime failure remains primary');
+    assert.equal(unconfirmed.code, '');
+    assert.equal(unconfirmed.cleanupUnconfirmed, true);
+    assert.equal(unconfirmed.failures.length, 0);
+    assert.equal(env2.double.calls.filter((c) => c.cmd === abort).length, 1, 'abort rejection is not retried');
+    const lines = env2.api.formatRunResult(unconfirmed).lines;
+    assert.equal(lines[0], 'Backup stopped because the Desktop backup service returned an unexpected error.');
+    assert.ok(lines.includes('The previous backup session may remain busy until it is released automatically.'));
+
+    const env3 = await bootScenario('post-commit-list-reject', {
+      rejectInvokes: { h2o_saved_chat_backup_list: 1 },
+    }, { moduleSourceOverride: activeModule });
+    const parent = env3.dom.document.createElement('div');
+    const health = env3.dom.document.createElement('div');
+    parent.appendChild(health);
+    const card = env3.api.mountLocalBackupCard(health, runDeps(env3));
+    const committed = await card.run();
+    assert.equal(committed.status, 'complete', 'post-commit LIST rejection cannot reclassify the result');
+    assert.equal(committed.committed, true);
+    assert.equal(card.getState().result.status, 'complete');
+    assert.ok(allText(parent).includes('Backup complete'));
+  });
+
+  await checkAsync('remount while active attaches to the module run; card B cancels that run, no second BEGIN/busy, and a later terminal run starts normally', async () => {
+    let releasePause;
+    let markReached;
+    const wait = new Promise((resolve) => { releasePause = resolve; });
+    const reached = new Promise((resolve) => { markReached = resolve; });
+    const env = await bootScenario('remount-active', {
+      pauseInvoke: {
+        command: 'h2o_saved_chat_backup_package_begin',
+        wait,
+        onReached: () => markReached(),
+      },
+    }, { moduleSourceOverride: activeModule });
+    const parent = env.dom.document.createElement('div');
+    const health = env.dom.document.createElement('div');
+    parent.appendChild(health);
+    const cardA = env.api.mountLocalBackupCard(health, runDeps(env));
+    const active = cardA.run();
+    await reached;
+    assert.equal(env.double.session.state, 'STAGING', 'BEGIN created the one live native session');
+    assert.equal(env.double.calls.filter((c) => c.cmd === 'h2o_saved_chat_backup_begin').length, 1);
+
+    const cardB = env.api.mountLocalBackupCard(health, runDeps(env));
+    assert.equal(cardB.getState().running, true);
+    assert.equal(cardB.getState().progress.current, 1);
+    assert.equal(cardB.getState().progress.total, 4);
+    assert.ok(allText(parent).includes('Backing up 1 of 4…'), 'card B renders the active progress, not idle state');
+    assert.ok(!allText(parent).includes('No backup has been run in this session.'));
+    assert.equal(findByAttr(parent, 'data-h2o-action', 'local-backup-cancel').disabled, false, 'card B exposes Cancel');
+    assert.equal(findAllByAttr(parent, 'data-h2o-card').filter((n) => n.attributes['data-h2o-card'] === 'saved-chat-local-backup').length, 1, 'only card B remains visible');
+    assert.equal(env.double.calls.filter((c) => c.cmd === 'h2o_saved_chat_backup_begin').length, 1, 'remount itself issues no BEGIN');
+
+    const attached = cardB.run();
+    assert.equal(attached, active, 'Back up while active attaches to the same promise');
+    assert.equal(env.double.calls.filter((c) => c.cmd === 'h2o_saved_chat_backup_begin').length, 1, 'attached run issues no second BEGIN');
+    cardB.cancel();
+    assert.equal(cardB.getState().cancelRequested, true, 'card B cancels the module-level run');
+    releasePause();
+    const cancelled = await active;
+    assert.equal(cancelled.code, 'backup-cancelled');
+    assert.equal(cancelled.cancelled, true);
+    assert.equal(env.double.calls.filter((c) => c.cmd === 'h2o_saved_chat_backup_abort').length, 1);
+    assert.equal(env.double.calls.filter((c) => c.cmd === 'h2o_saved_chat_backup_finalize').length, 0);
+    assert.equal(env.double.calls.filter((c) => c.cmd === 'h2o_saved_chat_backup_begin').length, 1);
+    assert.notEqual(cancelled.code, 'backup-session-busy', 'the remounted workflow never receives a busy refusal');
+    assert.equal(cardB.getState().result.code, 'backup-cancelled', 'card B receives the terminal result');
+
+    const later = await cardB.run();
+    assert.equal(later.status, 'complete');
+    assert.notEqual(later.code, 'backup-session-busy');
+    assert.equal(env.double.calls.filter((c) => c.cmd === 'h2o_saved_chat_backup_begin').length, 2, 'a later terminal run creates exactly one new BEGIN');
+    assert.equal(cardB.getState().list.rows.length, 1, 'the governed LIST rows refresh after completion');
+    assertSourceUntouched(env, 'remount-active');
   });
 
   await checkAsync('durability truth (NB-T02-08): committed:true + durabilityComplete:false is a published backup with a warning; committed:false is never success', async () => {
@@ -1122,7 +1246,14 @@ async function main() {
     assert.equal(run.status, 'complete');
     const status = findByAttr(parent, 'data-h2o-local-backup-status', 'complete');
     assert.ok(status, 'status attribute reflects the run state');
-    assert.ok(allText(parent).includes('Backup complete — 4 chats backed up.'));
+    assert.ok(allText(parent).includes('Backup complete — 4 of 4 eligible chats backed up; 5 saved chats skipped.'));
+    assert.ok(allText(parent).includes('Skipped saved chats: 5 — 1 deleted, 2 tombstoned, 2 with no snapshot or zero turns.'));
+    assert.ok(allText(parent).includes('Linked-only chats not eligible for saved-chat backup: 1.'));
+    assert.ok(allText(parent).includes('selected at the start'));
+    assert.ok(allText(parent).includes('Each chat is consistency-checked while it is backed up.'));
+    assert.ok(allText(parent).includes('Recovery in v1 uses Recover as New; it does not overwrite the current chat.'));
+    assert.ok(allText(parent).includes('asset bytes remain in the backup package'));
+    assert.ok(allText(parent).includes('does not reattach those package assets'));
     assert.ok(allText(parent).includes(run.backupLeaf));
     /* governed list */
     const state = card.getState();
@@ -1157,7 +1288,11 @@ async function main() {
     fs.mkdirSync(path.join(env.scratch.backupRoot, '.h2o-backupstage-' + 'f'.repeat(32)));
     await card.refreshList();
     assert.equal(card.getState().list.residueCount, 1);
-    assert.ok(allText(parent).includes('1 stale staging folder(s) (not removed)'));
+    assert.ok(allText(parent).includes('1 stale staging folder(s): .h2o-backupstage-' + 'f'.repeat(32)));
+    assert.ok(allText(parent).includes('Stale staging folders are not backups.'));
+    assert.ok(allText(parent).includes('This version does not remove them automatically.'));
+    assert.ok(allText(parent).includes('Only remove them manually when no backup is active.'));
+    assert.equal(findAllByAttr(parent, 'data-h2o-action').filter((n) => /delete|remove/i.test(n._text || '')).length, 0, 'no residue cleanup control');
     assert.ok(fs.existsSync(path.join(env.scratch.backupRoot, '.h2o-backupstage-' + 'f'.repeat(32))));
     assertSourceUntouched(env, 'card');
   });
@@ -1191,6 +1326,10 @@ async function main() {
     assert.equal(run2.status, 'failed');
     assert.equal(run2.code, 'backup-no-package-succeeded');
     assert.equal(run2.failures.length, 4);
+    const formatted = env2.api.formatRunResult(run2);
+    assert.equal(formatted.headline, 'Backup failed — 0 of 4 eligible chats were backed up; 4 failed.');
+    assert.ok(formatted.lines.some((line) => line.includes('Alpha (asset-bearing) (bk-alpha) — backup-write-failed')), 'human title plus canonical chatId');
+    assert.ok(formatted.lines.some((line) => line.includes('Bravo (text only) (bk-bravo) — backup-write-failed')), 'second failure title mapped locally');
     const cmds = env2.double.calls.map((c) => c.cmd);
     assert.ok(cmds.includes('h2o_saved_chat_backup_abort'), 'the live session is aborted after the refusal');
     assert.equal(fs.readdirSync(env2.scratch.backupRoot).length, 0, 'own staging removed');

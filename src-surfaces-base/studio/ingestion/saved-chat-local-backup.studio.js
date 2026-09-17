@@ -177,8 +177,12 @@
 
   var TEXT = {
     title: 'Local backup',
-    subtitle: 'Writes one verified, point-in-time copy of every saved chat into the '
-      + 'H2O Studio Backups folder in your home folder. Existing backups are never changed.',
+    subtitle: 'Creates a manual local backup of the saved chats selected at the start. '
+      + 'Each chat is consistency-checked while it is backed up. The backup is written to the '
+      + 'H2O Studio Backups folder in your home folder, and existing backups are never changed.',
+    recoveryScope: 'Recovery in v1 uses Recover as New; it does not overwrite the current chat. '
+      + 'Chat text and turns are preserved. Image and other asset bytes remain in the backup package, '
+      + 'but Recover as New does not reattach those package assets to the recovered chat in v1.',
     idle: 'No backup has been run in this session.',
     unavailable: 'Local backup is available in Desktop Studio only.',
     backupButton: 'Back up saved chats',
@@ -192,12 +196,17 @@
     incomplete: 'Backup INCOMPLETE',
     failed: 'Backup failed',
     cancelled: 'Backup cancelled — nothing was published.',
+    nothingToBackUp: 'Nothing to back up — no eligible saved chats were found.',
+    runtimeError: 'Backup stopped because the Desktop backup service returned an unexpected error.',
+    cleanupWarning: 'The previous backup session may remain busy until it is released automatically.',
     durabilityWarning: 'The backup was published, but its final durability fence did not complete. '
       + 'Verify the backup before relying on it.',
     listHeading: 'Backups',
     listEmpty: 'No backups found yet.',
     listUnavailable: 'The backups folder could not be read.',
-    residue: 'stale staging folder(s) (not removed)',
+    residue: 'stale staging folder(s)',
+    residueExplanation: 'Stale staging folders are not backups. This version does not remove them automatically. '
+      + 'Only remove them manually when no backup is active.',
     foreign: 'other entries in the backups folder (not backups)',
     verifyHeading: 'Verify result',
     kindComplete: 'Complete backup',
@@ -437,6 +446,7 @@
       eligible.push({
         chatId: chatId,
         snapshotId: snapshotId,
+        title: cleanString(chat.title),
         identity: identityFromRows(chatId, snapshotId, chat, combined.snapshot, turns),
       });
     }
@@ -572,8 +582,20 @@
       entries: [],
       failures: [],
       cancelled: false,
+      runtimeError: false,
+      cleanupUnconfirmed: false,
+      diagnostic: '',
+      chatTitles: {},
       native: null,
     }, safeObject(extra));
+  }
+
+  function runtimeFailureResult(error, extra) {
+    var diagnostic = boundedDetail((error && error.message) || error || 'unexpected renderer or IPC failure');
+    return finishResultFrom('failed', '', TEXT.runtimeError, Object.assign({
+      runtimeError: true,
+      diagnostic: diagnostic,
+    }, safeObject(extra)));
   }
 
   /* Runs one manual backup end to end. `deps` may inject `invoke`, `stores`
@@ -607,9 +629,9 @@
       return finishResultFrom('failed', enumeration.code, 'The saved-chat set could not be enumerated reliably.', { counts: countsOf(enumeration, 0, 0) });
     }
     if (enumeration.eligible.length === 0) {
-      /* The contract's empty-set refusal, surfaced without a BEGIN and never
-       * as a success. */
-      return finishResultFrom('failed', 'backup-nothing-to-back-up', 'There are no saved chats to back up.', { counts: countsOf(enumeration, 0, 0) });
+      /* A valid empty set is a neutral local outcome. There is no BEGIN, no
+       * published object and no source/protocol failure. */
+      return finishResultFrom('empty', '', TEXT.nothingToBackUp, { counts: countsOf(enumeration, 0, 0) });
     }
     if (isCancelled()) return finishResultFrom('failed', 'backup-cancelled', TEXT.cancelled, { cancelled: true });
 
@@ -629,22 +651,55 @@
     var entries = [];
     var failures = [];
     var total = enumeration.eligible.length;
+    var chatTitles = {};
+    enumeration.eligible.forEach(function (entry) {
+      var title = cleanString(entry && entry.title);
+      if (title) chatTitles[entry.chatId] = title;
+    });
+    var sessionOwned = true;
 
-    async function packageAbort(reason) {
-      var aborted = await invoke(COMMANDS.packageAbort, { options: { token: token, reason: cleanString(reason) } });
-      /* Benign when no package is open (NB-T02-03); a dead session is not. */
-      if (aborted && aborted.ok === true) return null;
-      var status = nativeStatus(aborted);
-      /* A terminal or missing session cannot continue; anything else is a
-       * benign no-op for a stage that is already gone. */
-      if (status === 'backup-cancelled' || status === 'backup-session-unknown' || status === 'backup-session-evicted' || status === 'backup-invalid-state') return status;
-      return null;
+    function terminalSessionStatus(status) {
+      return status === 'backup-cancelled' || status === 'backup-session-unknown' || status === 'backup-session-evicted';
     }
 
-    async function abortRun(code, message) {
-      try { await invoke(COMMANDS.abort, { options: { token: token } }); } catch (_) { /* best effort */ }
-      return finishResultFrom('failed', code, message, { backupId: backupId, cancelled: code === 'backup-cancelled', entries: entries, failures: failures });
+    /* Abort only the token this renderer obtained from BEGIN. The caller can
+     * distinguish confirmed cleanup from a rejected/failed best-effort call,
+     * while the original failure always remains primary. */
+    async function abortOwnedSession() {
+      if (!sessionOwned) return { attempted: false, confirmed: true };
+      try {
+        var response = await invoke(COMMANDS.abort, { options: { token: token } });
+        var status = nativeStatus(response);
+        var confirmed = !!(response && response.ok === true) || terminalSessionStatus(status);
+        if (confirmed) sessionOwned = false;
+        return { attempted: true, confirmed: confirmed, response: response || null };
+      } catch (_) {
+        return { attempted: true, confirmed: false, response: null };
+      }
     }
+
+    try {
+      async function packageAbort(reason) {
+        var aborted = await invoke(COMMANDS.packageAbort, { options: { token: token, reason: cleanString(reason) } });
+        /* Benign when no package is open (NB-T02-03); a dead session is not. */
+        if (aborted && aborted.ok === true) return null;
+        var status = nativeStatus(aborted);
+        /* A terminal or missing session cannot continue; anything else is a
+         * benign no-op for a stage that is already gone. */
+        if (status === 'backup-cancelled' || status === 'backup-session-unknown' || status === 'backup-session-evicted' || status === 'backup-invalid-state') return status;
+        return null;
+      }
+
+      async function abortRun(code, message) {
+        await abortOwnedSession();
+        return finishResultFrom('failed', code, message, {
+          backupId: backupId,
+          cancelled: code === 'backup-cancelled',
+          entries: entries,
+          failures: failures,
+          chatTitles: chatTitles,
+        });
+      }
 
     /* 5. One package per eligible chat, in the frozen deterministic order. */
     for (var i = 0; i < total; i += 1) {
@@ -772,19 +827,28 @@
     /* 6. FINALIZE with the exact failure records. */
     progress({ current: total, total: total, chatId: '', finalizing: true });
     var finalized = await invoke(COMMANDS.finalize, { options: { token: token, failures: failures } });
+    /* Publication is the native commit point. From this instant the renderer
+     * no longer owns an abortable staging session, even if later response/UI
+     * handling encounters an unexpected problem. */
+    if (finalized && finalized.committed === true) sessionOwned = false;
     var finalStatus = nativeStatus(finalized);
     var counts = safeObject(finalized && finalized.counts);
     if (!finalized || finalized.ok !== true || finalized.committed !== true) {
       /* Committed false never displays success; a FAILED native run has
        * already removed its own staging. */
       var failedCode = finalStatus || 'backup-promote-failed';
-      if (failedCode === 'backup-cancelled') return finishResultFrom('failed', failedCode, TEXT.cancelled, { backupId: backupId, cancelled: true, entries: entries, failures: failures, native: finalized || null, codes: asArray(finalized && finalized.codes) });
+      if (failedCode === 'backup-cancelled') {
+        sessionOwned = false;
+        return finishResultFrom('failed', failedCode, TEXT.cancelled, { backupId: backupId, cancelled: true, entries: entries, failures: failures, chatTitles: chatTitles, native: finalized || null, codes: asArray(finalized && finalized.codes) });
+      }
       /* A refusal that leaves the session live (e.g. an inconsistent
        * declaration) still needs its own staging removed. */
       if (finalized && finalized.committed !== true && finalStatus !== 'backup-session-unknown' && finalStatus !== 'backup-session-evicted') {
-        try { await invoke(COMMANDS.abort, { options: { token: token } }); } catch (_) { /* best effort */ }
+        await abortOwnedSession();
+      } else if (terminalSessionStatus(finalStatus)) {
+        sessionOwned = false;
       }
-      return finishResultFrom('failed', failedCode, 'The backup set could not be published.', { backupId: backupId, entries: entries, failures: failures, native: finalized || null, codes: asArray(finalized && finalized.codes), counts: Object.keys(counts).length ? counts : countsOf(enumeration, entries.length, failures.length) });
+      return finishResultFrom('failed', failedCode, 'The backup set could not be published.', { backupId: backupId, entries: entries, failures: failures, chatTitles: chatTitles, native: finalized || null, codes: asArray(finalized && finalized.codes), counts: Object.keys(counts).length ? counts : countsOf(enumeration, entries.length, failures.length) });
     }
     var complete = finalized.complete === true && finalStatus === 'published';
     return finishResultFrom(complete ? 'complete' : 'incomplete', '', complete ? TEXT.complete : TEXT.incomplete, {
@@ -798,8 +862,20 @@
       codes: asArray(finalized.codes),
       entries: entries,
       failures: failures,
+      chatTitles: chatTitles,
       native: finalized,
     });
+    } catch (error) {
+      var cleanup = await abortOwnedSession();
+      return runtimeFailureResult(error, {
+        backupId: backupId,
+        entries: entries,
+        failures: failures,
+        chatTitles: chatTitles,
+        counts: countsOf(enumeration, entries.length, failures.length),
+        cleanupUnconfirmed: cleanup.attempted && !cleanup.confirmed,
+      });
+    }
   }
 
   function countsOf(enumeration, success, failed) {
@@ -844,6 +920,9 @@
         manifestPresent: e.manifestPresent === true,
       });
     });
+    var residueLeaves = asArray(list.entries).filter(function (entry) {
+      return cleanString(safeObject(entry).kind) === 'staging-residue';
+    }).map(function (entry) { return cleanString(safeObject(entry).leaf); }).filter(Boolean);
     var foreign = asArray(list.entries).filter(function (entry) { return cleanString(safeObject(entry).kind) === 'foreign'; }).length;
     return {
       ok: list.ok === true,
@@ -852,6 +931,7 @@
       rootDisplayPath: cleanString(list.rootDisplayPath),
       rows: rows,
       residueCount: isFiniteNumber(list.residueCount) ? list.residueCount : 0,
+      residueLeaves: residueLeaves,
       foreignCount: foreign,
     };
   }
@@ -887,22 +967,46 @@
   function formatRunResult(result) {
     var r = safeObject(result);
     var counts = safeObject(r.counts);
+    var skipped = safeObject(counts.skipped);
+    var deleted = numberOrZero(skipped.deleted);
+    var tombstoned = numberOrZero(skipped.tombstoned);
+    var noSnapshot = numberOrZero(skipped.noSnapshot);
+    var linkedOnly = numberOrZero(skipped.linkedOnly);
+    var savedSkipped = deleted + tombstoned + noSnapshot;
     var lines = [];
-    if (r.status === 'complete') {
-      lines.push(TEXT.complete + ' — ' + (counts.success || 0) + ' chat' + ((counts.success || 0) === 1 ? '' : 's') + ' backed up.');
+    if (r.runtimeError === true) {
+      lines.push(TEXT.runtimeError);
+    } else if (r.status === 'empty') {
+      lines.push(TEXT.nothingToBackUp);
+    } else if (r.status === 'complete') {
+      lines.push(TEXT.complete + ' — ' + (counts.success || 0) + ' of ' + (counts.eligible || 0)
+        + ' eligible chats backed up; ' + savedSkipped + ' saved chat' + (savedSkipped === 1 ? '' : 's') + ' skipped.');
     } else if (r.status === 'incomplete') {
-      lines.push(TEXT.incomplete + ' — ' + (counts.success || 0) + ' of ' + (counts.eligible || 0) + ' chats backed up; ' + (counts.failed || 0) + ' failed (listed below).');
+      lines.push(TEXT.incomplete + ' — ' + (counts.success || 0) + ' of ' + (counts.eligible || 0)
+        + ' eligible chats backed up; ' + (counts.failed || 0) + ' failed; ' + savedSkipped + ' saved chat'
+        + (savedSkipped === 1 ? '' : 's') + ' skipped.');
     } else if (r.cancelled) {
       lines.push(TEXT.cancelled);
+    } else if (r.code === 'backup-no-package-succeeded' && numberOrZero(counts.eligible) > 0) {
+      lines.push(TEXT.failed + ' — 0 of ' + counts.eligible + ' eligible chats were backed up; '
+        + (counts.failed || 0) + ' failed.');
     } else {
       lines.push(TEXT.failed + ' — ' + (r.code || 'unknown') + ' (' + (r.errorClass || classifyFailureCode(r.code)) + ').');
     }
+    if (counts.skipped) {
+      lines.push('Skipped saved chats: ' + savedSkipped + ' — ' + deleted + ' deleted, ' + tombstoned
+        + ' tombstoned, ' + noSnapshot + ' with no snapshot or zero turns.');
+      if (linkedOnly > 0) lines.push('Linked-only chats not eligible for saved-chat backup: ' + linkedOnly + '.');
+    }
     if (r.backupLeaf) lines.push('Backup: ' + r.backupLeaf);
     if (r.committed === true && r.durabilityComplete !== true) lines.push(TEXT.durabilityWarning + (asArray(r.codes).length ? ' (' + asArray(r.codes).join(', ') + ')' : ''));
+    if (r.runtimeError === true && r.cleanupUnconfirmed === true) lines.push(TEXT.cleanupWarning);
     asArray(r.failures).forEach(function (f) {
-      lines.push('Failed: ' + f.chatId + ' — ' + f.code + ' (' + classifyFailureCode(f.code) + ', ' + f.stage + ')');
+      var title = cleanString(safeObject(r.chatTitles)[f.chatId]);
+      var identity = title ? title + ' (' + f.chatId + ')' : f.chatId;
+      lines.push('Failed: ' + identity + ' — ' + f.code + ' (' + classifyFailureCode(f.code) + ', ' + f.stage + ')');
     });
-    return { headline: lines[0] || '', lines: lines, tone: r.status === 'complete' ? 'success' : 'warning' };
+    return { headline: lines[0] || '', lines: lines, tone: r.status === 'complete' ? 'success' : (r.status === 'empty' ? 'neutral' : 'warning') };
   }
 
   /* ── The card ─────────────────────────────────────────────────────────── */
@@ -912,6 +1016,101 @@
     if (text !== undefined && text !== null) node.textContent = String(text);
     if (style) node.setAttribute('style', style);
     return node;
+  }
+
+  /* One renderer operation for the module, independent of the current card
+   * DOM. A remount replaces only `currentView`; the active promise, progress,
+   * cancellation request and terminal result stay authoritative here. */
+  var runController = {
+    state: {
+      status: 'idle',
+      running: false,
+      progress: null,
+      cancelRequested: false,
+      activePromise: null,
+      runId: 0,
+      result: null,
+      list: null,
+      verify: null,
+    },
+    currentView: null,
+  };
+
+  function notifyCurrentView() {
+    var view = runController.currentView;
+    if (!view || typeof view.render !== 'function') return;
+    try { view.render(runController.state); } catch (_) { /* detached UI is never authoritative */ }
+  }
+
+  async function refreshControllerList(deps) {
+    var wire = await listBackups(deps.invoke);
+    runController.state.list = formatListRows(wire);
+    notifyCurrentView();
+    return runController.state.list;
+  }
+
+  async function verifyFromController(view, deps, leaf) {
+    if (runController.currentView !== view) return null;
+    var chosen = cleanString(leaf);
+    if (!chosen) return null;
+    var wire = await verifyBackup(deps.invoke, chosen);
+    runController.state.verify = { leaf: chosen, result: formatVerifyResult(wire) };
+    notifyCurrentView();
+    return runController.state.verify;
+  }
+
+  function startControllerRun(view, deps) {
+    var state = runController.state;
+    if (state.activePromise) return state.activePromise;
+    if (runController.currentView !== view) return Promise.resolve(state.result);
+
+    state.running = true;
+    state.status = 'running';
+    state.progress = null;
+    state.cancelRequested = false;
+    state.result = null;
+    state.verify = null;
+    state.runId += 1;
+    notifyCurrentView();
+
+    var operation = (async function () {
+      var outcome;
+      try {
+        outcome = await runLocalBackup(deps, {
+          onProgress: function (progress) {
+            state.progress = progress;
+            notifyCurrentView();
+          },
+          isCancelled: function () { return state.cancelRequested; },
+        });
+      } catch (error) {
+        /* Pre-BEGIN renderer failures have no native token to clean up. The
+         * same runtime truth applies without misclassifying projection data. */
+        outcome = runtimeFailureResult(error);
+      }
+
+      state.running = false;
+      state.status = outcome.status;
+      state.result = outcome;
+      notifyCurrentView();
+
+      /* Rendering or LIST failure after a committed result must never
+       * reclassify that published terminal result. */
+      try { await refreshControllerList(deps); } catch (_) { /* result stands */ }
+      state.cancelRequested = false;
+      state.activePromise = null;
+      notifyCurrentView();
+      return outcome;
+    })();
+    state.activePromise = operation;
+    return operation;
+  }
+
+  function cancelControllerRun(view) {
+    var state = runController.state;
+    if (runController.currentView !== view || !state.running) return;
+    state.cancelRequested = true;
+    notifyCurrentView();
   }
 
   function mountLocalBackupCard(healthContainer, options) {
@@ -927,7 +1126,7 @@
         mount.style.marginTop = '12px';
         parent.appendChild(mount);
       }
-      /* Idempotent remount: one card, one set of controls and listeners. */
+      /* Idempotent remount: one visible card; controller state survives. */
       mount.textContent = '';
       container = mount;
     }
@@ -940,13 +1139,13 @@
     card.setAttribute('data-h2o-card', 'saved-chat-local-backup');
     card.appendChild(el('h3', TEXT.title));
     card.appendChild(el('div', TEXT.subtitle, 'opacity:0.85;margin-bottom:8px'));
+    card.appendChild(el('div', TEXT.recoveryScope, 'opacity:0.85;margin-bottom:8px'));
     var backupButton = el('button', TEXT.backupButton);
     backupButton.setAttribute('type', 'button');
     backupButton.setAttribute('data-h2o-action', 'local-backup-run');
     var cancelButton = el('button', TEXT.cancelButton);
     cancelButton.setAttribute('type', 'button');
     cancelButton.setAttribute('data-h2o-action', 'local-backup-cancel');
-    cancelButton.disabled = true;
     var status = el('div', TEXT.idle, 'margin-top:8px');
     status.setAttribute('data-h2o-local-backup-status', 'idle');
     var result = el('div', '', 'margin-top:6px');
@@ -966,14 +1165,11 @@
     card.appendChild(verifyBody);
     container.appendChild(card);
 
-    var state = { status: 'idle', result: null, list: null, verify: null, progress: null };
-
     if (!desktop) {
-      /* Chrome / non-Desktop Studio: the action is truthfully unavailable and
-       * no browser filesystem write is ever attempted. */
       status.textContent = TEXT.unavailable;
       status.setAttribute('data-h2o-local-backup-status', 'unavailable');
       backupButton.disabled = true;
+      cancelButton.disabled = true;
       refreshButton.disabled = true;
       return {
         run: function () { return Promise.resolve(null); },
@@ -984,110 +1180,81 @@
       };
     }
 
-    var running = false;
-    var cancelRequested = false;
+    var view = {
+      render: function (state) {
+        var statusText = TEXT.idle;
+        if (state.running) {
+          if (state.progress && state.progress.finalizing) statusText = TEXT.finalizing;
+          else if (state.progress) statusText = TEXT.running + ' ' + state.progress.current + ' of ' + state.progress.total + '…';
+          else statusText = TEXT.preparing;
+        } else if (state.result) {
+          statusText = formatRunResult(state.result).headline;
+        }
+        status.textContent = statusText;
+        status.setAttribute('data-h2o-local-backup-status', state.running ? 'running' : state.status);
+        backupButton.disabled = state.running;
+        cancelButton.disabled = !state.running || state.cancelRequested;
 
-    function setStatus(kind, text) {
-      state.status = kind;
-      status.textContent = text;
-      status.setAttribute('data-h2o-local-backup-status', kind);
-    }
+        result.textContent = '';
+        if (state.result) {
+          var formattedRun = formatRunResult(state.result);
+          formattedRun.lines.forEach(function (line, index) {
+            var color = formattedRun.tone === 'success' ? 'color:#3fb950' : (formattedRun.tone === 'warning' ? 'color:#d29922' : '');
+            result.appendChild(el('div', line, index === 0 ? color : ''));
+          });
+        }
 
-    function renderResult(run) {
-      result.textContent = '';
-      var formatted = formatRunResult(run);
-      formatted.lines.forEach(function (line, index) {
-        result.appendChild(el('div', line, index === 0 ? (formatted.tone === 'success' ? 'color:#3fb950' : 'color:#d29922') : ''));
-      });
-    }
+        listBody.textContent = '';
+        var formatted = state.list;
+        if (formatted) {
+          if (!formatted.ok) {
+            listBody.appendChild(el('div', formatted.status === 'backup-root-absent' ? TEXT.listEmpty : (TEXT.listUnavailable + ' (' + formatted.status + ')')));
+          } else {
+            if (formatted.rootDisplayPath) listBody.appendChild(el('div', 'Folder: ' + formatted.rootDisplayPath, 'opacity:0.85'));
+            if (!formatted.rows.length) listBody.appendChild(el('div', TEXT.listEmpty));
+            formatted.rows.forEach(function (row) {
+              var line = el('div', '', 'margin-top:4px');
+              line.setAttribute('data-h2o-local-backup-row', row.leaf);
+              line.appendChild(el('span', row.label + ' — ' + row.leaf + ' '));
+              var button = el('button', TEXT.verifyButton);
+              button.setAttribute('type', 'button');
+              button.setAttribute('data-h2o-action', 'local-backup-verify');
+              button.setAttribute('data-h2o-leaf', row.leaf);
+              button.addEventListener('click', function () { verifyFromController(view, deps, row.leaf); });
+              line.appendChild(button);
+              listBody.appendChild(line);
+            });
+            if (formatted.residueCount > 0) {
+              var residueNames = asArray(formatted.residueLeaves);
+              listBody.appendChild(el('div', formatted.residueCount + ' ' + TEXT.residue
+                + (residueNames.length ? ': ' + residueNames.join(', ') : '') + '.', 'color:#d29922'));
+              listBody.appendChild(el('div', TEXT.residueExplanation, 'color:#d29922'));
+            }
+            if (formatted.foreignCount > 0) listBody.appendChild(el('div', formatted.foreignCount + ' ' + TEXT.foreign, 'opacity:0.85'));
+          }
+        }
 
-    function renderVerify(leaf, verifyResult) {
-      verifyBody.textContent = '';
-      var formatted = formatVerifyResult(verifyResult);
-      verifyBody.appendChild(el('div', TEXT.verifyHeading + ' — ' + leaf));
-      verifyBody.appendChild(el('div', formatted.headline, formatted.valid ? 'color:#3fb950' : 'color:#f85149'));
-      verifyBody.appendChild(el('div', 'status: ' + formatted.status + (formatted.codes.length ? ' · codes: ' + formatted.codes.join(', ') : '')));
-      if (formatted.valid) verifyBody.appendChild(el('div', formatted.entriesVerified + ' package(s) verified.'));
-      state.verify = { leaf: leaf, result: formatted };
-    }
+        verifyBody.textContent = '';
+        if (state.verify) {
+          var verification = state.verify.result;
+          verifyBody.appendChild(el('div', TEXT.verifyHeading + ' — ' + state.verify.leaf));
+          verifyBody.appendChild(el('div', verification.headline, verification.valid ? 'color:#3fb950' : 'color:#f85149'));
+          verifyBody.appendChild(el('div', 'status: ' + verification.status + (verification.codes.length ? ' · codes: ' + verification.codes.join(', ') : '')));
+          if (verification.valid) verifyBody.appendChild(el('div', verification.entriesVerified + ' package(s) verified.'));
+        }
+      },
+    };
 
-    async function verify(leaf) {
-      var chosen = cleanString(leaf);
-      if (!chosen) return null;
-      var wire = await verifyBackup(invoke, chosen);
-      renderVerify(chosen, wire);
-      return state.verify;
-    }
+    runController.currentView = view;
+    notifyCurrentView();
 
-    function renderList(listResult) {
-      listBody.textContent = '';
-      var formatted = formatListRows(listResult);
-      state.list = formatted;
-      if (!formatted.ok) {
-        listBody.appendChild(el('div', formatted.status === 'backup-root-absent' ? TEXT.listEmpty : (TEXT.listUnavailable + ' (' + formatted.status + ')')));
-        return;
-      }
-      if (formatted.rootDisplayPath) listBody.appendChild(el('div', 'Folder: ' + formatted.rootDisplayPath, 'opacity:0.85'));
-      if (!formatted.rows.length) listBody.appendChild(el('div', TEXT.listEmpty));
-      formatted.rows.forEach(function (row) {
-        var line = el('div', '', 'margin-top:4px');
-        line.setAttribute('data-h2o-local-backup-row', row.leaf);
-        line.appendChild(el('span', row.label + ' — ' + row.leaf + ' '));
-        var button = el('button', TEXT.verifyButton);
-        button.setAttribute('type', 'button');
-        button.setAttribute('data-h2o-action', 'local-backup-verify');
-        button.setAttribute('data-h2o-leaf', row.leaf);
-        button.addEventListener('click', function () { verify(row.leaf); });
-        line.appendChild(button);
-        listBody.appendChild(line);
-      });
-      if (formatted.residueCount > 0) listBody.appendChild(el('div', formatted.residueCount + ' ' + TEXT.residue, 'color:#d29922'));
-      if (formatted.foreignCount > 0) listBody.appendChild(el('div', formatted.foreignCount + ' ' + TEXT.foreign, 'opacity:0.85'));
+    function run() { return startControllerRun(view, deps); }
+    function cancel() { cancelControllerRun(view); }
+    function refreshList() {
+      if (runController.currentView !== view) return Promise.resolve(runController.state.list);
+      return refreshControllerList(deps);
     }
-
-    async function refreshList() {
-      var wire = await listBackups(invoke);
-      renderList(wire);
-      return state.list;
-    }
-
-    async function run() {
-      if (running) return null;
-      running = true;
-      cancelRequested = false;
-      backupButton.disabled = true;
-      cancelButton.disabled = false;
-      result.textContent = '';
-      verifyBody.textContent = '';
-      setStatus('running', TEXT.preparing);
-      var outcome;
-      try {
-        outcome = await runLocalBackup(deps, {
-          onProgress: function (p) {
-            if (p && p.finalizing) setStatus('running', TEXT.finalizing);
-            else setStatus('running', TEXT.running + ' ' + p.current + ' of ' + p.total + '…');
-            state.progress = p;
-          },
-          isCancelled: function () { return cancelRequested; },
-        });
-      } catch (err) {
-        outcome = finishResultFrom('failed', 'backup-projection-failed', String((err && err.message) || err));
-      }
-      running = false;
-      backupButton.disabled = false;
-      cancelButton.disabled = true;
-      state.result = outcome;
-      setStatus(outcome.status, formatRunResult(outcome).headline);
-      renderResult(outcome);
-      try { await refreshList(); } catch (_) { /* the run result stands on its own */ }
-      return outcome;
-    }
-
-    function cancel() {
-      if (!running) return;
-      cancelRequested = true;
-      cancelButton.disabled = true;
-    }
+    function verify(leaf) { return verifyFromController(view, deps, leaf); }
 
     backupButton.addEventListener('click', function () { run(); });
     cancelButton.addEventListener('click', function () { cancel(); });
@@ -1098,7 +1265,7 @@
       cancel: cancel,
       refreshList: refreshList,
       verify: verify,
-      getState: function () { return state; },
+      getState: function () { return runController.state; },
     };
   }
 
