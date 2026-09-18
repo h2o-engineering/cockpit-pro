@@ -409,14 +409,17 @@
   }
 
   function isNativeOwnedFolderMirrorRow(row) {
+    const stateSource = String(row?.stateSource || '').trim().toLowerCase();
     const source = String(row?.source || '').trim().toLowerCase();
     const kind = String(row?.kind || '').trim().toLowerCase();
+    if (stateSource === 'native-folder-catalog' || stateSource === 'native-folder-state' || stateSource === 'native-broadcast' || stateSource === 'native-h2o-folder-state') return true;
+    if (stateSource.includes('native') && (stateSource.includes('folder') || stateSource.includes('catalog') || stateSource.includes('broadcast'))) return true;
     if (source === 'native-folder-catalog') return true;
     if (source === 'native-folder-state') return true;
     if (source === 'native-broadcast') return true;
     if (source === 'native-h2o-folder-state') return true;
-    if (source.includes('native') && (source.includes('folder') || source.includes('catalog'))) return true;
-    if (kind === 'native-folder-catalog' || kind === 'native-folder-state') return true;
+    if (source.includes('native') && (source.includes('folder') || source.includes('catalog') || source.includes('broadcast'))) return true;
+    if (kind === 'native-folder-catalog' || kind === 'native-folder-state' || kind === 'native-broadcast') return true;
     return false;
   }
 
@@ -968,7 +971,11 @@
     if (isHiddenFolderDisplayRow(row)) return false;
     const meta = folderMetaOf(row);
     if (row?.desktopAuthoritativeVisible === true || meta.desktopAuthoritativeVisible === true) return true;
-    return isPrimaryCanonicalFolder(row) || isProtectedCanonicalFallbackFolder(row) || isStoredFolderStateRow(row) || isMaterializedUserFolder(row);
+    return isPrimaryCanonicalFolder(row)
+      || isNativeOwnedFolderMirrorRow(row)
+      || isProtectedCanonicalFallbackFolder(row)
+      || isStoredFolderStateRow(row)
+      || isMaterializedUserFolder(row);
   }
 
   function filterFolderStateForNormalDisplay(stateInput, includeStoredDynamic = false) {
@@ -977,7 +984,9 @@
     const folders = (Array.isArray(src.folders) ? src.folders : [])
       .filter((folder) => {
         if (isHiddenFolderDisplayRow(folder, hiddenFolderIds)) return false;
-        return isPrimaryCanonicalFolder(folder) || (includeStoredDynamic && isStoredFolderStateRow(folder));
+        return isPrimaryCanonicalFolder(folder)
+          || isNativeOwnedFolderMirrorRow(folder)
+          || (includeStoredDynamic && isStoredFolderStateRow(folder));
       });
     const ids = new Set(folders.map((folder) => folderIdOf(folder)).filter(Boolean));
     const items = {};
@@ -986,6 +995,21 @@
       items[folderId] = Array.isArray(src.items[folderId]) ? src.items[folderId].slice() : [];
     });
     return { folders, items };
+  }
+
+  function selectCanonicalFolderStateForNormalDisplay(nativeStateInput, storedStateInput) {
+    const native = filterFolderStateForNormalDisplay(nativeStateInput, false);
+    if (native.folders.length) {
+      return { source: 'native-broadcast', state: native };
+    }
+    const stored = filterFolderStateForNormalDisplay(storedStateInput, true);
+    if (stored.folders.length) {
+      return { source: 'stored-folder-state', state: stored };
+    }
+    return {
+      source: 'known-current-canonical-fallback',
+      state: { folders: [], items: {} },
+    };
   }
 
   function isUnfiledSystemFolder(row) {
@@ -2407,28 +2431,21 @@
     const desktopStoreVisibleState = LW_isTauri()
       ? buildDesktopStoreVisibleFolderState(localFolders, storedState)
       : null;
-    const desktopStoreVisibleAuthoritative = !!(desktopStoreVisibleState && desktopStoreVisibleState.folders.length);
+    const desktopStoreVisibleAuthoritative = false;
 
-    const canonicalFromBroadcast = nativeState.folders.length > 0;
-    const canonicalFromStoredMirror = storedState.folders.length > 0;
-    const mergedTrustedCanonical = desktopStoreVisibleAuthoritative
-      ? desktopStoreVisibleState
-      : canonicalFromStoredMirror
-        ? filterFolderStateForNormalDisplay(storedState, true)
-        : (canonicalFromBroadcast ? filterFolderStateForNormalDisplay(nativeState, false) : { folders: [], items: {} });
+    const nativeBroadcastAvailable = nativeState.folders.length > 0;
+    const storedMirrorAvailable = storedState.folders.length > 0;
+    const canonicalSelection = selectCanonicalFolderStateForNormalDisplay(nativeState, storedState);
+    const canonicalFromBroadcast = canonicalSelection.source === 'native-broadcast';
+    const canonicalFromStoredMirror = canonicalSelection.source === 'stored-folder-state';
+    const mergedTrustedCanonical = canonicalSelection.state;
     const knownCanonicalFallbackPipeline = buildProtectedCanonicalFallbackNormalizationResults('known-current-canonical-fallback');
     const knownCanonicalFallbackRows = knownCanonicalFallbackPipeline.normalizedRows;
     const fallbackCanonical = enrichKnownCanonicalFallbackRows(knownCanonicalFallbackRows, storedState.folders);
     const canonicalFoldersRaw = mergedTrustedCanonical.folders.length
       ? mergedTrustedCanonical.folders
       : fallbackCanonical.rows;
-    const desktopVisibleSetAdoptionRows = desktopStoreVisibleAuthoritative
-      ? []
-      : buildDesktopVisibleSetAdoptionRows(
-        storedState.desktopVisibleFolderSet,
-        canonicalFoldersRaw,
-        storedState.hiddenByDesktopVisibleSetIds
-      );
+    const desktopVisibleSetAdoptionRows = [];
     const storedById = indexFoldersById(storedState.folders);
     const nativeById = indexFoldersById(nativeState.folders);
     const canonicalFoldersBase = canonicalFoldersRaw.map((folder) => (
@@ -2449,19 +2466,17 @@
     const canonicalNames = new Set(canonicalFolders.map((folder) => normalizeFolderName(folderNameOf(folder))).filter(Boolean));
     const canonicalBindingCount = desktopCanonicalBindingDisplayAvailable
       ? Number(desktopCanonicalBindingDisplay.bindingCount || 0)
-      : desktopStoreVisibleAuthoritative
-      ? countFolderStateBindings(mergedTrustedCanonical.items)
       : canonicalFromBroadcast
         ? countFolderStateBindings(mergedTrustedCanonical.items)
         : canonicalFromStoredMirror
-        ? countFolderStateBindings(storedState.items)
+        ? countFolderStateBindings(mergedTrustedCanonical.items)
       : Number(syncDiag?.projection?.nativeBroadcast?.folderBindingCount
         || syncDiag?.projection?.nativeFolderStateMerge?.incomingBindingCount
         || KNOWN_NATIVE_CANONICAL_BINDING_COUNT
         || 0);
     if (!mergedTrustedCanonical.folders.length) warnings.push('Canonical folders are using the current known native fallback list; run native probes if this differs from live ChatGPT.');
-    if (desktopStoreVisibleAuthoritative && canonicalFromStoredMirror && storedState.folders.length !== desktopStoreVisibleState.folders.length) {
-      warnings.push('Desktop canonical visible folders are using the live Desktop store; stored folder-state mirror count differs.');
+    if (desktopStoreVisibleState?.folders?.length && mergedTrustedCanonical.folders.length && desktopStoreVisibleState.folders.length !== mergedTrustedCanonical.folders.length) {
+      warnings.push('Desktop folder store differs from canonical Folder identity state; Desktop rows remain metadata/binding diagnostics only.');
     }
 
     const rowStatsByFolder = summarizeIndexRowsByFolder();
@@ -2536,7 +2551,10 @@
       ...Array.from(chromePendingDeleteHiddenIds),
     ]);
     const nativeOnlyDisplaySuppressedFolders = nativeState.folders
-      .filter((folder) => !isPrimaryCanonicalFolder(folder) && !storedState.folders.some((stored) => stored.id === folder.id))
+      .filter((folder) => {
+        const id = folderIdOf(folder);
+        return id && !canonicalIds.has(id);
+      })
       .map((folder) => ({
         id: folder.id,
         folderId: folder.id,
@@ -2632,7 +2650,7 @@
     if (knownFallbackRawCount > 0 && knownFallbackFinalDisplayCount <= 0 && !knownFallbackDropReasons.length) {
       knownFallbackDropReasons = ['known-canonical-fallback-final-display-empty'];
     }
-    const fallbackUsed = !desktopStoreVisibleAuthoritative && (!mergedTrustedCanonical.folders.length || protectedFallbackRows.length > 0);
+    const fallbackUsed = !mergedTrustedCanonical.folders.length || protectedFallbackRows.length > 0;
     const renderBlockedReason = displayModelAvailable
       ? ''
       : (folderDisplayRows.length ? 'folder-display-model-has-no-canonical-rows' : 'folder-display-model-empty');
@@ -2683,11 +2701,7 @@
       readOnly: true,
       surface,
       generatedAt: new Date().toISOString(),
-      canonicalSource: canonicalFromBroadcast
-        ? (desktopStoreVisibleAuthoritative
-          ? 'desktop-store-visible'
-          : (canonicalFromStoredMirror && storedState.folders.length > nativeState.folders.length ? 'native-broadcast+stored-folder-state' : 'native-broadcast'))
-        : (desktopStoreVisibleAuthoritative ? 'desktop-store-visible' : (canonicalFromStoredMirror ? 'stored-folder-state' : 'known-current-canonical-fallback')),
+      canonicalSource: canonicalSelection.source,
       fallbackVisualsEnriched,
       folderCatalogReady: canonicalMirrorAvailable,
       displayModelAvailable,
@@ -2703,8 +2717,8 @@
       knownFallbackRawShapes,
       knownFallbackRejectedRows,
       knownFallbackRejectionReasons,
-      storedModelAvailable: storedState.folders.length > 0,
-      nativeBroadcastAvailable: nativeState.folders.length > 0,
+      storedModelAvailable: storedMirrorAvailable,
+      nativeBroadcastAvailable,
       nativeBroadcastRequired: !displayModelAvailable,
       renderBlockedReason,
       canonicalMirrorAvailable,
@@ -3143,8 +3157,8 @@
       visibleButNotExported,
       systemFolderCount: systemRows.length,
       systemFolders: systemRows,
-      desktopStoreVisibleAuthoritative: LW_isTauri(),
-      desktopVisibleAuthority: LW_isTauri() ? 'H2O.Studio.store.folders.list' : 'stored desktop visible set',
+      desktopStoreVisibleAuthoritative: false,
+      desktopVisibleAuthority: String(model?.canonicalSource || 'known-current-canonical-fallback'),
       desktopFallbackMirrorVisibleAuthority: false,
       desktopFallbackMirrorMetadataFillOnly: true,
       blockers: [],
