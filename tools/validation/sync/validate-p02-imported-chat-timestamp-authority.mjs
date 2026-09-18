@@ -341,7 +341,7 @@ const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'h2o-p02-timestamp-autho
 try {
   /* ── A. source contract ─────────────────────────────────────────────── */
   {
-    const imp = sources.importer, li = sources.libraryIndex, st = sources.studio;
+    const imp = sources.importer, li = sources.libraryIndex, st = sources.studio, wb = sources.workspace;
     check(imp.includes('function deriveTranscriptLastMessageAt(snapshot)') && imp.includes('function turnTimeToEpochMs(value)'),
       'A1 the importer derives the last-turn time from the persisted per-turn time meta with the seconds-vs-ms rule');
     check(imp.includes("lastMessageAt: effectiveLastMessageAt || undefined,") && imp.includes("lastMessageAtSource: lastMessageAtSource,"),
@@ -358,11 +358,16 @@ try {
       'A7 ...through normalizeRow and the change signature');
     check(!sources.libraryIndexCore.includes('studioAddedAt') && !sources.libraryIndexCore.includes('lastMessageAt: ensureString'),
       'A8 the shared LibraryIndexCore timestamp representation is untouched');
-    check(st.includes('originalCreatedAt: originalCreatedAtIso,') && st.includes('studioAddedAt: studioAddedAtIso,') && st.includes('lastTurnAt: lastTurnAtIso,'),
-      'A9 the LI -> Workbench seam projects each authority onto the field its resolver reads first');
-    check(st.includes("const numericString = typeof epoch === 'string' && /^\\s*\\d+(?:\\.\\d+)?\\s*$/.test(epoch);") &&
-      st.includes('if (!Number.isFinite(value) || value <= 0) return \'\';') && st.includes('const ms = toTimestampMs(value);'),
-      'A10 toIso accepts finite positive epoch numbers and numeric epoch strings via toTimestampMs, nothing else (no Date.parse fallback)');
+    check(wb.includes('function workbenchProjectIndexRow(liRow){') &&
+      wb.includes('originalCreatedAt: originalCreatedAtIso,') &&
+      wb.includes('studioAddedAt: studioAddedAtIso,') &&
+      wb.includes('lastTurnAt: lastTurnAtIso,'),
+      'A9 the S0F1b Workbench LI -> Workbench seam projects each authority onto the field its resolver reads first');
+    check(wb.includes('function workbenchProjectIndexRow(liRow){') &&
+      wb.includes("const numericString = typeof epoch === 'string' && /^\\s*\\d+(?:\\.\\d+)?\\s*$/.test(epoch);") &&
+      wb.includes('if (!Number.isFinite(value) || value <= 0) return \'\';') &&
+      wb.includes('const ms = workbenchToTimestampMs(value);'),
+      'A10 S0F1b Workbench toIso accepts finite positive epoch numbers and numeric epoch strings via workbenchToTimestampMs, nothing else (no Date.parse fallback)');
   }
 
   /* ── B. DB / importer semantics on the real upgrade path ────────────── */
