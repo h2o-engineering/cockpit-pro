@@ -2585,13 +2585,15 @@
         return;
       }
 
-      /* Message-level capture (8g-1). */
+      /* Message-level capture (8g-1). Reader M02 C1 — the armed record is
+       * bound to the chat/snapshot identity of the click-time context. */
+      const armIdentity = __formatPainterIdentityOf(ctx);
       setStatus('Capturing formatting…');
       Promise.resolve(bridge.getMessageStateForTurn(turnIdx)).then(
         function (payload) {
           const p = (payload && typeof payload === 'object') ? payload : null;
           if (!p) { setStatus('Nothing to paint'); return; }
-          __formatPainterEngage({ mode: 'message', payload: p, sourceTurnIdx: turnIdx, sticky: false }, setStatus, actionBtn, 'Format Painter: select a target message');
+          __formatPainterEngage({ mode: 'message', payload: p, sourceTurnIdx: turnIdx, sticky: false, chatId: armIdentity.chatId, snapshotId: armIdentity.snapshotId }, setStatus, actionBtn, 'Format Painter: select a target message');
         },
         function () { setStatus('Nothing to paint'); }
       );
@@ -3903,14 +3905,35 @@
    * shell through every buildPanels/__buildSplitButton call. */
   let __ribbonShell = null;
   /* Phase 8g-1 / 8g-2a — Format Painter armed state (single-use). Either
-   * { mode:'message', payload, sourceTurnIdx } (message-level, applies on the
-   * next target-message contextChanged) or { mode:'inline', styles,
-   * sourceTurnIdx } (inline style set, applies to the target held selection on
-   * the next button click). Module-scoped; never persisted. */
+   * { mode:'message', payload, sourceTurnIdx, chatId, snapshotId }
+   * (message-level, applies on the next target-message contextChanged; bound
+   * to the chat/snapshot identity it was armed under — Reader M02 C1) or
+   * { mode:'inline', styles, sourceTurnIdx } (inline style set, applies to
+   * the target held selection on the next button click). Module-scoped;
+   * never persisted. */
   let __formatPainterArmed = null;
   let __formatPainterEsc = null;     /* document keydown handler while armed */
   let __formatPainterLastArmAt = 0;  /* ms of the last engage — dbl-click lock detect (8g-3a) */
   const FP_STICKY_DBLCLICK_MS = 350; /* Phase 8g-3a — a second arm-click within this window locks */
+  /* Reader M02 C1 — chat/snapshot identity fence for the MESSAGE-mode painter.
+   * The armed record carries the shell context identity (chatId + snapshotId)
+   * it was armed under; the contextChanged subscriber compares it against the
+   * live context BEFORE the turn comparison and disarms on any difference, so
+   * an automatic Reader selection / Ribbon publication into another chat or
+   * snapshot can never retarget a stale armed painter. Uses only the canonical
+   * shell context values; an armed record without a bound snapshotId never
+   * matches (fail closed). Inline mode is not fenced here — it applies only on
+   * an explicit button click against the held selection. */
+  function __formatPainterIdentityOf(ctx) {
+    const chatId = (ctx && typeof ctx.chatId === 'string' && ctx.chatId) ? ctx.chatId : null;
+    const snapshotId = (ctx && typeof ctx.snapshotId === 'string' && ctx.snapshotId) ? ctx.snapshotId : null;
+    return { chatId: chatId, snapshotId: snapshotId };
+  }
+  function __formatPainterIdentityMatches(armed, ctx) {
+    if (!armed || typeof armed.snapshotId !== 'string' || !armed.snapshotId) return false;
+    const live = __formatPainterIdentityOf(ctx);
+    return live.snapshotId === armed.snapshotId && live.chatId === armed.chatId;
+  }
   function __formatPainterSetArmedUI(on) {
     try {
       const btn = document.querySelector('.wbRibbonAction[data-action-id="format-painter"]');
@@ -4860,13 +4883,25 @@
             let nctx = null;
             try { nctx = shell.getContext(); } catch (_) { nctx = null; }
             const nTurn = nctx ? Number(nctx.selectedTurnIdx) : NaN;
-            if (Number.isFinite(nTurn) && nTurn >= 1 && nTurn !== __formatPainterArmed.sourceTurnIdx) {
+            if (!__formatPainterIdentityMatches(__formatPainterArmed, nctx)) {
+              /* Reader M02 C1 — identity fence. The live chat/snapshot differs
+               * from the identity the painter was armed under (or the record is
+               * unbound): disarm and never reach applyMessageFormatPaint. The
+               * status is deferred one microtask so the synchronous re-render
+               * below does not wipe it. */
+              __formatPainterDisarm();
+              const fpOffStatus = makeSetStatus(container);
+              Promise.resolve().then(function () { try { fpOffStatus('Format Painter off — chat/snapshot changed'); } catch (_) { /* swallow */ } });
+            } else if (Number.isFinite(nTurn) && nTurn >= 1 && nTurn !== __formatPainterArmed.sourceTurnIdx) {
               const armed = __formatPainterArmed;
               /* Phase 8g-3a — capture sticky state + captured payload BEFORE the
                * upfront disarm, so a locked painter can re-arm on success and
                * keep painting the same formatting onto further target messages.
-               * Failure/drift leaves it disarmed (no re-arm). */
+               * Failure/drift leaves it disarmed (no re-arm). Reader M02 C1 —
+               * the re-arm stays bound to the origin identity and is skipped
+               * when the live identity has moved on meanwhile. */
               const wasSticky = !!armed.sticky, keepPayload = armed.payload, keepSrc = armed.sourceTurnIdx;
+              const keepIdentity = { chatId: armed.chatId, snapshotId: armed.snapshotId };
               __formatPainterDisarm();
               const fpStatus = makeSetStatus(container);
               const bridge = getRibbonBridge();
@@ -4875,7 +4910,10 @@
                 Promise.resolve(bridge.applyMessageFormatPaint(nTurn, keepPayload)).then(
                   function (r) {
                     if (r && r.ok) {
-                      if (wasSticky) __formatPainterEngage({ mode: 'message', payload: keepPayload, sourceTurnIdx: keepSrc, sticky: true }, fpStatus, null, r.reason === 'no-change' ? 'Formatting matched — select next target' : 'Formatting applied — select next target');
+                      let rctx = null;
+                      try { rctx = shell.getContext(); } catch (_) { rctx = null; }
+                      if (wasSticky && __formatPainterIdentityMatches(keepIdentity, rctx)) __formatPainterEngage({ mode: 'message', payload: keepPayload, sourceTurnIdx: keepSrc, sticky: true, chatId: keepIdentity.chatId, snapshotId: keepIdentity.snapshotId }, fpStatus, null, r.reason === 'no-change' ? 'Formatting matched — select next target' : 'Formatting applied — select next target');
+                      else if (wasSticky) fpStatus('Formatting applied — Format Painter off (chat/snapshot changed)');
                       else fpStatus(r.reason === 'no-change' ? 'Formatting matched — no change' : 'Formatting applied');
                     } else fpStatus('Format paint failed: ' + ((r && r.reason) || 'unknown'));
                   },
