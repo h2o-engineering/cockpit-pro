@@ -3403,6 +3403,7 @@
   };
 
   // ── Candidate 4 Workbench Read Model — Library-owned semantics ───────────────
+  const WORKBENCH_FOLDER_FILTER_NONE = '__none__';
   function workbenchRendererRole(role){
     try {
       const normalize = H2O.Studio?.chatRenderer?.normalizeRole;
@@ -3985,7 +3986,7 @@
     const filterId = workbenchNormalizeFolderFilter(folderId);
     if (!filterId) return true;
     const rowFolderId = String(row?.folderId || "").trim();
-    if (filterId === FOLDER_FILTER_NONE) return !rowFolderId;
+    if (filterId === WORKBENCH_FOLDER_FILTER_NONE) return !rowFolderId;
     return rowFolderId === filterId;
   }
 
