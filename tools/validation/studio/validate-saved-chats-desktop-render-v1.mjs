@@ -11,6 +11,7 @@ const sharedCoreFile = 'shared/library/library-index-core.js';
 const runtimeCoreFile = 'src-runtime-base/0F0d.⬛️🧬 Library Index Core 🧬.js';
 const studioCoreFile = 'src-surfaces-base/studio/S0F0d. 🎬 Library Index Core - Studio.js';
 const studioShellFile = 'src-surfaces-base/studio/studio.js';
+const libraryWorkspaceFile = 'src-surfaces-base/studio/S0F1b. 🎬 Library Workspace - Studio.js';
 
 function read(file) {
   return fs.readFileSync(path.join(root, file), 'utf8');
@@ -116,10 +117,15 @@ function runTriplicateProof() {
 
 function runStudioShellStaticProof() {
   const shell = read(studioShellFile);
-  assert(shell.includes('if (archived && !saved) return false;'), 'Studio Saved route must not drop saved rows solely because archived is true');
-  assert(shell.includes('if (next === "linked") return rowView === "linked" && !saved;'), 'Studio Linked route must remain linked-only');
-  assert(shell.includes('if (next === "saved") return saved;'), 'Studio Saved route must key off saved membership');
-  assert(!shell.includes('if (!row || row.archived || row.isArchived || row.deleted || row.isDeleted || row.tombstoned) return false;'), 'Sidebar recents still exclude archived saved rows');
+  const workspace = read(libraryWorkspaceFile);
+  assert(workspace.includes('function workbenchMatchesView(row, view)'), 'S0F1b must own Saved/Linked view membership semantics');
+  assert(workspace.includes('if (archived && !saved) return false;'), 'S0F1b Saved route must not drop saved rows solely because archived is true');
+  assert(workspace.includes('if (next === "linked") return rowView === "linked" && !saved;'), 'S0F1b Linked route must remain linked-only');
+  assert(workspace.includes('if (next === "saved") return saved;'), 'S0F1b Saved route must key off saved membership');
+  assert(workspace.includes('const Workbench = Object.freeze({'), 'S0F1b must publish the frozen workbench read-model namespace');
+  assert(shell.includes('return getLibraryWorkbench().matchesView(row, view);'), 'studio.js matchesView must delegate to Library Workspace');
+  assert(shell.includes('return getLibraryWorkbench().filterRows(rows, view, query, folderId, tagFilter);'), 'studio.js filterRows must delegate to Library Workspace');
+  assert(!shell.includes('if (next === "linked") return rowView === "linked" && !saved;'), 'Saved/Linked membership semantics must not remain duplicated in studio.js');
 }
 
 runTriplicateProof();

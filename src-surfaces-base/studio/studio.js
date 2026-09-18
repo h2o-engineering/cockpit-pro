@@ -2737,86 +2737,15 @@ function normalizeFolderRecord(raw){
   return folder;
 }
 
+
+function getLibraryWorkbench(){
+  const workbench = W.H2O?.LibraryWorkspace?.workbench || W.H2O?.Library?.Workspace?.workbench || null;
+  if (!workbench) throw new Error("H2O Library Workspace workbench API unavailable");
+  return workbench;
+}
+
 function normalizeWorkbenchRow(raw){
-  const row = raw && typeof raw === "object" ? raw : {};
-  const messages = Array.isArray(row.messages) ? row.messages : [];
-  const meta = row.meta && typeof row.meta === "object" ? row.meta : {};
-  const snapshotId = String(
-    row.snapshotId || row.lastSnapshotId || row.latestSnapshotId || row.snapshot_id
-    || meta.snapshotId || meta.lastSnapshotId || meta.latestSnapshotId || meta.snapshot_id || ""
-  ).trim();
-  const chatId = String(row.chatId || meta.chatId || "").trim();
-  /* Phase K-1 — Linked rows (view: 'linked') are accepted without
-   * snapshotId. Saved rows still require both ids. The view value
-   * comes from projectLibraryIndexRowToWorkbenchInput; any other
-   * caller-provided shape without a view defaults to saved-rules. */
-  const rowView = String(row.view || meta.view || "").trim().toLowerCase();
-  const isLinkedRow = rowView === "linked";
-  const isLinkedState = row.isLinked === true
-    || !!(row.state && typeof row.state === "object" && row.state.isLinked === true)
-    || meta.isLinked === true;
-  const isLinkOnlyRow = isLinkedRow || isLinkedState;
-  if (!chatId) return null;
-  if (!snapshotId && !isLinkOnlyRow) return null;
-
-  const title = String(row.title || meta.title || chatId).trim() || chatId;
-  const excerpt = String(row.excerpt || meta.excerpt || buildExcerptFromMessages(messages)).trim();
-  const createdAt = String(row.createdAt || row.updatedAt || meta.updatedAt || "").trim();
-  const updatedAt = String(row.updatedAt || meta.updatedAt || createdAt).trim();
-  const originalCreatedAt = resolveOriginalChatCreatedAt(row, meta, messages);
-  const studioAddedAt = resolveStudioAddedAt(row, meta) || createdAt;
-  const lastTurnAt = resolveLastTurnAt(row, meta, messages) || updatedAt;
-  const messageCount = Number(row.messageCount || messages.length || meta.messageCount || 0);
-  const answerCount = Number(row.answerCount || meta.answerCount || meta.answers || countAssistantTurns(messages));
-  const pinned = !!(row.pinned ?? meta.pinned);
-  const archived = !!(row.archived ?? meta.archived ?? (String(meta.state || "").trim().toLowerCase() === "archived"));
-  const folderId = String(row.folderId || meta.folderId || meta.folder || "").trim();
-  const folderName = String(row.folderName || meta.folderName || "").trim();
-  const folderIconColor = normalizeSidebarIconColor(row.folderIconColor || meta.folderIconColor || row.folderColor || meta.folderColor || "");
-  const tags = normalizeTags(row.tags ?? meta.tags);
-  const originSource = normalizeOriginSource(row.originSource ?? meta.originSource);
-  const originProjectRef = normalizeProjectRef(row.originProjectRef ?? meta.originProjectRef);
-  const category = normalizeCategoryAssignment(row.category ?? meta.category);
-  const labels = normalizeLabelAssignments(row.labels ?? meta.labels);
-  const keywords = normalizeKeywords(row.keywords ?? meta.keywords);
-
-  return {
-    snapshotId,
-    chatId,
-    /* Phase K-1 — view tier ('saved' | 'linked'). Defaults to 'saved'
-     * for legacy callers; only set to 'linked' when explicitly tagged
-     * by projectLibraryIndexRowToWorkbenchInput. */
-    view: isLinkedRow ? "linked" : "saved",
-    title,
-    excerpt,
-    createdAt,
-    updatedAt,
-    originalCreatedAt,
-    studioAddedAt,
-    lastTurnAt,
-    messageCount: Number.isFinite(messageCount) ? Math.max(0, Math.floor(messageCount)) : 0,
-    answerCount: Number.isFinite(answerCount) ? Math.max(0, Math.floor(answerCount)) : 0,
-    pinned,
-    archived,
-    folderId,
-    folderName,
-    folderIconColor,
-    tags,
-    originSource,
-    originProjectRef,
-    category,
-    labels,
-    keywords,
-    /* Phase K-1 — linked-chat provenance fields. Empty strings on
-     * saved rows; populated on linked rows from the Library Index
-     * projection. */
-    href: String(row.href || meta.href || ""),
-    normalizedHref: String(row.normalizedHref || meta.normalizedHref || row.href || meta.href || ""),
-    linkSourceHref: String(row.linkSourceHref || meta.linkSourceHref || ""),
-    isLinked: isLinkOnlyRow,
-    linkedAt: String(row.linkedAt || meta.linkedAt || ""),
-    linkedFrom: String(row.linkedFrom || meta.linkedFrom || ""),
-  };
+  return getLibraryWorkbench().normalizeRow(raw);
 }
 
 async function readTitleStateForChat(chatId, chromeValues = null){
@@ -2965,136 +2894,23 @@ async function buildRowsFromChatIds(chatIds){
 // snapshot-required guard so the Linked Chats view (#/linked) can
 // render Add-to-Library records without a captured transcript.
 function projectLibraryIndexRowToWorkbenchInput(liRow){
-  if (!liRow || typeof liRow !== 'object') return null;
-  const chatId = String(liRow.chatId || '').trim();
-  const snapshotId = String(liRow.snapshotId || liRow.lastSnapshotId || liRow.latestSnapshotId || liRow.snapshot_id || '').trim();
-  const liView = String(liRow.view || '').toLowerCase();
-  const isLinkedRow = liView === 'linked';
-  const isLinkedState = liRow.isLinked === true
-    || !!(liRow.state && typeof liRow.state === 'object' && liRow.state.isLinked === true);
-  const isLinkOnlyRow = isLinkedRow || isLinkedState;
-  /* Saved rows still require snapshotId; linked / saved+linked rows do not. */
-  if (!chatId) return null;
-  if (!snapshotId && !isLinkOnlyRow) return null;
-
-  // LI carries timestamps as epoch ms (capturedAt, updatedAt);
-  // normalizeWorkbenchRow expects ISO strings. Same conversion edge as
-  // M2a-3i's projectSqliteSnapshotToCanonical. The shared LibraryIndexCore
-  // string-normalizes the epoch values it carries, so a numeric epoch STRING
-  // is accepted alongside a finite epoch number; arbitrary text stays
-  // rejected (no Date.parse of free-form values at this seam).
-  function toIso(epoch){
-    const numericString = typeof epoch === 'string' && /^\s*\d+(?:\.\d+)?\s*$/.test(epoch);
-    if (typeof epoch !== 'number' && !numericString) return '';
-    const value = typeof epoch === 'number' ? epoch : Number(epoch);
-    if (!Number.isFinite(value) || value <= 0) return '';
-    const ms = toTimestampMs(value);
-    if (!ms) return '';
-    try { return new Date(ms).toISOString(); }
-    catch { return ''; }
-  }
-  const updatedAtIso = toIso(liRow.updatedAt);
-  const capturedAtIso = toIso(liRow.capturedAt);
-  // Three distinct authorities carried by the Desktop Library Index
-  // (S0F1c projectChatToCompactRow): the chats-store creation time, the
-  // importer's Studio-add time and the latest actual turn time. Each is
-  // projected onto the semantic field its resolver reads FIRST, so none of
-  // them can collapse onto updatedAt / capturedAt fallbacks.
-  const originalCreatedAtIso = toIso(liRow.createdAt);
-  const studioAddedAtIso = toIso(liRow.studioAddedAt);
-  const lastTurnAtIso = toIso(liRow.lastMessageAt);
-
-  const labelNames = Array.isArray(liRow.labels) ? liRow.labels : [];
-  const tagNames   = Array.isArray(liRow.tags)   ? liRow.tags   : [];
-
-  return {
-    snapshotId: snapshotId || '',
-    chatId,
-    view: isLinkedRow ? 'linked' : 'saved',
-    title: liRow.title || '',
-    createdAt: capturedAtIso || updatedAtIso || '',
-    updatedAt: updatedAtIso || '',
-    originalCreatedAt: originalCreatedAtIso,
-    studioAddedAt: studioAddedAtIso,
-    lastTurnAt: lastTurnAtIso,
-    messageCount: Number(liRow.messageCount || 0),
-    answerCount: Number(liRow.answerCount || 0),
-    pinned: !!liRow.pinned,
-    archived: !!liRow.archived,
-    folderId: liRow.folderId || '',
-    folderName: liRow.folderName || '',
-    tags: tagNames.slice(),
-    labels: labelNames.map((name) => ({ id: name, name, label: name })),
-    category: (liRow.categoryId || liRow.categoryName)
-      ? { id: liRow.categoryId || '', name: liRow.categoryName || '', label: liRow.categoryName || liRow.categoryId || '' }
-      : null,
-    keywords: [],
-    /* Phase K-1 — propagate linked-chat provenance so the row renderer
-     * can surface "Open original" + Linked-from metadata without re-
-     * reading the Chat Registry. Empty strings on saved rows. */
-    href: String(liRow.href || liRow.normalizedHref || ''),
-    normalizedHref: String(liRow.normalizedHref || liRow.href || ''),
-    linkSourceHref: String(liRow.linkSourceHref || ''),
-    isLinked: isLinkOnlyRow,
-    linkedAt: typeof liRow.linkedAt === 'number' ? toIso(liRow.linkedAt) : String(liRow.linkedAt || ''),
-    linkedFrom: String(liRow.linkedFrom || ''),
-    meta: {
-      title: liRow.title || '',
-      folderId: liRow.folderId || '',
-      folderName: liRow.folderName || '',
-      messageCount: Number(liRow.messageCount || 0),
-      updatedAt: updatedAtIso || '',
-    },
-  };
+  return getLibraryWorkbench().projectIndexRow(liRow);
 }
 
 function hasLibraryIndexRowsApi(){
-  const raw = W.H2O?.LibraryIndex?.getAll;
-  return typeof raw === "function"
-    || Array.isArray(raw)
-    || !!(raw && typeof raw.length === "number");
+  return getLibraryWorkbench().hasIndexRows();
 }
 
 function readLibraryIndexRows(){
-  const idx = W.H2O?.LibraryIndex;
-  const raw = idx?.getAll;
-  try {
-    const rows = typeof raw === "function" ? raw.call(idx) : raw;
-    if (Array.isArray(rows)) return rows.slice();
-    if (rows && typeof rows.length === "number") return Array.from(rows);
-  } catch {}
-  return [];
+  return getLibraryWorkbench().readIndexRows();
 }
 
 function readLinkedWorkbenchRowsFromLibraryIndex(){
-  return readLibraryIndexRows()
-    .filter((row) => String(row?.view || "").toLowerCase() === "linked")
-    .map(projectLibraryIndexRowToWorkbenchInput)
-    .filter(Boolean)
-    .map(normalizeWorkbenchRow)
-    .filter(Boolean);
+  return getLibraryWorkbench().readLinkedRows();
 }
 
 function libraryRowIsSavedTranscript(row){
-  if (!row || typeof row !== "object") return false;
-  const core = W.H2O?.Library?.LibraryIndexCore || null;
-  if (core && typeof core.rowIsSavedRecentEligible === "function") {
-    try { return !!core.rowIsSavedRecentEligible(row); } catch (_) {}
-  }
-  const view = String(row.view || row.displayView || row.badgeKind || "").toLowerCase();
-  if (view === "linked" || view === "link") return false;
-  if (String(row.opens || row.openTarget || row.openKind || "").trim().toLowerCase() === "placeholder-details") return false;
-  if (row.saved === false || row.isSaved === false || row.is_saved === false) return false;
-  if (core && typeof core.rowHasTranscriptEvidence === "function") {
-    try { if (!core.rowHasTranscriptEvidence(row)) return false; } catch (_) { if (!rowReaderSnapshotId(row)) return false; }
-  } else if (!rowReaderSnapshotId(row)) {
-    const count = Number(row.messageCount || row.turnCount || row.userTurnCount || row.assistantTurnCount || row.answerCount || 0) || 0;
-    if (count <= 0) return false;
-  }
-  if (view === "saved" || view === "imported") return true;
-  const state = row.state && typeof row.state === "object" ? row.state : {};
-  if (state.isSaved === false) return false;
-  return row.isSaved === true || state.isSaved === true || row.saved === true;
+  return getLibraryWorkbench().isSavedTranscript(row);
 }
 
 function stableSavedRecentRowTime(row){
@@ -3106,50 +2922,15 @@ function stableSavedRecentRowTime(row){
 }
 
 function canonicalSavedRecentLibraryIndexRows(limit = 30){
-  const rows = readLibraryIndexRows();
-  const core = W.H2O?.Library?.LibraryIndexCore || null;
-  if (core && typeof core.canonicalSavedRecentRows === "function") {
-    return core.canonicalSavedRecentRows(rows, limit, { dateField: "savedRecent" });
-  }
-  const source = Array.isArray(rows) ? rows.slice() : [];
-  const saved = source.filter((row) => {
-    const view = String(row?.view || row?.displayView || row?.badgeKind || "").toLowerCase();
-    if (view === "deleted" || view === "tombstone") return false;
-    if (row?.deleted || row?.isDeleted || row?.tombstoned) return false;
-    return libraryRowIsSavedTranscript(row);
-  });
-  saved.sort((a, b) => {
-    const dateCompare = stableSavedRecentRowTime(b) - stableSavedRecentRowTime(a);
-    const titleCompare = String(a?.title || "").localeCompare(String(b?.title || ""));
-    const idCompare = String(a?.chatId || a?.id || "").localeCompare(String(b?.chatId || b?.id || ""));
-    return dateCompare || titleCompare || idCompare;
-  });
-  const cap = Number(limit);
-  return Number.isFinite(cap) && cap >= 0 ? saved.slice(0, cap) : saved;
+  return getLibraryWorkbench().savedRecentRows(limit);
 }
 
 function projectRecentLibraryRowsToWorkbenchRows(rows){
-  return (Array.isArray(rows) ? rows : [])
-    .map(projectLibraryIndexRowToWorkbenchInput)
-    .filter(Boolean)
-    .map(normalizeWorkbenchRow)
-    .filter(Boolean);
+  return getLibraryWorkbench().projectRecentRows(rows);
 }
 
 function mergeLinkedLibraryIndexRows(baseRows){
-  const out = Array.isArray(baseRows) ? baseRows.slice() : [];
-  const seenChatIds = new Set();
-  for (const row of out){
-    const chatId = String(row?.chatId || "").trim();
-    if (chatId) seenChatIds.add(chatId);
-  }
-  for (const row of readLinkedWorkbenchRowsFromLibraryIndex()){
-    const chatId = String(row?.chatId || "").trim();
-    if (!chatId || seenChatIds.has(chatId)) continue;
-    out.push(row);
-    seenChatIds.add(chatId);
-  }
-  return out;
+  return getLibraryWorkbench().mergeLinkedRows(baseRows);
 }
 
 async function fetchWorkbenchRows(force = false){
@@ -3679,86 +3460,15 @@ async function enrichRowsWithFolderData(rows, force = false){
 }
 
 function matchesView(row, view){
-  if (!row) return false;
-  const next = normalizeArchiveView(view);
-  const rowView = String(row.view || "").toLowerCase();
-  const rowState = row.state && typeof row.state === "object" ? row.state : {};
-  const saved = rowView === "saved" || row.saved === true || row.isSaved === true || row.is_saved === true || rowState.isSaved === true;
-  const archived = !!(row.archived || row.isArchived);
-  const deleted = !!(row.deleted || row.isDeleted || row.tombstoned);
-  if (deleted) return false;
-  if (next === "archive") return archived;
-  if (archived && !saved) return false;
-  if (next === "pinned") return !!row.pinned;
-  /* Phase K-1 — Linked view: only rows projected as linked-only by
-   * Library Index (state.isLinked && !state.isSaved). Saved rows
-   * (even if they also carry linked metadata) belong in #/saved by
-   * the precedence rule documented in normalizeLinkedOnlyProjection. */
-  if (next === "linked") return rowView === "linked" && !saved;
-  /* Saved view: explicitly exclude linked-only rows so a chat without
-   * a snapshot does not surface alongside Saved snapshots. */
-  if (next === "saved") return saved;
-  return true;
+  return getLibraryWorkbench().matchesView(row, view);
 }
 
 function matchesFolder(row, folderId){
-  const filterId = normalizeFolderFilter(folderId);
-  if (!filterId) return true;
-  const rowFolderId = String(row?.folderId || "").trim();
-  if (filterId === FOLDER_FILTER_NONE) return !rowFolderId;
-  return rowFolderId === filterId;
+  return getLibraryWorkbench().matchesFolder(row, folderId);
 }
 
 function filterRows(rows, view, query, folderId = "", tagFilter = ""){
-  const q = normalizeText(query).toLowerCase();
-  const filtered = (Array.isArray(rows) ? rows : []).filter((row) => {
-    if (!matchesView(row, view)) return false;
-    if (!matchesFolder(row, folderId)) return false;
-    if (tagFilter && !(Array.isArray(row.tags) ? row.tags : []).includes(tagFilter)) return false;
-
-    if (!q) return true;
-    const labels = row?.labels || {};
-    /* Phase K-1 — Linked rows carry href + linkedFrom (canonical URL +
-     * provenance source). Include both in the search haystack so the
-     * Linked Chats view can be filtered by URL or origin. Empty for
-     * Saved rows, so the only change for non-linked rows is two extra
-     * empty tokens — no behavioral difference. */
-    const haystack = [
-      row.title,
-      row.excerpt,
-      row.chatId,
-      row.folderId,
-      row.folderName,
-      row.originSource,
-      row.href || "",
-      row.linkedFrom || "",
-      row?.category?.primaryCategoryId,
-      row?.category?.secondaryCategoryId,
-      ...labelSearchTokens(labels),
-      ...(row.tags || []),
-      ...(row.keywords || []),
-    ].join(" ").toLowerCase();
-    return haystack.includes(q);
-  });
-
-  const core = W.H2O?.Library?.LibraryIndexCore || null;
-  if (core && typeof core.canonicalSortRows === "function") {
-    const sorted = core.canonicalSortRows(filtered, "recent", "best");
-    sorted.sort((a, b) => {
-      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-      return 0;
-    });
-    return sorted;
-  }
-
-  filtered.sort((a, b) => {
-    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-    const dateCompare = String(b.updatedAt || b.capturedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.capturedAt || a.createdAt || ""));
-    const titleCompare = String(a.title || "").localeCompare(String(b.title || ""));
-    const idCompare = String(a.chatId || a.id || "").localeCompare(String(b.chatId || b.id || ""));
-    return dateCompare || titleCompare || idCompare;
-  });
-  return filtered;
+  return getLibraryWorkbench().filterRows(rows, view, query, folderId, tagFilter);
 }
 
 function setActiveNav(view){

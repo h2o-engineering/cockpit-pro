@@ -67,6 +67,7 @@ const READ_MODEL_SOURCES = {
   libraryIndexCore: 'shared/library/library-index-core.js',
   libraryIndex: 'src-surfaces-base/studio/S0F1c. 🎬 Library Index - Studio.js',
   studio: 'src-surfaces-base/studio/studio.js',
+  workspace: 'src-surfaces-base/studio/S0F1b. 🎬 Library Workspace - Studio.js',
 };
 const LIB_RS_REL = 'apps/studio/desktop/src-tauri/src/lib.rs';
 const WRITER_IDENTITY_RS_REL = 'apps/studio/desktop/src-tauri/src/sqlite_writer_identity.rs';
@@ -395,7 +396,7 @@ async function bootReadModel(invoke) {
   vm.runInContext(src.libraryIndex, sb, { filename: 'S0F1c-library-index.js' });
   assert.ok(sb.H2O.LibraryIndex && typeof sb.H2O.LibraryIndex.refresh === 'function', 'O1 read model: real Library Index module must boot');
   await sb.H2O.LibraryIndex.ready;
-  return { libraryIndex: sb.H2O.LibraryIndex, seam: loadStudioCardSeam(src.studio) };
+  return { libraryIndex: sb.H2O.LibraryIndex, seam: loadStudioCardSeam(src.studio, src.workspace) };
 }
 
 /* The REAL studio.js seam functions the Workbench list card is rendered
@@ -445,28 +446,45 @@ function sliceStudioFunction(source, name) {
   }
   throw new Error(`studio.js: function ${name} unterminated`);
 }
-function loadStudioCardSeam(studioSource) {
+function loadWorkspaceWorkbenchSeam(workspaceSource) {
+  const startMarker = '// ── Candidate 4 Workbench Read Model — Library-owned semantics ───────────────';
+  const endMarker = '// ── End Candidate 4 Workbench Read Model ─────────────────────────────────────';
+  const start = workspaceSource.indexOf(startMarker);
+  const end = workspaceSource.indexOf(endMarker, start);
+  if (start < 0 || end < 0) throw new Error('S0F1b: Candidate 4 Workbench block not found');
+  const block = workspaceSource.slice(start, end + endMarker.length);
+  const ctx = {
+    console, Date, Intl,
+    H2O: { Library: {}, Studio: { chatRenderer: { normalizeRole: (role) => String(role || '').toLowerCase() } } },
+  };
+  ctx.globalThis = ctx;
+  ctx.window = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(
+    'var W = globalThis; var H2O = globalThis.H2O; var cache = { labels: { value: [] } }; function getIndex(){ return H2O.LibraryIndex || null; }\n'
+      + block + '\nglobalThis.__candidate4Workbench = Workbench;',
+    ctx,
+    { filename: 'S0F1b-workbench-seam.js' }
+  );
+  return ctx.__candidate4Workbench;
+}
+
+function loadStudioCardSeam(studioSource, workspaceSource) {
   const names = ['toTimestampMs', 'timestampToIso', 'firstTimestamp', 'messageTimestamp', 'earliestMessageTimestamp',
     'latestMessageTimestamp', 'resolveOriginalChatCreatedAt', 'resolveLastTurnAt', 'resolveStudioAddedAt',
-    'projectLibraryIndexRowToWorkbenchInput', 'normalizeWorkbenchRow', 'rowMetaParts', 'fmtDateMeta', 'pluralize', 'toWholeCount'];
-  const stubs = `
-    function buildExcerptFromMessages(){ return ''; }
-    function countAssistantTurns(list){ return (Array.isArray(list) ? list : []).filter((m) => String(m && m.role).toLowerCase() === 'assistant').length; }
-    function normalizeSidebarIconColor(v){ return String(v || ''); }
-    function normalizeTags(v){ return Array.isArray(v) ? v.slice() : []; }
-    function normalizeOriginSource(v){ return v || null; }
-    function normalizeProjectRef(v){ return v || null; }
-    function normalizeCategoryAssignment(v){ return v || null; }
-    function normalizeLabelAssignments(v){ return Array.isArray(v) ? v.slice() : []; }
-    function normalizeKeywords(v){ return Array.isArray(v) ? v.slice() : []; }
-  `;
-  const code = stubs + names.map((n) => sliceStudioFunction(studioSource, n)).join('\n') +
+    'rowMetaParts', 'fmtDateMeta', 'pluralize', 'toWholeCount'];
+  const code = names.map((n) => sliceStudioFunction(studioSource, n)).join('\n') +
     '\nglobalThis.__seam = { ' + names.join(', ') + ' };';
   const ctx = { console, Date, Intl };
   ctx.globalThis = ctx;
   vm.createContext(ctx);
   vm.runInContext(code, ctx, { filename: 'studio-card-seam.js' });
-  return ctx.__seam;
+  const workbench = loadWorkspaceWorkbenchSeam(workspaceSource);
+  return {
+    ...ctx.__seam,
+    projectLibraryIndexRowToWorkbenchInput: workbench.projectIndexRow,
+    normalizeWorkbenchRow: workbench.normalizeRow,
+  };
 }
 
 async function runHarness() {
