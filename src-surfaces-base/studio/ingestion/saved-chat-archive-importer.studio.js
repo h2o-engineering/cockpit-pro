@@ -50,6 +50,17 @@
  *
  * Contracts: release-evidence/2026-06-24/saved-chat-archive-phase-h0-recovery-import-export-contract.md
  *            release-evidence/2026-06-24/saved-chat-archive-phase-h4-verification-gated-import-recovery.md
+ *
+ * Asset restoration (Saved-Chat T02, docs/systems/archive/saved-chat-asset-restoration.md):
+ *   A trusted package whose verifier-established asset set is non-empty is
+ *   recovered through the asset-bearing path — immutable asset recovery plan
+ *   → destination CAS ensure/verify → ONE purpose-bounded native atomic DB
+ *   transaction (h2o_saved_chat_asset_recovery_commit) → post-commit proof →
+ *   store-view reload — while an asset-free package keeps the legacy
+ *   chats.upsert → snapshots.create write path unchanged. The module also owns
+ *   hydrateRecoveredSnapshotProjectionV1, the ephemeral Reader-side hydration
+ *   of a recovered snapshot's exact package asset references from verified
+ *   CAS bytes, consumed only by the Desktop load-path adapter.
  */
 (function (global) {
   'use strict';
@@ -58,7 +69,7 @@
   H2O.Studio = H2O.Studio || {};
   if (H2O.Studio.archiveImporter && H2O.Studio.archiveImporter.__installed) return;
 
-  var MODULE_VERSION = '0.1.0-phase-h-4';
+  var MODULE_VERSION = '0.2.0-asset-restoration-t02';
   var APP_LOCAL_DATA = 15;                 /* Tauri BaseDirectory.AppLocalData */
   var PACKAGE_ROOT = 'archive/packages';
   var DEFAULT_MODE = 'import-as-new';
@@ -319,13 +330,17 @@
    *
    * Every failure yields null, which the existing callers already treat as a
    * hard refusal — no new policy state is introduced. */
-  function readBoundPackageSnapshotJson(packagePath, inspection) {
+  function readBoundPackageSnapshotJson(packagePath, inspection, binding) {
     var codec = savedChatPackageCodecV3();
     if (!codec || typeof codec.readBoundedPackageMemberBytes !== 'function') return Promise.resolve(null);
     return trustedOccupantFor(packagePath).then(function (occupant) {
       if (!occupant || !trustedStateMatches(inspection, occupant)) return null;
       var anchors = trustedMemberAnchors(occupant);
       if (!anchors) return null;
+      /* The same trusted occupant also carries the verifier-established asset
+       * SHA set; hand it to the caller so asset recovery binds to the exact
+       * enumeration this snapshot read was bound to (no second read). */
+      if (isObject(binding)) binding.occupant = occupant;
       var cap = codec.LOGICAL_SNAPSHOT_CAP_BYTES;
       if (anchors.family === FAMILY_V3) {
         return Promise.resolve(codec.readVerifiedPackageMember({
@@ -483,7 +498,8 @@
 
   async function loadArchiveCandidate(packagePath) {
     var inspection = safeObject(await getInspector().inspectPackage({ packagePath: packagePath }));
-    var snapshotJson = await readBoundPackageSnapshotJson(packagePath, inspection);
+    var binding = {};
+    var snapshotJson = await readBoundPackageSnapshotJson(packagePath, inspection, binding);
     return {
       sourceKind: 'archive-package',
       sourceName: packageDirNameForPath(packagePath),
@@ -492,6 +508,13 @@
       inspection: inspection,
       snapshotJson: snapshotJson,
       identity: packageIdentity(inspection, snapshotJson),
+      /* Trusted required-asset identity set (bare hex, sorted, deduped) from
+       * the SAME occupant the snapshot was bound to; null when unbound. */
+      trustedAssetShas: snapshotJson ? trustedAssetShasFromList(safeObject(binding.occupant).assetShas) : null,
+      /* Archive-only post-commit witness: re-bind the snapshot member to the
+       * trusted anchors after the recovery commit (contract §13.7). Injected
+       * here so the shared recovery core stays free of archive authority. */
+      reverifySource: function () { return readBoundPackageSnapshotJson(packagePath, inspection, {}); },
     };
   }
 
@@ -658,6 +681,12 @@
       inspection: inspection,
       snapshotJson: snapshotJson,
       identity: packageIdentity(inspection, snapshotJson),
+      /* Trusted required-asset identity set from the portable verifier, plus
+       * the exact in-memory entry set it ruled on (asset bytes are read from
+       * this set and never from a second path). */
+      trustedAssetShas: status === 'verified' ? trustedAssetShasFromList(trusted.assetShas) : null,
+      portableEntries: status === 'verified' ? asArray(contained.entries) : null,
+      portableManifest: status === 'verified' ? manifest : null,
     };
   }
 
@@ -718,6 +747,9 @@
             chatExists ? 'chatId already present; will not modify the existing chat' : 'verified and not present in store', inspectStatus);
           result.sourceKind = cleanString(source.sourceKind);
           result.sourceName = cleanString(source.sourceName);
+          /* Informational only (T02): the trusted required-asset count decides
+           * the asset-bearing vs legacy write path at import time. */
+          result.assets = { requiredAssetCount: Array.isArray(source.trustedAssetShas) ? source.trustedAssetShas.length : null };
           return result;
         });
       });
@@ -781,6 +813,608 @@
       recovered: recovered || null,
       reason: reason || '',
     };
+  }
+
+  /* ── T02 — verified asset restoration (asset-bearing Recover as New) ──────
+   *
+   * Contract: docs/systems/archive/saved-chat-asset-restoration.md. The trusted
+   * verifier decides WHICH assets a package requires (occupant `assetShas` /
+   * portable `assetShas`); this module never derives that set from the
+   * manifest. Everything below is read-only until `ensureDestinationCas`, and
+   * the only DB mutation is the purpose-bounded native transaction.
+   */
+  var ASSET_RECOVERY_COMMIT_SCHEMA = 'h2o.savedChatAssetRecoveryCommit.v1';
+  var ASSET_RECOVERY_COMMIT_COMMAND = 'h2o_saved_chat_asset_recovery_commit';
+  var SHA256_CANONICAL = /^sha256-[0-9a-f]{64}$/;
+  var ASSET_EXT_TOKEN = /^[a-z0-9]{1,16}$/;
+  var CAS_STATE = {
+    REUSED: 'CAS_REUSED_VERIFIED',
+    MATERIALIZED: 'CAS_MATERIALIZED_VERIFIED',
+    CORRUPT: 'DESTINATION_CAS_CORRUPT',
+    AMBIGUOUS: 'CAS_OUTCOME_AMBIGUOUS',
+    WRITE_FAILED: 'CAS_WRITE_FAILED',
+    RESIDUE: 'VERIFIED_UNREFERENCED_CAS_RESIDUE',
+  };
+  var ASSET_RESULT = {
+    COMPLETE: 'imported-asset-complete',
+    COMMITTED_UNVERIFIED: 'committed-verification-failed',
+  };
+
+  function getAssetCas() {
+    var cas = safeObject(safeObject(H2O.Studio).ingestion).assetCas;
+    return (cas && cas.__installed === true
+      && typeof cas.putAssetBytes === 'function'
+      && typeof cas.readVerifiedAssetBytes === 'function'
+      && isFiniteNumber(cas.assetBlobCapBytes) && cas.assetBlobCapBytes > 0) ? cas : null;
+  }
+  function getAssetsStore() {
+    var a = getStores().assets;
+    return (a && typeof a.listBySnapshot === 'function' && typeof a.get === 'function') ? a : null;
+  }
+
+  /* Trusted wire → canonical bare-hex set (sorted, deduped); null when the
+   * trusted side stated no set at all (never treated as "no assets"). */
+  function trustedAssetShasFromList(list) {
+    if (!Array.isArray(list)) return null;
+    var seen = {};
+    var out = [];
+    for (var i = 0; i < list.length; i += 1) {
+      var hex = bareHash(list[i]);
+      if (!/^[0-9a-f]{64}$/.test(hex)) return null;
+      if (seen[hex]) continue;
+      seen[hex] = true;
+      out.push(hex);
+    }
+    out.sort();
+    return out;
+  }
+
+  function assetRefusal(code, detail) {
+    return { ok: false, assetBearing: true, code: code, detail: cleanString(detail) };
+  }
+
+  function normalizeManifestAssetDescriptors(manifest) {
+    var list = asArray(safeObject(manifest).assets);
+    var out = [];
+    for (var i = 0; i < list.length; i += 1) {
+      var d = safeObject(list[i]);
+      var sha256 = prefixedHash(d.sha256);
+      if (!SHA256_CANONICAL.test(sha256)) return { error: 'asset-descriptor-sha-invalid', index: i };
+      var ext = cleanString(d.ext).toLowerCase();
+      var path = cleanString(d.path);
+      if (!ASSET_EXT_TOKEN.test(ext)) return { error: 'asset-descriptor-ext-invalid', sha256: sha256 };
+      if (!CANONICAL_ASSET_ENTRY.test(path)) return { error: 'asset-descriptor-path-invalid', sha256: sha256 };
+      if (path !== 'assets/' + sha256 + '.' + ext) return { error: 'asset-descriptor-path-unbound', sha256: sha256 };
+      var byteLength = d.byteLength;
+      if (!isFiniteNumber(byteLength) || byteLength <= 0 || Math.floor(byteLength) !== byteLength) {
+        return { error: 'asset-descriptor-byte-length-invalid', sha256: sha256 };
+      }
+      out.push({
+        sha256: sha256,
+        hex: sha256.slice(7),
+        path: path,
+        ext: ext,
+        mimeType: cleanString(d.mimeType).toLowerCase(),
+        byteLength: byteLength,
+        sourceMessageId: cleanString(d.sourceMessageId),
+      });
+    }
+    return { descriptors: out };
+  }
+
+  /* Archive path: the manifest is an ADDRESS read — the asset DESCRIPTOR
+   * carrier only (contract RC-T01-AR-01), constrained by the trusted SHA set
+   * and read through the same bounded codec authority as every other member.
+   * It decides no read regime and proves nothing by itself: the snapshot read
+   * above stays bound to the trusted anchors, and every asset member is bound
+   * by the codec's own physical measurement against the trusted SHA. */
+  async function readArchiveManifestForAssets(codec, packagePath) {
+    var bounded = await codec.readBoundedPackageMemberBytes({
+      packagePath: packagePath,
+      memberPath: 'manifest.json',
+      physicalByteCap: SNAPSHOT_READ_CAP,
+    });
+    return safeParseJson(decodeToText(safeObject(bounded).storedBytes));
+  }
+
+  async function readArchiveAssetMember(codec, packagePath, descriptor, cap) {
+    var bounded;
+    try {
+      bounded = await codec.readBoundedPackageMemberBytes({
+        packagePath: packagePath,
+        memberPath: descriptor.path,
+        physicalByteCap: cap,
+      });
+    } catch (err) {
+      var code = cleanString(err && err.code);
+      if (code === 'saved-chat-member-physical-input-exceeds-cap') {
+        return assetRefusal('asset-restoration-bound-refusal', descriptor.sha256);
+      }
+      return assetRefusal('asset-member-missing-or-unreadable', descriptor.sha256 + ' ' + code);
+    }
+    var read = safeObject(bounded);
+    if (bareHash(read.physicalSha256) !== descriptor.hex) return assetRefusal('asset-sha-mismatch', descriptor.sha256);
+    if (read.physicalByteLength !== descriptor.byteLength) return assetRefusal('asset-byte-length-mismatch', descriptor.sha256);
+    return { ok: true, bytes: bytesFor(read.storedBytes) };
+  }
+
+  /* Portable path: the bytes come from the SAME immutable in-memory entry set
+   * the trusted verifier hashed and ruled on (no second read, no second hash
+   * opinion here — this module recomputes no digest). The entry is bound by
+   * its canonical path and constrained length; the CAS put later recomputes
+   * the identity over these exact bytes and a mismatch stops recovery. */
+  function readPortableAssetMember(entries, descriptor, cap) {
+    var entry = null;
+    for (var i = 0; i < entries.length; i += 1) {
+      if (cleanString(entries[i] && entries[i].name) === descriptor.path) { entry = entries[i]; break; }
+    }
+    if (!entry) return assetRefusal('asset-member-missing-or-unreadable', descriptor.sha256);
+    var bytes;
+    try { bytes = bytesFor(entry.bytes); } catch (_) { return assetRefusal('asset-member-missing-or-unreadable', descriptor.sha256); }
+    if (bytes.byteLength > cap) return assetRefusal('asset-restoration-bound-refusal', descriptor.sha256);
+    if (bytes.byteLength !== descriptor.byteLength) return assetRefusal('asset-byte-length-mismatch', descriptor.sha256);
+    return { ok: true, bytes: bytes };
+  }
+
+  /* One immutable recovery plan per Recover-as-New gesture (contract §6). Every
+   * closure condition is proven here, BEFORE the first putAssetBytes:
+   *   trusted set == manifest set; canonical member admission; bounded member
+   *   read with the CAS ingest cap; physical SHA == trusted SHA; actual length
+   *   == constrained descriptor length; every assetRef closes over the trusted
+   *   set; duplicate same-turn refs collapse to one logical link.
+   * Returns { ok:true, assetBearing:false } for an asset-free package. */
+  async function buildAssetRecoveryPlan(candidate, turns) {
+    var source = safeObject(candidate);
+    var trusted = source.trustedAssetShas;
+    if (!Array.isArray(trusted)) {
+      return assetRefusal('trusted-asset-set-unavailable', 'the trusted verifier stated no asset set for this package');
+    }
+    if (!trusted.length) return { ok: true, assetBearing: false };
+
+    var codec = savedChatPackageCodecV3();
+    var cas = getAssetCas();
+    if (!codec || typeof codec.readBoundedPackageMemberBytes !== 'function') {
+      return assetRefusal('asset-restoration-unavailable', 'governed package codec unavailable');
+    }
+    if (!cas) return assetRefusal('asset-restoration-unavailable', 'asset CAS unavailable');
+    if (!getAssetsStore()) return assetRefusal('asset-restoration-unavailable', 'asset registry store unavailable');
+    if (!getInvoke()) return assetRefusal('asset-restoration-unavailable', 'native invoke unavailable');
+
+    var manifest;
+    if (source.sourceKind === 'archive-package') {
+      try { manifest = await readArchiveManifestForAssets(codec, cleanString(source.packagePath)); }
+      catch (_) { manifest = null; }
+    } else {
+      manifest = source.portableManifest;
+    }
+    if (!isObject(manifest)) return assetRefusal('asset-manifest-unreadable');
+
+    var normalized = normalizeManifestAssetDescriptors(manifest);
+    if (normalized.error) return assetRefusal(normalized.error, normalized.sha256);
+    var descriptors = normalized.descriptors;
+    var manifestHexes = descriptors.map(function (d) { return d.hex; });
+    var uniqueManifest = manifestHexes.slice().sort().filter(function (h, i, arr) { return i === 0 || arr[i - 1] !== h; });
+    if (uniqueManifest.length !== manifestHexes.length) return assetRefusal('asset-set-mismatch', 'duplicate manifest asset identity');
+    if (uniqueManifest.length !== trusted.length || uniqueManifest.some(function (h, i) { return h !== trusted[i]; })) {
+      return assetRefusal('asset-set-mismatch', 'manifest asset set does not equal the trusted asset set');
+    }
+
+    /* assetRef closure over the trusted set; one logical link per distinct
+     * (persisted turnIdx, sha256). */
+    var links = [];
+    var linkSeen = {};
+    var referenced = {};
+    var turnList = asArray(turns);
+    for (var t = 0; t < turnList.length; t += 1) {
+      var turn = safeObject(turnList[t]);
+      var refs = asArray(safeObject(turn.meta).assetRefs);
+      for (var r = 0; r < refs.length; r += 1) {
+        var ref = prefixedHash(refs[r]);
+        if (!SHA256_CANONICAL.test(ref) || trusted.indexOf(ref.slice(7)) < 0) {
+          return assetRefusal('asset-ref-outside-trusted-set', String(refs[r]));
+        }
+        var key = turn.turnIdx + ':' + ref;
+        if (linkSeen[key]) continue;
+        linkSeen[key] = true;
+        referenced[ref] = true;
+        links.push({ turnIdx: turn.turnIdx, sha256: ref, sourceMessageId: cleanString(safeObject(turn.meta).sourceMessageId) });
+      }
+    }
+
+    /* Member bytes, in deterministic SHA order, bound to the trusted identity. */
+    descriptors.sort(function (a, b) { return a.hex < b.hex ? -1 : (a.hex > b.hex ? 1 : 0); });
+    var cap = cas.assetBlobCapBytes;
+    var assets = [];
+    for (var i = 0; i < descriptors.length; i += 1) {
+      var descriptor = descriptors[i];
+      var read = source.sourceKind === 'archive-package'
+        ? await readArchiveAssetMember(codec, cleanString(source.packagePath), descriptor, cap)
+        : readPortableAssetMember(asArray(source.portableEntries), descriptor, cap);
+      if (!read.ok) return read;
+      assets.push({
+        sha256: descriptor.sha256,
+        hex: descriptor.hex,
+        path: descriptor.path,
+        ext: descriptor.ext,
+        mimeType: descriptor.mimeType,
+        byteLength: descriptor.byteLength,
+        bytes: read.bytes,
+        referenced: referenced[descriptor.sha256] === true,
+      });
+    }
+    return Object.freeze({ ok: true, assetBearing: true, trustedShas: trusted.slice(), assets: assets, links: links, turnCount: turnList.length });
+  }
+
+  /* Destination CAS ensure (contract §8), CAS-first (contract §7). Only the
+   * existing CAS API is used; the returned put outcome — never a pathname or a
+   * null read — is what gets classified. A repaired:true put, a hash
+   * contradiction on read, or the CAS module's hidden already-valid repair
+   * path (visible only as a mismatch-counter delta) is DESTINATION_CAS_CORRUPT
+   * and stops before any DB mutation. */
+  async function ensureDestinationCas(plan) {
+    var cas = getAssetCas();
+    var outcomes = [];
+    var materialized = [];
+    function stop(code, sha256, detail) {
+      return {
+        ok: false,
+        code: code,
+        sha256: sha256,
+        detail: cleanString(detail),
+        outcomes: outcomes,
+        residue: materialized.slice(),
+        residueClass: materialized.length ? CAS_STATE.RESIDUE : null,
+      };
+    }
+    function mismatchCount() {
+      try { return Number(safeObject(cas.diagnoseAssetCas()).mismatchCount) || 0; } catch (_) { return 0; }
+    }
+    for (var i = 0; i < plan.assets.length; i += 1) {
+      var asset = plan.assets[i];
+      var existing;
+      try {
+        existing = await cas.readVerifiedAssetBytes(asset.sha256);
+      } catch (_) {
+        return stop(CAS_STATE.CORRUPT, asset.sha256, 'destination object failed verification on read');
+      }
+      var state;
+      var durabilityComplete = true;
+      if (existing && existing.length === asset.byteLength) {
+        state = CAS_STATE.REUSED;
+      } else if (existing) {
+        return stop(CAS_STATE.CORRUPT, asset.sha256, 'destination object length contradicts the trusted asset');
+      } else {
+        var mismatchBefore = mismatchCount();
+        var put;
+        try {
+          put = safeObject(await cas.putAssetBytes({
+            bytes: asset.bytes,
+            mimeType: asset.mimeType,
+            ext: asset.ext,
+            source: 'h2ochat-recovery',
+          }));
+        } catch (err) {
+          return stop(CAS_STATE.WRITE_FAILED, asset.sha256, err && err.message);
+        }
+        if (put.repaired === true) return stop(CAS_STATE.CORRUPT, asset.sha256, 'put reported a repair');
+        if (mismatchCount() > mismatchBefore) return stop(CAS_STATE.CORRUPT, asset.sha256, 'destination object was found corrupt during put');
+        if (put.deduped === true && put.wrote !== true && put.repaired === false) {
+          state = CAS_STATE.REUSED;
+        } else if (put.wrote === true && put.repaired === false && put.verified === true && put.deduped !== true) {
+          state = CAS_STATE.MATERIALIZED;
+        } else {
+          return stop(CAS_STATE.AMBIGUOUS, asset.sha256, 'put outcome is neither a clean dedupe nor a clean write');
+        }
+        if (cleanString(put.sha256) !== asset.sha256 || put.byteLength !== asset.byteLength) {
+          return stop(CAS_STATE.AMBIGUOUS, asset.sha256, 'put identity does not match the trusted asset');
+        }
+        durabilityComplete = put.durabilityComplete !== false;
+        var reread;
+        try { reread = await cas.readVerifiedAssetBytes(asset.sha256); }
+        catch (_) { return stop(CAS_STATE.CORRUPT, asset.sha256, 'verified reread failed after put'); }
+        if (!reread || reread.length !== asset.byteLength) return stop(CAS_STATE.AMBIGUOUS, asset.sha256, 'verified reread did not return the trusted bytes');
+        if (state === CAS_STATE.MATERIALIZED) materialized.push(asset.sha256);
+      }
+      outcomes.push({ sha256: asset.sha256, state: state, durabilityComplete: durabilityComplete });
+    }
+    return { ok: true, outcomes: outcomes, residue: materialized.slice(), residueClass: null };
+  }
+
+  function metaJson(value) {
+    try { return JSON.stringify(isObject(value) ? value : {}); } catch (_) { return '{}'; }
+  }
+
+  function buildAssetRecoveryCommitPayload(plan, freshChatId, identity, chatPatch, snapPatch, turns) {
+    return {
+      schema: ASSET_RECOVERY_COMMIT_SCHEMA,
+      recoveredChatId: freshChatId,
+      originalChatId: cleanString(identity.chatId) || '(unknown)',
+      originalSnapshotId: cleanString(identity.snapshotId) || '(unknown)',
+      chat: {
+        title: cleanString(chatPatch.title),
+        isSaved: chatPatch.isSaved === true,
+        isLinked: chatPatch.isLinked === true,
+        messageCount: chatPatch.messageCount,
+        userTurnCount: chatPatch.userTurnCount,
+        assistantTurnCount: chatPatch.assistantTurnCount,
+        lastMessageAt: isFiniteNumber(chatPatch.lastMessageAt) ? chatPatch.lastMessageAt : 0,
+        metaJson: metaJson(chatPatch.meta),
+      },
+      snapshot: {
+        title: cleanString(snapPatch.title),
+        messageCount: turns.length,
+        metaJson: metaJson(snapPatch.meta),
+      },
+      turns: turns.map(function (turn) {
+        return {
+          turnIdx: turn.turnIdx,
+          role: turn.role,
+          text: turn.text,
+          outerHtml: turn.outerHtml,
+          metaJson: metaJson(turn.meta),
+        };
+      }),
+      assets: plan.assets.map(function (asset) {
+        return { sha256: asset.sha256, mimeType: asset.mimeType, ext: asset.ext, byteSize: asset.byteLength, metaJson: '{}' };
+      }),
+      links: plan.links.map(function (link) {
+        return {
+          turnIdx: link.turnIdx,
+          sha256: link.sha256,
+          relation: 'inline',
+          metaJson: metaJson(link.sourceMessageId ? { sourceMessageId: link.sourceMessageId } : {}),
+        };
+      }),
+    };
+  }
+
+  /* Post-commit proof (contract §13): durable state re-read through the
+   * existing store adapters and the verified CAS read. */
+  async function proveAssetRecoveryCommit(commit, plan, source, snapStore, chatStore) {
+    var problems = [];
+    var chatId = cleanString(commit.recoveredChatId);
+    var snapshotId = cleanString(commit.recoveredSnapshotId);
+    var chat = await Promise.resolve(chatStore.get(chatId)).catch(function () { return null; });
+    if (!chat || (cleanString(safeObject(chat).id) !== chatId && cleanString(safeObject(chat).chatId) !== chatId)) problems.push('fresh-chat-missing');
+    var combined = await Promise.resolve(snapStore.get(snapshotId)).catch(function () { return null; });
+    var snap = safeObject(safeObject(combined).snapshot);
+    if (!snapshotId || snapshotRowId(snap) !== snapshotId) problems.push('fresh-snapshot-missing');
+    else if (asArray(safeObject(combined).turns).length !== plan.turnCount) problems.push('turn-count-mismatch');
+    var rows = await Promise.resolve(getAssetsStore().listBySnapshot(snapshotId)).catch(function () { return []; });
+    var expected = plan.links.map(function (l) { return l.turnIdx + ':' + l.sha256; }).sort();
+    var actual = asArray(rows).map(function (r) { return Number(r.turnIdx) + ':' + prefixedHash(r.sha256); }).sort();
+    if (expected.length !== actual.length || expected.some(function (k, i) { return k !== actual[i]; })) problems.push('link-set-mismatch');
+    var cas = getAssetCas();
+    var store = getAssetsStore();
+    for (var i = 0; i < plan.assets.length; i += 1) {
+      var asset = plan.assets[i];
+      var row = await Promise.resolve(store.get(asset.sha256)).catch(function () { return null; });
+      if (!row) { problems.push('registry-row-missing:' + asset.sha256); continue; }
+      if (!asset.referenced) continue;
+      var bytes = null;
+      try { bytes = await cas.readVerifiedAssetBytes(asset.sha256); } catch (_) { bytes = null; }
+      if (!bytes) problems.push('cas-object-unverified:' + asset.sha256);
+      else if (bytes.length !== asset.byteLength) problems.push('cas-length-mismatch:' + asset.sha256);
+    }
+    /* Source non-mutation: the recovery never opens a package member for
+     * writing (the renderer holds no write capability under archive/**), so
+     * re-binding the archive snapshot member to the trusted anchors is the
+     * cheap durable witness (injected by the archive loader); the portable
+     * entry set is immutable in memory and needs no re-read. */
+    if (typeof source.reverifySource === 'function') {
+      var rebound = null;
+      try { rebound = await source.reverifySource(); } catch (_) { rebound = null; }
+      if (!isObject(rebound)) problems.push('source-package-binding-lost');
+    }
+    return { ok: problems.length === 0, problems: problems };
+  }
+
+  /* The native transaction bypasses the JS adapters' subscriber notifications;
+   * reload the affected store views so the recovered object is visible without
+   * a restart. reload() is a read + 'reload' notification (auto-export ignores
+   * it), so this introduces no Sync side effect. */
+  function reloadRecoveryStoreViews() {
+    var stores = getStores();
+    var names = ['chats', 'snapshots', 'assets'];
+    return Promise.all(names.map(function (name) {
+      var store = stores[name];
+      if (!store || typeof store.reload !== 'function') return Promise.resolve({ store: name, reloaded: false });
+      return Promise.resolve(store.reload())
+        .then(function () { return { store: name, reloaded: true }; }, function () { return { store: name, reloaded: false }; });
+    }));
+  }
+
+  /* After a successful CAS ensure, a later pre-commit failure turns every
+   * newly materialized object into classified residue. */
+  function withResidue(ensure) {
+    var e = safeObject(ensure);
+    var residue = asArray(e.residue);
+    return Object.assign({}, e, { residueClass: residue.length ? CAS_STATE.RESIDUE : null });
+  }
+
+  function assetSummary(plan, ensure, commit, extra) {
+    var summary = {
+      requiredCount: plan.assets.length,
+      referencedCount: plan.assets.filter(function (a) { return a.referenced; }).length,
+      linkCount: plan.links.length,
+      reused: [],
+      materialized: [],
+      residue: [],
+      residueClass: null,
+    };
+    asArray(ensure && ensure.outcomes).forEach(function (o) {
+      if (o.state === CAS_STATE.REUSED) summary.reused.push(o.sha256);
+      if (o.state === CAS_STATE.MATERIALIZED) summary.materialized.push(o.sha256);
+    });
+    if (ensure && ensure.residueClass) { summary.residue = ensure.residue.slice(); summary.residueClass = ensure.residueClass; }
+    if (commit) summary.commit = { committed: commit.committed === true, stage: commit.stage || null, code: commit.code || null, counts: commit.counts || null };
+    return Object.assign(summary, extra || {});
+  }
+
+  /* Asset-bearing Recover as New: plan → CAS ensure → ONE native transaction →
+   * post-commit proof → store-view reload → truthful result. The legacy
+   * chats.upsert → snapshots.create sequence is never used on this branch. */
+  async function importAssetBearingCandidate(source, decision, identity, plan, turns, freshChatId, chatPatch, snapPatch, snapStore, chatStore) {
+    var packagePath = cleanString(source.packagePath);
+    var ensure = await ensureDestinationCas(plan);
+    if (!ensure.ok) {
+      var refused = importResult(packagePath, 'rejected', decision, null, 'asset restoration stopped before any database write: ' + ensure.code + (ensure.detail ? ' (' + ensure.detail + ')' : ''));
+      refused.assets = assetSummary(plan, ensure, null, { result: ensure.code, failedSha256: ensure.sha256 || null });
+      return refused;
+    }
+    var invoke = getInvoke();
+    var commit;
+    try {
+      commit = safeObject(await invoke(ASSET_RECOVERY_COMMIT_COMMAND, {
+        payload: buildAssetRecoveryCommitPayload(plan, freshChatId, identity, chatPatch, snapPatch, turns),
+      }));
+    } catch (err) {
+      /* Transport failure after the request left the renderer is ambiguous:
+       * report it; never blindly retry a possibly committed recovery. */
+      var ambiguous = importResult(packagePath, 'rejected', decision, null, 'recovery transaction transport failed: ' + String((err && err.message) || err));
+      ambiguous.assets = assetSummary(plan, withResidue(ensure), null, { result: 'recovery-transaction-transport-failed', ambiguousCommit: true });
+      return ambiguous;
+    }
+    if (commit.ok !== true || commit.committed !== true) {
+      /* Every object materialized above is now verified unreferenced residue
+       * (contract §9): classified, never deleted, deduplicated by a later
+       * explicit retry. */
+      var rolledBack = importResult(packagePath, 'rejected', decision, null, 'recovery transaction rolled back: ' + cleanString(commit.stage) + '/' + cleanString(commit.code));
+      rolledBack.assets = assetSummary(plan, withResidue(ensure), commit, { result: 'recovery-transaction-rolled-back' });
+      return rolledBack;
+    }
+    var proof = await proveAssetRecoveryCommit(commit, plan, source, snapStore, chatStore);
+    var reloads = await reloadRecoveryStoreViews();
+    var recovered = {
+      newChatId: cleanString(commit.recoveredChatId),
+      newSnapshotId: cleanString(commit.recoveredSnapshotId),
+      originalChatId: identity.chatId,
+      originalSnapshotId: identity.snapshotId,
+      messageCount: turns.length,
+    };
+    if (!proof.ok) {
+      var unverified = importResult(packagePath, ASSET_RESULT.COMMITTED_UNVERIFIED, decision, recovered,
+        'the recovery transaction committed but post-commit verification failed: ' + proof.problems.join(', '));
+      unverified.assets = assetSummary(plan, ensure, commit, { result: ASSET_RESULT.COMMITTED_UNVERIFIED, proofProblems: proof.problems, storeReloads: reloads });
+      return unverified;
+    }
+    var done = importResult(packagePath, 'imported', decision, recovered, 'recovered as a new chat + snapshot with verified assets');
+    done.assets = assetSummary(plan, ensure, commit, { result: ASSET_RESULT.COMPLETE, proofProblems: [], storeReloads: reloads });
+    return done;
+  }
+
+  /* ── Reader-side ephemeral hydration of a recovered snapshot ─────────────
+   *
+   * Consumed only by the Desktop load-path adapter (studio.js
+   * loadSnapshotFromStoresDesktop) on the PROJECTED canonical copy. Gate:
+   *   G-a  canonical.meta.recovered.recoveredFromPackage === true
+   *   G-b  store.assets.listBySnapshot(snapshotId) returns persisted links
+   *   G-c  each link SHA closes over that turn's own assetRefs
+   * Only the exact canonical `src="assets/sha256-<hex>.<ext>"` reference of a
+   * gated link is replaced, with a standard-base64 data URI built from
+   * readVerifiedAssetBytes, the registry MIME (raster families only), accepted
+   * by the Renderer's public sanitizer-policy oracle and within its input
+   * budget (all-or-nothing per turn). Anything else leaves the reference as
+   * it is. Deterministic, total, never persisted; the input is never mutated. */
+  var HYDRATION_RASTER_MIME = { 'image/png': true, 'image/jpeg': true, 'image/jpg': true, 'image/gif': true, 'image/webp': true };
+
+  function getRendererSanitizerPolicy() {
+    var renderer = safeObject(safeObject(H2O.Studio).Renderer);
+    var policy = renderer.sanitizerPolicy;
+    return (policy && typeof policy.classifyUrl === 'function' && typeof policy.isWithinBudget === 'function') ? policy : null;
+  }
+
+  function bytesToBase64(u8) {
+    if (typeof global.btoa === 'function') {
+      var binary = '';
+      var CHUNK = 0x8000;
+      for (var i = 0; i < u8.length; i += CHUNK) {
+        binary += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
+      }
+      return global.btoa(binary);
+    }
+    if (typeof Buffer !== 'undefined') return Buffer.from(u8).toString('base64');
+    throw new Error('no base64 encoder available');
+  }
+
+  async function hydrateRecoveredSnapshotProjectionV1(canonical) {
+    try {
+      if (!isObject(canonical)) return canonical;
+      var meta = safeObject(canonical.meta);
+      if (safeObject(meta.recovered).recoveredFromPackage !== true) return canonical;
+      var richTurns = asArray(meta.richTurns);
+      var snapshotId = cleanString(canonical.snapshotId);
+      if (!richTurns.length || !snapshotId) return canonical;
+      var assetsStore = getAssetsStore();
+      var cas = getAssetCas();
+      var policy = getRendererSanitizerPolicy();
+      if (!assetsStore || !cas || !policy) return canonical;
+
+      var rows = asArray(await assetsStore.listBySnapshot(snapshotId));
+      if (!rows.length) return canonical;
+      var linksByTurn = {};
+      rows.forEach(function (row) {
+        var r = safeObject(row);
+        var turnIdx = Number(r.turnIdx);
+        var sha256 = prefixedHash(r.sha256);
+        if (!isFiniteNumber(turnIdx) || !SHA256_CANONICAL.test(sha256)) return;
+        (linksByTurn[turnIdx] = linksByTurn[turnIdx] || []).push({
+          sha256: sha256,
+          mimeType: cleanString(r.mimeType).toLowerCase(),
+          ext: cleanString(r.ext).toLowerCase(),
+          byteSize: isFiniteNumber(r.byteSize) ? r.byteSize : 0,
+        });
+      });
+
+      var dataUriBySha = {};
+      async function dataUriFor(link) {
+        if (Object.prototype.hasOwnProperty.call(dataUriBySha, link.sha256)) return dataUriBySha[link.sha256];
+        var uri = null;
+        var bytes = null;
+        try { bytes = await cas.readVerifiedAssetBytes(link.sha256); } catch (_) { bytes = null; }
+        if (bytes && bytes.length && (!(link.byteSize > 0) || bytes.length === link.byteSize)) {
+          var candidate = 'data:' + link.mimeType + ';base64,' + bytesToBase64(bytesFor(bytes));
+          var verdict = safeObject(policy.classifyUrl(candidate, 'image'));
+          if (verdict.ok === true) uri = candidate;
+        }
+        dataUriBySha[link.sha256] = uri;
+        return uri;
+      }
+
+      var changed = false;
+      var nextRichTurns = [];
+      for (var i = 0; i < richTurns.length; i += 1) {
+        var turn = safeObject(richTurns[i]);
+        var html = typeof turn.outerHTML === 'string' ? turn.outerHTML : '';
+        var links = linksByTurn[Number(turn.turnIdx)];
+        if (!html || !links || !links.length) { nextRichTurns.push(richTurns[i]); continue; }
+        var refs = asArray(turn.assetRefs).map(prefixedHash);
+        var eligible = links.filter(function (link) { return refs.indexOf(link.sha256) >= 0; });
+        eligible.sort(function (a, b) { return a.sha256 < b.sha256 ? -1 : (a.sha256 > b.sha256 ? 1 : 0); });
+        var hydrated = html;
+        var applied = false;
+        for (var j = 0; j < eligible.length; j += 1) {
+          var link = eligible[j];
+          if (j > 0 && eligible[j - 1].sha256 === link.sha256) continue;
+          if (!HYDRATION_RASTER_MIME[link.mimeType] || !ASSET_EXT_TOKEN.test(link.ext)) continue;
+          var token = 'src="assets/' + link.sha256 + '.' + link.ext + '"';
+          if (hydrated.indexOf(token) < 0) continue;
+          var uri = await dataUriFor(link);
+          if (!uri) continue;
+          var next = hydrated.split(token).join('src="' + uri + '"');
+          if (!policy.isWithinBudget(next)) { hydrated = html; applied = false; break; }
+          hydrated = next;
+          applied = true;
+        }
+        if (!applied) { nextRichTurns.push(richTurns[i]); continue; }
+        nextRichTurns.push(Object.assign({}, turn, { outerHTML: hydrated }));
+        changed = true;
+      }
+      if (!changed) return canonical;
+      return Object.assign({}, canonical, { meta: Object.assign({}, meta, { richTurns: nextRichTurns }) });
+    } catch (_) {
+      return canonical;
+    }
   }
 
   /* O1 — the recovered chat row's summary counters, for the initial INSERT of
@@ -858,6 +1492,16 @@
         /* no partial / empty import */
         return importResult(packagePath, 'rejected', decision, null, 'no turns to import (empty payload; refusing partial import)');
       }
+      /* T02: ONE immutable asset recovery plan, proven before any mutation. An
+       * asset-free package (empty trusted asset set) continues on the legacy
+       * write path below, unchanged; a plan refusal writes nothing. */
+      return buildAssetRecoveryPlan(source, turns).then(function (plan) {
+      if (!plan.ok) {
+        var refusedPlan = importResult(packagePath, 'rejected', decision, null,
+          'asset restoration refused before any write: ' + plan.code + (plan.detail ? ' (' + plan.detail + ')' : ''));
+        refusedPlan.assets = { result: plan.code, detail: plan.detail || '' };
+        return refusedPlan;
+      }
       var title = cleanString(identity.title) || cleanString(safeObject(snapshotJson).title) || 'Recovered chat';
       var recoveredTitle = RECOVERED_TITLE_PREFIX + title;
       var provenance = {
@@ -901,17 +1545,22 @@
           meta: { recovered: provenance, answerCount: summary.answerCount },
         };
         if (summary.lastMessageAt > 0) chatPatch.lastMessageAt = summary.lastMessageAt;
+        /* (b) recovered snapshot — NO snapshotId in the patch => the store
+         * generates a fresh id => INSERT (never an update). The
+         * overwrite-by-id store primitive is intentionally never used. */
+        var snapPatch = {
+          chatId: freshChatId,
+          title: recoveredTitle,
+          messageCount: turns.length,
+          turns: turns,
+          meta: { recovered: provenance },
+        };
+        if (plan.assetBearing) {
+          /* T02 asset-bearing path: the same fresh identities and patches, but
+           * persisted through CAS ensure + ONE native atomic transaction. */
+          return importAssetBearingCandidate(source, decision, identity, plan, turns, freshChatId, chatPatch, snapPatch, snapStore, chatStore);
+        }
         return Promise.resolve(chatStore.upsert(chatPatch)).then(function () {
-          /* (b) recovered snapshot — NO snapshotId in the patch => the store
-           * generates a fresh id => INSERT (never an update). The
-           * overwrite-by-id store primitive is intentionally never used. */
-          var snapPatch = {
-            chatId: freshChatId,
-            title: recoveredTitle,
-            messageCount: turns.length,
-            turns: turns,
-            meta: { recovered: provenance },
-          };
           return Promise.resolve(snapStore.create(snapPatch)).then(function (combined) {
             var newSnapshotId = snapshotRowId(safeObject(combined).snapshot);
             return importResult(packagePath, 'imported', decision, {
@@ -923,6 +1572,7 @@
             }, 'recovered as a new chat + snapshot');
           });
         });
+      });
       });
     }).catch(function (err) {
       return importResult(packagePath, 'rejected', '', null, String((err && err.message) || err || 'import threw'));
@@ -1211,6 +1861,9 @@
     dryRunImportZip: dryRunImportZip,
     importVerifiedZip: importVerifiedZip,
     buildTurnsFromPackageSnapshot: buildTurnsFromPackageSnapshot,
+    /* T02: Reader-side ephemeral hydration of a recovered snapshot's exact
+     * package asset references (consumed by the Desktop load-path adapter). */
+    hydrateRecoveredSnapshotProjectionV1: hydrateRecoveredSnapshotProjectionV1,
     renderArchiveImporterCard: renderArchiveImporterCard,
     mountArchiveImporterCard: mountArchiveImporterCard,
   };

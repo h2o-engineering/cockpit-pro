@@ -2029,7 +2029,15 @@ async function loadSnapshotFromStoresDesktop(snapshotId){
   try {
     const raw = await snapStore.get(id);
     if (!raw) return null;
-    return projectSqliteSnapshotToCanonical(raw);
+    const canonical = projectSqliteSnapshotToCanonical(raw);
+    // Saved-Chat asset restoration (L-STORAGE-SAVED-CHATS T02, EXT-SAVED-CHAT-T02-STUDIO-JS-LEASE):
+    // ephemeral hydration of a RECOVERED snapshot's exact package asset refs on this
+    // projected copy only. The helper owns the gate (recovered provenance + persisted
+    // links + per-turn assetRefs), is total, and is never persisted; absent or failing,
+    // the canonical projection is returned unchanged.
+    const hydrate = W.H2O?.Studio?.archiveImporter?.hydrateRecoveredSnapshotProjectionV1;
+    if (!canonical || typeof hydrate !== 'function') return canonical;
+    try { return (await hydrate(canonical)) || canonical; } catch { return canonical; }
   } catch (e) {
     try { console.warn('[H2O.Studio] loadSnapshotFromStoresDesktop failed', e); } catch {}
     return null;

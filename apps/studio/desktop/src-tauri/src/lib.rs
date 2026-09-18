@@ -235,6 +235,13 @@ pub mod saved_chat_backup_root_policy;
 /// restore authority.
 pub mod saved_chat_local_backup;
 
+/// Asset restoration T02 — purpose-bounded, connection-affine native
+/// transaction for asset-bearing Recover as New (fresh recovered chat /
+/// snapshot / turns + asset registry ensure + snapshot_turn_assets links +
+/// authoritative refcount recompute). Closed input schema; insert-only; no
+/// overwrite mode; owns no file or CAS authority.
+pub mod saved_chat_asset_recovery;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum F5g4ProofFailure {
     TombstoneInsert,
@@ -3080,6 +3087,60 @@ fn open_studio_devtools(window: tauri::WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+/// Asset restoration T02 — the ONLY entry to the purpose-bounded recovery
+/// transaction. Mirrors `apply_folder_metadata_color`: resolve the Desktop
+/// pool, acquire one connection, run the whole write as one transaction.
+#[tauri::command]
+async fn h2o_saved_chat_asset_recovery_commit(
+    db_instances: State<'_, DbInstances>,
+    payload: saved_chat_asset_recovery::AssetRecoveryCommitPayload,
+) -> Result<saved_chat_asset_recovery::AssetRecoveryCommitResult, String> {
+    let pool = {
+        let instances = db_instances.0.read().await;
+        let Some(db) = instances.get(F5G4_DB_URL) else {
+            return Ok(
+                saved_chat_asset_recovery::AssetRecoveryCommitResult::refused(
+                    "begin",
+                    "desktop-db-unavailable",
+                ),
+            );
+        };
+        match db {
+            DbPool::Sqlite(pool) => pool.clone(),
+            #[allow(unreachable_patterns)]
+            _ => {
+                return Ok(
+                    saved_chat_asset_recovery::AssetRecoveryCommitResult::refused(
+                        "begin",
+                        "desktop-db-unavailable",
+                    ),
+                );
+            }
+        }
+    };
+
+    let mut conn = match pool.acquire().await {
+        Ok(c) => c,
+        Err(_) => {
+            return Ok(
+                saved_chat_asset_recovery::AssetRecoveryCommitResult::refused(
+                    "begin",
+                    "desktop-db-unavailable",
+                ),
+            );
+        }
+    };
+
+    Ok(saved_chat_asset_recovery::run_commit(
+        &mut conn,
+        payload,
+        nowish_millis(),
+        nowish_iso(),
+        None,
+    )
+    .await)
+}
+
 #[cfg(debug_assertions)]
 macro_rules! h2o_studio_invoke_handler {
     () => {
@@ -3176,6 +3237,7 @@ macro_rules! h2o_studio_invoke_handler {
             saved_chat_local_backup::h2o_saved_chat_backup_abort,
             saved_chat_local_backup::h2o_saved_chat_backup_list,
             saved_chat_local_backup::h2o_saved_chat_backup_verify,
+            h2o_saved_chat_asset_recovery_commit,
             archive_occupant_quarantine::h2o_archive_occupant_quarantine,
             dev_seed_f5h_final_validation_synthetic_rows,
             dev_teardown_f5h_final_validation_synthetic_rows
@@ -3279,6 +3341,7 @@ macro_rules! h2o_studio_invoke_handler {
             saved_chat_local_backup::h2o_saved_chat_backup_abort,
             saved_chat_local_backup::h2o_saved_chat_backup_list,
             saved_chat_local_backup::h2o_saved_chat_backup_verify,
+            h2o_saved_chat_asset_recovery_commit,
             archive_occupant_quarantine::h2o_archive_occupant_quarantine
         ]
     };
