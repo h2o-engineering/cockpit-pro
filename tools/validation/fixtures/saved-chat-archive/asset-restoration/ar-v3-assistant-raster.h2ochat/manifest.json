@@ -1,0 +1,47 @@
+{
+  "schema": "h2o.savedChatPackage",
+  "schemaVersion": 3,
+  "payloadVersion": 3,
+  "chatId": "ar-v3-assistant-raster",
+  "snapshotId": "snap_ar_v3_assistant_raster",
+  "contentHash": "sha256-d2ee3ae4b03623f3c6c1a4976d6a793c285ff6ce3955727bd49c3ba2f83fb272",
+  "files": {
+    "snapshot": {
+      "path": "snapshot.json",
+      "sha256": "sha256-d422cc2f0422b5a5fafa8a739b8302b6099638339798865fca368025ac2164ff",
+      "byteLength": 2223,
+      "encoding": "identity"
+    }
+  },
+  "assets": [
+    {
+      "sha256": "sha256-edbcba34d4e94f871c3bb05ae136b4024347cbffad5b426a118cdca5eb3f2ca2",
+      "path": "assets/sha256-edbcba34d4e94f871c3bb05ae136b4024347cbffad5b426a118cdca5eb3f2ca2.png",
+      "mimeType": "image/png",
+      "ext": "png",
+      "byteLength": 70,
+      "source": "synthetic-fixture",
+      "sourceMessageId": "m1",
+      "turnRef": 1
+    },
+    {
+      "sha256": "sha256-48ac27d3fe23f94f582c36c10a7018f1f0a3d6f966899641cb3d19248db3020a",
+      "path": "assets/sha256-48ac27d3fe23f94f582c36c10a7018f1f0a3d6f966899641cb3d19248db3020a.gif",
+      "mimeType": "image/gif",
+      "ext": "gif",
+      "byteLength": 35,
+      "source": "synthetic-fixture",
+      "sourceMessageId": "m2",
+      "turnRef": 2
+    }
+  ],
+  "provenance": {
+    "generatedAt": "2026-09-18T00:00:00.000Z",
+    "projectionOnly": true
+  },
+  "generator": {
+    "name": "h2o-studio",
+    "version": "asset-restoration-t02-fixture",
+    "rendererVersion": "saved-chat-package-v3"
+  }
+}

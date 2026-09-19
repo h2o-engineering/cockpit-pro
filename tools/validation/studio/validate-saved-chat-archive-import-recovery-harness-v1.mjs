@@ -20,6 +20,15 @@
 // written in the INITIAL INSERT — and drives the REAL Desktop read model
 // (LibraryIndexCore + S0F1c projection + the studio.js Workbench/card seam)
 // over the recovered row to prove the list card reads "1 answer".
+// T02 (asset restoration) extends the runtime with the production-equivalent
+// asset dependencies an ASSET-BEARING v3 package now needs — the real asset
+// CAS module and asset-registry adapter, the app-owned durable-write double and
+// the purpose-bounded native recovery-transaction double
+// (h2o_saved_chat_asset_recovery_commit) — so the v3 controls exercise the
+// canonical asset-restoration path and assert its truthful success state
+// (status imported + assets.result imported-asset-complete). Asset-free
+// controls keep proving the unchanged legacy path (status imported, no asset
+// block).
 //
 //   [I.0]      = the harness contract (doc assertions).
 //   [SCAFFOLD] = scaffold artifacts + the deterministic fixture is well-formed.
@@ -73,9 +82,14 @@ const LIB_RS_REL = 'apps/studio/desktop/src-tauri/src/lib.rs';
 const WRITER_IDENTITY_RS_REL = 'apps/studio/desktop/src-tauri/src/sqlite_writer_identity.rs';
 const STORE_MODULES = [
   'store/index.js', 'store/snapshots.tauri.js', 'store/chats.tauri.js',
+  /* T02: the REAL asset-registry adapter (assets + snapshot_turn_assets). */
+  'store/assets.tauri.js',
   /* M03 T04: the governed saved-chat package codec must load before
    * diagnostics/inspector, mirroring the product order in studio.html. */
   'ingestion/saved-chat-package-codec.tauri.js',
+  /* T02: the REAL asset CAS module (putAssetBytes / readVerifiedAssetBytes /
+   * diagnoseAssetCas) over the harness's temp AppLocalData directory. */
+  'ingestion/asset-cas.tauri.js',
   /* M10 P3.5: the Inspector reads archive integrity from the TRUSTED native
    * authority and partitions occupants through the canonical archive-health
    * mapping. Both must register before it, exactly as studio.html loads them
@@ -121,6 +135,17 @@ CREATE TABLE snapshot_turns (
   outer_html TEXT NOT NULL DEFAULT '', text TEXT NOT NULL DEFAULT '', meta_json TEXT NOT NULL DEFAULT '{}',
   PRIMARY KEY (snapshot_id, turn_idx)
 );
+CREATE TABLE assets (
+  sha256 TEXT PRIMARY KEY, mime_type TEXT NOT NULL DEFAULT '', ext TEXT NOT NULL DEFAULT '',
+  byte_size INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '',
+  refcount INTEGER NOT NULL DEFAULT 0, meta_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE snapshot_turn_assets (
+  snapshot_id TEXT NOT NULL, turn_idx INTEGER NOT NULL, sha256 TEXT NOT NULL,
+  relation TEXT NOT NULL DEFAULT 'inline', created_at TEXT NOT NULL DEFAULT '', meta_json TEXT NOT NULL DEFAULT '{}',
+  PRIMARY KEY (snapshot_id, turn_idx, sha256)
+);
+CREATE INDEX idx_snapshot_turn_assets_sha256 ON snapshot_turn_assets(sha256);
 CREATE TABLE sync_tombstones (
   tombstone_id TEXT PRIMARY KEY,
   schema TEXT NOT NULL DEFAULT 'h2o.syncTombstone.v1',
@@ -496,9 +521,12 @@ async function runHarness() {
   if (!widRs) drift.push('sqlite_writer_identity.rs not found');
   if (widRs && !/h2o_writer_identity/.test(widRs)) drift.push('h2o_writer_identity scalar no longer defined in sqlite_writer_identity.rs');
   if (libRs && !/f15_protect_chats_category_id|f15-store-write-protected:chats\.category_id/.test(libRs)) drift.push('f15 chats category_id protection trigger no longer present in lib.rs');
-  for (const t of ['chats', 'snapshots', 'snapshot_turns']) {
+  for (const t of ['chats', 'snapshots', 'snapshot_turns', 'assets', 'snapshot_turn_assets']) {
     if (libRs && !new RegExp('\\b' + t + '\\b').test(libRs)) drift.push('studio_migrations() no longer references table: ' + t);
   }
+  /* T02: the asset-bearing import path commits through ONE purpose-bounded
+   * native command; this harness doubles it, so its registration is pinned. */
+  if (libRs && !/h2o_saved_chat_asset_recovery_commit/.test(libRs)) drift.push('h2o_saved_chat_asset_recovery_commit is no longer registered in lib.rs — update the T02 recovery-transaction double');
   if (drift.length) throw new Error('SCHEMA/TRIGGER DRIFT — update the I.2 seed schema: ' + drift.join('; '));
 
   const srcSnap = readFixtureJson('snapshot.json');
@@ -680,8 +708,85 @@ async function runHarness() {
       declareValidPackage(info.dir);
     }
 
+    /* ── T02: PURPOSE-BOUNDED native recovery transaction — TEST DOUBLE ────
+     * Mirrors h2o_saved_chat_asset_recovery_commit statement-for-statement over
+     * this harness's node:sqlite database inside BEGIN IMMEDIATE / COMMIT:
+     * closed schema only; fresh recovered chat id asserted absent; recovered
+     * snapshot id minted here; registry ensure that inserts absent rows and
+     * never rewrites existing presentation metadata (byte-size contradiction
+     * → rollback); insert-only chat / snapshot / turns / links; refcount
+     * recomputed from the join relation; no DELETE, no overwrite, no generic
+     * SQL. Atomicity itself is proven natively (saved_chat_asset_recovery
+     * tests.rs); the double exists so the REAL importer path runs end to end.
+     * It is counted as ONE write and its payload joins sqlPayloads, so the G01
+     * "no substituted byte reached a write payload" witness covers it too. */
+    const RECOVERY_COMMIT_SCHEMA = 'h2o.savedChatAssetRecoveryCommit.v1';
+    const assetRecoveryCommitDouble = (payload) => {
+      const refuse = (stage, code) => ({ schema: RECOVERY_COMMIT_SCHEMA, ok: false, committed: false, counts: { turns: 0, assetsInserted: 0, assetsExisting: 0, links: 0, refcountsRecomputed: 0 }, stage, code });
+      if (!payload || payload.schema !== RECOVERY_COMMIT_SCHEMA) return refuse('validate', 'schema-mismatch');
+      const allowed = new Set(['schema', 'recoveredChatId', 'originalChatId', 'originalSnapshotId', 'chat', 'snapshot', 'turns', 'assets', 'links']);
+      if (Object.keys(payload).some((k) => !allowed.has(k))) return refuse('validate', 'unknown-field');
+      if (!Array.isArray(payload.turns) || !payload.turns.length) return refuse('validate', 'no-turns');
+      if (!Array.isArray(payload.assets) || !payload.assets.length) return refuse('validate', 'no-assets');
+      const seenLinks = new Set();
+      for (const l of payload.links || []) {
+        const k = l.turnIdx + ':' + l.sha256;
+        if (seenLinks.has(k)) return refuse('validate', 'duplicate-logical-link');
+        seenLinks.add(k);
+      }
+      if (payload.recoveredChatId === payload.originalChatId || payload.recoveredChatId === payload.originalSnapshotId) return refuse('validate', 'recovered-chat-id-reuses-original');
+      sqlPayloads.push(JSON.stringify({ command: 'h2o_saved_chat_asset_recovery_commit', payload }));
+      const nowMs = Date.now(), nowIso = new Date(nowMs).toISOString();
+      db.exec('BEGIN IMMEDIATE');
+      const rollback = (stage, code) => { db.exec('ROLLBACK'); return refuse(stage, code); };
+      try {
+        if (db.prepare('SELECT 1 FROM chats WHERE id = ?').get(payload.recoveredChatId)) return rollback('assert-fresh', 'recovered-chat-id-exists');
+        let snapshotId = null;
+        for (let i = 0; i < 5 && !snapshotId; i += 1) {
+          const candidate = 'snap_' + crypto.randomUUID();
+          if (candidate !== payload.originalSnapshotId && !db.prepare('SELECT 1 FROM snapshots WHERE id = ?').get(candidate)) snapshotId = candidate;
+        }
+        if (!snapshotId) return rollback('assert-fresh', 'snapshot-id-collision');
+        const c = { turns: 0, assetsInserted: 0, assetsExisting: 0, links: 0, refcountsRecomputed: 0 };
+        for (const asset of [...payload.assets].sort((x, y) => x.sha256.localeCompare(y.sha256))) {
+          const row = db.prepare('SELECT byte_size FROM assets WHERE sha256 = ?').get(asset.sha256);
+          if (row) {
+            if (row.byte_size !== 0 && row.byte_size !== asset.byteSize) return rollback('registry-ensure', 'registry-byte-size-contradiction');
+            c.assetsExisting += 1;
+          } else {
+            db.prepare('INSERT INTO assets (sha256, mime_type, ext, byte_size, created_at, updated_at, refcount, meta_json) VALUES (?, ?, ?, ?, ?, ?, 0, ?)')
+              .run(asset.sha256, asset.mimeType, asset.ext, asset.byteSize, nowIso, nowIso, asset.metaJson);
+            c.assetsInserted += 1;
+          }
+        }
+        db.prepare('INSERT INTO chats (id, title, is_saved, is_linked, message_count, user_turn_count, assistant_turn_count, last_message_at, created_at, updated_at, meta_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          .run(payload.recoveredChatId, payload.chat.title, payload.chat.isSaved ? 1 : 0, payload.chat.isLinked ? 1 : 0, payload.chat.messageCount, payload.chat.userTurnCount, payload.chat.assistantTurnCount, payload.chat.lastMessageAt || 0, nowMs, nowMs, payload.chat.metaJson);
+        db.prepare('INSERT INTO snapshots (id, chat_id, title, message_count, captured_at, updated_at, meta_json) VALUES (?, ?, ?, ?, ?, ?, ?)')
+          .run(snapshotId, payload.recoveredChatId, payload.snapshot.title, payload.snapshot.messageCount, nowMs, nowMs, payload.snapshot.metaJson);
+        for (const t of payload.turns) {
+          db.prepare('INSERT INTO snapshot_turns (snapshot_id, turn_idx, role, outer_html, text, meta_json) VALUES (?, ?, ?, ?, ?, ?)').run(snapshotId, t.turnIdx, t.role, t.outerHtml, t.text, t.metaJson);
+          c.turns += 1;
+        }
+        const linked = new Set();
+        for (const l of payload.links || []) {
+          db.prepare('INSERT INTO snapshot_turn_assets (snapshot_id, turn_idx, sha256, relation, created_at, meta_json) VALUES (?, ?, ?, ?, ?, ?)').run(snapshotId, l.turnIdx, l.sha256, l.relation, nowIso, l.metaJson);
+          c.links += 1; linked.add(l.sha256);
+        }
+        for (const sha of [...linked].sort()) {
+          db.prepare('UPDATE assets SET refcount = (SELECT COUNT(*) FROM snapshot_turn_assets WHERE sha256 = ?), updated_at = ? WHERE sha256 = ?').run(sha, nowIso, sha);
+          c.refcountsRecomputed += 1;
+        }
+        db.exec('COMMIT');
+        writes.push('NATIVE h2o_saved_chat_asset_recovery_commit (' + (1 + 1 + c.turns + c.assetsInserted + c.links) + ')');
+        return { schema: RECOVERY_COMMIT_SCHEMA, ok: true, committed: true, recoveredChatId: payload.recoveredChatId, recoveredSnapshotId: snapshotId, counts: c };
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch (_) { /* already rolled back */ }
+        return refuse('sql', 'sql-error');
+      }
+    };
+
     // wire globals + load real modules
-    const mockInvoke = (cmd, a) => {
+    const mockInvoke = (cmd, a, b) => {
       const j = (p) => path.join(appDir, String(p || ''));
       try {
         /* TEST DOUBLE for the EXISTING native command. It replays the trusted
@@ -710,6 +815,30 @@ async function runHarness() {
         if (cmd === 'plugin:fs|read_file') { fileReads.push(String((a && a.path) || '')); return Promise.resolve(Array.from(fs.readFileSync(j(a.path)))); }
         if (cmd === 'plugin:fs|read_dir') return Promise.resolve(fs.existsSync(j(a.path)) ? fs.readdirSync(j(a.path), { withFileTypes: true }).map((e) => ({ name: e.name, isDirectory: e.isDirectory(), isFile: e.isFile() })) : []);
         if (cmd === 'plugin:sql|select') return Promise.resolve(db.prepare(a.query).all(...(a.values || [])).map(normRow));
+        /* T02 — the app-owned CREATE-ONLY durable writer for CAS objects
+         * (archive_durable_write.rs). Bytes travel as the body, options as a
+         * percent-encoded JSON header; the destination must be a canonical
+         * archive-relative CAS blob path. Counted as a WRITE so a refusal that
+         * materialized an object first would be caught by the zero-write proofs. */
+        if (cmd === 'h2o_archive_durable_write') {
+          const opts = JSON.parse(decodeURIComponent(((b && b.headers) || {}).options || '%7B%7D'));
+          const rel = String(opts.path || '');
+          const shape = rel.match(/^assets\/([0-9a-f]{2})\/sha256-([0-9a-f]{64})$/);
+          if (!shape || shape[2].slice(0, 2) !== shape[1]) return Promise.reject(new Error('durable_write: create-only authority is CAS-scoped; refused: ' + rel));
+          const rel15 = 'archive/' + rel;
+          const bytes = ArrayBuffer.isView(a) ? Buffer.from(a.buffer, a.byteOffset || 0, a.byteLength) : Buffer.from(a);
+          if (fs.existsSync(j(rel15))) {
+            return Promise.resolve({ schema: 'h2o.studio.archive.durable-write.v1', ok: false, committed: false, durabilityComplete: false, replaced: false, blockers: [{ code: 'durable-write-destination-exists' }] });
+          }
+          fs.mkdirSync(path.dirname(j(rel15)), { recursive: true });
+          fs.writeFileSync(j(rel15), bytes);
+          writes.push('CAS durable-write ' + rel);
+          return Promise.resolve({ schema: 'h2o.studio.archive.durable-write.v1', ok: true, committed: true, durabilityComplete: true, replaced: false, byteLength: bytes.length, fullFsync: true, blockers: [] });
+        }
+        /* Recovery never repairs a destination object (contract §8.3); reaching
+         * the repair command here is a harness failure, never a soft path. */
+        if (cmd === 'h2o_archive_cas_repair_write') return Promise.reject(new Error('h2o_archive_cas_repair_write must never be reached by Recover as New'));
+        if (cmd === 'h2o_saved_chat_asset_recovery_commit') return Promise.resolve(assetRecoveryCommitDouble(a && a.payload));
         if (cmd === 'plugin:sql|execute') {
           const verb = String(a.query).trim().split(/\s+/)[0].toUpperCase();
           const tbl = (String(a.query).match(/(?:INTO|UPDATE|FROM)\s+([a-z_]+)/i) || [])[1] || '';
@@ -812,13 +941,23 @@ async function runHarness() {
       if (!sid) return null;
       const snap = db.prepare('SELECT chat_id, title, message_count FROM snapshots WHERE id=?').get(sid);
       const turns = db.prepare('SELECT turn_idx, role, text, outer_html FROM snapshot_turns WHERE snapshot_id=? ORDER BY turn_idx').all(sid);
-      return { title: snap && snap.title, messageCount: snap && snap.message_count, turns };
+      /* T02: the asset-bearing v3 package must now persist its registry row and
+       * snapshot_turn_assets link and materialize the verified CAS object. */
+      const links = db.prepare('SELECT turn_idx, sha256 FROM snapshot_turn_assets WHERE snapshot_id=? ORDER BY turn_idx, sha256').all(sid);
+      const registry = links.map((l) => db.prepare('SELECT sha256, byte_size, refcount FROM assets WHERE sha256=?').get(l.sha256) || null);
+      const casObjects = links.map((l) => { const hex = String(l.sha256).replace(/^sha256-/, ''); return fs.existsSync(path.join(appDir, 'archive', 'assets', hex.slice(0, 2), 'sha256-' + hex)); });
+      return { title: snap && snap.title, messageCount: snap && snap.message_count, turns, links, registry, casObjects };
     };
+    const v3AssetShas = (v3BaseManifest.assets || []).map((a) => a.sha256).sort();
+    const v3AssetRef = (v3LogicalBytes.toString('utf8').match(/"assetRefs":\["(sha256-[0-9a-f]{64})"\]/) || [])[1] || '';
 
     writeV3('gzip', undefined, V3_VALID);
     const v3GzipPre = importSnapshotState();
     const v3GzipImport = await importer.importVerifiedPackage({ packagePath: V3_REL, mode: 'import-as-new' });
     const v3GzipRows = importedRows(v3GzipImport);
+    /* T02: the exact write ledger of THIS asset-bearing import (captured now,
+     * before restore / relink / G01 add their own writes). */
+    const v3GzipWrites = writes.slice(v3GzipPre.writes);
 
     writeV3('identity', undefined, V3_VALID);
     const v3IdImport = await importer.importVerifiedPackage({ packagePath: V3_REL, mode: 'import-as-new' });
@@ -1337,7 +1476,7 @@ async function runHarness() {
 
     /* One observation shape for every case: real entry points, real counters. */
     const observeRecovery = async (pkg, op) => {
-      const before = counts();
+      const before = Object.assign(counts(), { assets: db.prepare('SELECT count(*) c FROM assets').get().c });
       const w0 = writes.length, p0 = sqlPayloads.length, r0 = fileReads.length, c0 = integrityCallSeq;
       let dry = null, exec = null;
       if (op === 'restore') {
@@ -1351,10 +1490,16 @@ async function runHarness() {
       const payloads = sqlPayloads.slice(p0);
       const reads = fileReads.slice(r0);
       const recovered = (exec && (exec.recovered || exec.restored)) || null;
+      const linkRows = (sid) => (sid ? db.prepare('SELECT count(*) c FROM snapshot_turn_assets WHERE snapshot_id=?').get(sid).c : 0);
       return {
         key: pkg.key, op: op, family: pkg.family, encoding: pkg.encoding || 'identity',
         dryDecision: String((dry && dry.decision) || ''),
         execStatus: String((exec && exec.status) || ''),
+        /* T02: the asset-restoration result vocabulary of the REAL importer
+         * (absent on the legacy asset-free path) and the recovered link rows. */
+        assetResult: String((exec && exec.assets && exec.assets.result) || ''),
+        assetLinks: op === 'import' ? linkRows(recovered ? String(recovered.newSnapshotId || '') : '') : 0,
+        assetsDelta: db.prepare('SELECT count(*) c FROM assets').get().c - before.assets,
         writes: writes.length - w0,
         delta: { chats: after.chats - before.chats, snapshots: after.snapshots - before.snapshots, turns: after.turns - before.turns },
         betaInWrites: payloads.some((p) => p.indexOf(BETA_MARK) >= 0),
@@ -1501,9 +1646,11 @@ async function runHarness() {
         negatives: v3RestoreNegatives,
       },
       v3Import: {
-        gzip: { status: v3GzipImport.status, rows: v3GzipRows, preWrites: v3GzipPre.writes },
-        identity: { status: v3IdImport.status, rows: v3IdRows },
+        gzip: { status: v3GzipImport.status, assets: v3GzipImport.assets || null, rows: v3GzipRows, preWrites: v3GzipPre.writes, writes: v3GzipWrites },
+        identity: { status: v3IdImport.status, assets: v3IdImport.assets || null, rows: v3IdRows },
         negatives: v3Negatives,
+        fixtureAssetShas: v3AssetShas,
+        fixtureAssetRef: v3AssetRef,
       },
       v3Inspect: {
         gzip: { status: v3GzipInspect.status, ok: v3GzipInspect.ok, identity: v3GzipInspect.identity, contentHashOk: v3GzipInspect.checks && v3GzipInspect.checks.contentHashOk, blockers: v3GzipInspect.blockers },
@@ -1910,25 +2057,49 @@ check('[M03 T04] Restore owns no gzip/compression implementation', () => {
   assert.match(src, /LOGICAL_SNAPSHOT_CAP_BYTES/);
 });
 
-check('[M03 T04] Importer imports a valid v3 gzip package', () => {
+check('[M03 T04][T02] Importer imports a valid ASSET-BEARING v3 gzip package through the asset-restoration path (imported + imported-asset-complete)', () => {
   assert.ok(H, 'no harness');
   const g = H.v3Import.gzip;
   assert.equal(g.status, 'imported');
+  assert.ok(g.assets, 'the asset-bearing v3 import must report its asset-restoration result');
+  assert.equal(g.assets.result, 'imported-asset-complete', 'the CURRENT truthful success state for an asset-bearing package');
+  assert.equal(g.assets.requiredCount, H.v3Import.fixtureAssetShas.length);
+  assert.deepEqual([].concat(g.assets.materialized).sort(), H.v3Import.fixtureAssetShas, 'the fixture asset was materialized into the destination CAS');
+  assert.deepEqual(g.assets.proofProblems, [], 'post-commit proof clean');
   assert.ok(g.rows, 'gzip import must create a recovered snapshot row');
   assert.ok(g.rows.messageCount > 0);
   assert.ok(g.rows.turns.length > 0);
+  /* registry / link / CAS state that the legacy path never produced */
+  assert.equal(g.rows.links.length, 1, 'exactly one logical link for the single fixture assetRef');
+  assert.equal(g.rows.links[0].sha256, H.v3Import.fixtureAssetRef);
+  assert.equal(g.rows.links[0].turn_idx, 0, 'the fixture reference sits on turn 0');
+  assert.ok(g.rows.registry[0] && g.rows.registry[0].refcount >= 1, 'registry row present with a recomputed refcount');
+  assert.deepEqual(g.rows.casObjects, [true], 'the destination CAS object exists');
+  /* write ordering of the asset-bearing branch: CAS first, then ONE native commit, no legacy adapter INSERT */
+  const casWrites = g.writes.filter((w) => w.startsWith('CAS durable-write'));
+  const nativeAt = g.writes.findIndex((w) => w.startsWith('NATIVE h2o_saved_chat_asset_recovery_commit'));
+  assert.equal(casWrites.length, 1, 'one CAS materialization');
+  assert.ok(nativeAt >= 0, 'exactly one native recovery commit: ' + JSON.stringify(g.writes));
+  assert.ok(g.writes.indexOf(casWrites[0]) < nativeAt, 'CAS ensure precedes the DB transaction');
+  assert.equal(g.writes.filter((w) => /^INSERT (chats|snapshots|snapshot_turns)/.test(w)).length, 0, 'the legacy adapters wrote nothing on the asset-bearing branch');
 });
 
-check('[M03 T04] Importer v3 gzip and identity produce equivalent imported state', () => {
+check('[M03 T04][T02] Importer v3 gzip and identity produce equivalent asset-bearing imported state', () => {
   assert.ok(H, 'no harness');
   const g = H.v3Import.gzip.rows, i = H.v3Import.identity.rows;
   assert.equal(H.v3Import.identity.status, 'imported');
+  assert.equal(H.v3Import.identity.assets && H.v3Import.identity.assets.result, 'imported-asset-complete');
+  /* the second recovery of the same asset REUSES the verified CAS object */
+  assert.deepEqual([].concat(H.v3Import.identity.assets.reused).sort(), H.v3Import.fixtureAssetShas, 'identity variant reuses the object the gzip variant materialized');
+  assert.deepEqual(H.v3Import.identity.assets.materialized, []);
   assert.ok(g && i, 'both variants must import');
   /* Same logical package: identical recovered title, count and turn content. */
   assert.equal(g.title, i.title);
   assert.equal(g.messageCount, i.messageCount);
   assert.equal(g.turns.length, i.turns.length);
   assert.deepEqual(g.turns, i.turns, 'imported turns must be byte-equivalent across encodings');
+  assert.deepEqual(g.links, i.links.map((l) => l), 'identical logical link set');
+  assert.equal(i.registry[0].refcount, 2, 'refcount recomputed from the join: two recovered snapshots reference the asset');
 });
 
 check('[M03 T04] Importer rejects every v3 integrity failure with ZERO persistent mutation', () => {
@@ -2562,7 +2733,7 @@ check('[G01] valid RESTORE controls still reach restore-ready → restored for v
   }
 });
 
-check('[G01] valid IMPORT controls still reach import-ready → imported under FRESH recovered ids', () => {
+check('[G01] valid IMPORT controls still reach import-ready → imported under FRESH recovered ids (asset-free: legacy path; asset-bearing v3: imported-asset-complete)', () => {
   const controls = g01().controls.filter((c) => c.op === 'import');
   assert.equal(controls.length, 3, 'expected three import controls, saw ' + controls.length);
   assert.deepEqual(controls.map((c) => c.encoding).sort(), ['gzip', 'identity', 'identity']);
@@ -2574,6 +2745,17 @@ check('[G01] valid IMPORT controls still reach import-ready → imported under F
     assert.ok(c.delta.turns > 0, c.label + ': import control inserted no turns');
     assert.equal(c.freshId, true, c.label + ': import reused the package original snapshot id');
     assert.equal(c.originalIdsPresent.chat, false, c.label + ': import-as-new created the package ORIGINAL chat id');
+    if (c.family === 'v3') {
+      /* T02: the asset-bearing v3 controls run the canonical asset-restoration
+       * path — exact CURRENT success vocabulary, never the legacy shape. */
+      assert.equal(c.assetResult, 'imported-asset-complete', c.label + ': asset-bearing control must report imported-asset-complete');
+      assert.equal(c.assetLinks, 1, c.label + ': one recovered snapshot_turn_assets link for the fixture assetRef');
+    } else {
+      /* asset-free v1/v2: the unchanged legacy path reports no asset block */
+      assert.equal(c.assetResult, '', c.label + ': asset-free control must stay on the legacy path (no asset-restoration block)');
+      assert.equal(c.assetLinks, 0, c.label + ': asset-free control must create no links');
+      assert.equal(c.assetsDelta, 0, c.label + ': asset-free control must touch no registry row');
+    }
   }
 });
 
