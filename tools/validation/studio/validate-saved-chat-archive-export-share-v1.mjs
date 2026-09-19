@@ -36,6 +36,9 @@ const PORTABLE_VERIFY = 'src-surfaces-base/studio/ingestion/saved-chat-portable-
 const HEALTH_MAPPING = 'src-surfaces-base/studio/ingestion/saved-chat-archive-health-mapping.js';
 const INSPECTOR = 'src-surfaces-base/studio/ingestion/saved-chat-archive-inspector.studio.js';
 const IMPORTER = 'src-surfaces-base/studio/ingestion/saved-chat-archive-importer.studio.js';
+/* T02: the REAL asset CAS module, loaded only by the asset-bearing import
+ * control so Recover as New can materialize the ZIP's verified asset. */
+const ASSET_CAS = 'src-surfaces-base/studio/ingestion/asset-cas.tauri.js';
 const FOLDER_PUBLISH_NATIVE = 'apps/studio/desktop/src-tauri/src/saved_chat_folder_publish.rs';
 const ZIP_PUBLISH_NATIVE = 'apps/studio/desktop/src-tauri/src/saved_chat_zip_publish.rs';
 const EXPORT_ROOT_POLICY_NATIVE = 'apps/studio/desktop/src-tauri/src/saved_chat_export_root_policy.rs';
@@ -733,7 +736,7 @@ function installBehaviorPackage(mem, pkg, rootOverride) {
   return root;
 }
 
-function loadBehaviorRuntime(mem, storeOverride, cryptoOverride) {
+function loadBehaviorRuntime(mem, storeOverride, cryptoOverride, options = {}) {
   const defaultStore = {
     chats: {
       get: async (id) => ({ chatId: id }),
@@ -751,7 +754,7 @@ function loadBehaviorRuntime(mem, storeOverride, cryptoOverride) {
     atob: globalThis.atob, crypto: cryptoOverride || globalThis.crypto || nodeCrypto.webcrypto,
     /* Host Web Streams / compression primitives required by the governed codec. */
     ReadableStream, CompressionStream, DecompressionStream,
-    __TAURI_INTERNALS__: { invoke: mem.invoke },
+    __TAURI_INTERNALS__: { invoke: options.invoke || mem.invoke },
     H2O: { Studio: {
       ingestion: { assetCas: { exists: async () => true, describe: async (id) => ({ exists: true, sha256: id }) } },
       store: storeOverride || defaultStore,
@@ -762,12 +765,148 @@ function loadBehaviorRuntime(mem, storeOverride, cryptoOverride) {
   /* The governed saved-chat package codec must execute before Diagnostics,
    * mirroring the product load order in studio.html. The REAL codec source is
    * loaded here - never a mock - so this harness exercises the same single
-   * gzip/verification authority that product consumers use. */
-  for (const relPath of [HTML_SANITIZER, PACKAGE_OWNER, CODEC, PORTABLE_ZIP, DIAGNOSTICS,
-    TRUSTED_INTEGRITY, HEALTH_MAPPING, INSPECTOR, IMPORTER, PORTABLE_VERIFY, EXPORTER]) {
+   * gzip/verification authority that product consumers use.
+   * T02: an asset-bearing IMPORT runtime additionally loads the REAL asset CAS
+   * module right after the codec (studio.html order), replacing the
+   * export-only exists/describe stub inside that sandbox only. */
+  const modules = [HTML_SANITIZER, PACKAGE_OWNER, CODEC];
+  if (options.assetRestoration === true) modules.push(ASSET_CAS);
+  modules.push(PORTABLE_ZIP, DIAGNOSTICS, TRUSTED_INTEGRITY, HEALTH_MAPPING, INSPECTOR, IMPORTER, PORTABLE_VERIFY, EXPORTER);
+  for (const relPath of modules) {
     vm.runInContext(readRepo(relPath), sandbox, { filename: relPath });
   }
   return sandbox;
+}
+
+/* ── T02: production-equivalent asset-recovery dependencies for the portable
+ * import control. The in-memory store gains the asset registry surface the
+ * REAL importer consumes (listBySnapshot / get / reload), the app-owned
+ * CREATE-ONLY durable writer materializes CAS objects into the behavior fs,
+ * and h2o_saved_chat_asset_recovery_commit is doubled with its PURPOSE-BOUNDED
+ * semantics: closed schema; fresh recovered chat id asserted absent; recovered
+ * snapshot id minted here; registry ensure that inserts absent rows and never
+ * rewrites existing metadata (byte-size contradiction → refusal); insert-only
+ * chat / snapshot / turns / links; refcount recomputed from the join; all
+ * mutation applied atomically at commit, none on refusal. No generic SQL or
+ * transaction API is exposed — the double accepts only that one payload. */
+function createAssetRecoveryModel(mem) {
+  const chats = new Map();
+  const snapshots = new Map();
+  const assets = new Map();
+  const links = [];
+  const writes = { chats: 0, snapshots: 0, cas: 0, native: 0 };
+  const reloads = { chats: 0, snapshots: 0, assets: 0 };
+  const nativePayloads = [];
+  const store = {
+    chats: {
+      get: async (id) => chats.get(id) || null,
+      upsert: async (patch) => { writes.chats += 1; chats.set(patch.chatId, JSON.parse(JSON.stringify(patch))); return patch; },
+      reload: async () => { reloads.chats += 1; return { rowCount: chats.size }; },
+    },
+    snapshots: {
+      get: async (id) => (snapshots.has(id) ? { snapshot: snapshots.get(id), turns: snapshots.get(id).turns || [] } : null),
+      listByChat: async (chatId) => [...snapshots.values()].filter((row) => row.chatId === chatId),
+      create: async (patch) => {
+        writes.snapshots += 1;
+        const row = { ...JSON.parse(JSON.stringify(patch)), snapshotId: `m08-created-${writes.snapshots}` };
+        snapshots.set(row.snapshotId, row);
+        return { snapshot: row };
+      },
+      reload: async () => { reloads.snapshots += 1; return { rowCount: snapshots.size }; },
+    },
+    assets: {
+      get: async (sha256) => assets.get(sha256) || null,
+      listBySnapshot: async (snapshotId) => links
+        .filter((l) => l.snapshotId === snapshotId)
+        .sort((a, b) => a.turnIdx - b.turnIdx || a.sha256.localeCompare(b.sha256))
+        .map((l) => Object.assign({}, assets.get(l.sha256), { turnIdx: l.turnIdx, relation: l.relation })),
+      reload: async () => { reloads.assets += 1; return { rowCount: assets.size }; },
+    },
+  };
+  const casKey = (hex) => `archive/assets/${hex.slice(0, 2)}/sha256-${hex}`;
+  async function invoke(command, body, metadata) {
+    if (command === 'h2o_archive_durable_write') {
+      const opts = JSON.parse(decodeURIComponent(metadata?.headers?.options || '%7B%7D'));
+      const rel = String(opts.path || '');
+      const shape = rel.match(/^assets\/([0-9a-f]{2})\/sha256-([0-9a-f]{64})$/);
+      if (!shape || shape[2].slice(0, 2) !== shape[1]) throw new Error(`durable_write: create-only authority is CAS-scoped; refused: ${rel}`);
+      const rel15 = `archive/${rel}`;
+      if (mem.exists(mem.APP, rel15)) {
+        return { schema: 'h2o.studio.archive.durable-write.v1', ok: false, committed: false, durabilityComplete: false, replaced: false, blockers: [{ code: 'durable-write-destination-exists' }] };
+      }
+      const bytes = Buffer.from(body.buffer, body.byteOffset || 0, body.byteLength);
+      mem.put(mem.APP, rel15, bytes);
+      writes.cas += 1;
+      return { schema: 'h2o.studio.archive.durable-write.v1', ok: true, committed: true, durabilityComplete: true, replaced: false, byteLength: bytes.length, fullFsync: true, blockers: [] };
+    }
+    if (command === 'h2o_archive_cas_repair_write') throw new Error('h2o_archive_cas_repair_write must never be reached by Recover as New');
+    if (command === 'h2o_saved_chat_asset_recovery_commit') return recoveryCommit(body?.payload);
+    return mem.invoke(command, body, metadata);
+  }
+  function recoveryCommit(payload) {
+    const schema = 'h2o.savedChatAssetRecoveryCommit.v1';
+    const refuse = (stage, code) => ({ schema, ok: false, committed: false, counts: { turns: 0, assetsInserted: 0, assetsExisting: 0, links: 0, refcountsRecomputed: 0 }, stage, code });
+    if (!payload || payload.schema !== schema) return refuse('validate', 'schema-mismatch');
+    const allowed = new Set(['schema', 'recoveredChatId', 'originalChatId', 'originalSnapshotId', 'chat', 'snapshot', 'turns', 'assets', 'links']);
+    if (Object.keys(payload).some((k) => !allowed.has(k))) return refuse('validate', 'unknown-field');
+    if (!Array.isArray(payload.turns) || !payload.turns.length || !Array.isArray(payload.assets) || !payload.assets.length) return refuse('validate', 'no-turns-or-assets');
+    const seen = new Set();
+    for (const l of payload.links || []) {
+      const k = `${l.turnIdx}:${l.sha256}`;
+      if (seen.has(k)) return refuse('validate', 'duplicate-logical-link');
+      seen.add(k);
+    }
+    if (payload.recoveredChatId === payload.originalChatId || payload.recoveredChatId === payload.originalSnapshotId) return refuse('validate', 'recovered-chat-id-reuses-original');
+    nativePayloads.push(JSON.parse(JSON.stringify(payload)));
+    if (chats.has(payload.recoveredChatId)) return refuse('assert-fresh', 'recovered-chat-id-exists');
+    let snapshotId = null;
+    for (let i = 0; i < 5 && !snapshotId; i += 1) {
+      const candidate = `snap_${nodeCrypto.randomUUID()}`;
+      if (candidate !== payload.originalSnapshotId && !snapshots.has(candidate)) snapshotId = candidate;
+    }
+    if (!snapshotId) return refuse('assert-fresh', 'snapshot-id-collision');
+    const nowIso = new Date().toISOString();
+    const counts = { turns: 0, assetsInserted: 0, assetsExisting: 0, links: 0, refcountsRecomputed: 0 };
+    /* staged mutation — applied only at commit, so a refusal leaves nothing */
+    const registryInserts = [];
+    for (const asset of [...payload.assets].sort((a, b) => a.sha256.localeCompare(b.sha256))) {
+      const existing = assets.get(asset.sha256);
+      if (existing) {
+        if (existing.byteSize !== 0 && existing.byteSize !== asset.byteSize) return refuse('registry-ensure', 'registry-byte-size-contradiction');
+        counts.assetsExisting += 1;
+      } else {
+        registryInserts.push({ sha256: asset.sha256, mimeType: asset.mimeType, ext: asset.ext, byteSize: asset.byteSize, createdAt: nowIso, updatedAt: nowIso, refcount: 0, meta: JSON.parse(asset.metaJson || '{}') });
+        counts.assetsInserted += 1;
+      }
+    }
+    const chatRow = {
+      chatId: payload.recoveredChatId, title: payload.chat.title, isSaved: payload.chat.isSaved === true, isLinked: payload.chat.isLinked === true,
+      messageCount: payload.chat.messageCount, userTurnCount: payload.chat.userTurnCount, assistantTurnCount: payload.chat.assistantTurnCount,
+      lastMessageAt: payload.chat.lastMessageAt || 0, meta: JSON.parse(payload.chat.metaJson || '{}'),
+    };
+    const snapshotRow = {
+      snapshotId, chatId: payload.recoveredChatId, title: payload.snapshot.title, messageCount: payload.snapshot.messageCount,
+      meta: JSON.parse(payload.snapshot.metaJson || '{}'),
+      turns: payload.turns.map((t) => ({ turnIdx: t.turnIdx, role: t.role, text: t.text, outerHtml: t.outerHtml, meta: JSON.parse(t.metaJson || '{}') })),
+    };
+    counts.turns = snapshotRow.turns.length;
+    const linkRows = (payload.links || []).map((l) => ({ snapshotId, turnIdx: l.turnIdx, sha256: l.sha256, relation: l.relation, createdAt: nowIso, meta: JSON.parse(l.metaJson || '{}') }));
+    counts.links = linkRows.length;
+    /* commit */
+    for (const row of registryInserts) assets.set(row.sha256, row);
+    chats.set(chatRow.chatId, chatRow);
+    snapshots.set(snapshotId, snapshotRow);
+    links.push(...linkRows);
+    for (const sha of [...new Set(linkRows.map((l) => l.sha256))].sort()) {
+      const row = assets.get(sha);
+      row.refcount = links.filter((l) => l.sha256 === sha).length;
+      row.updatedAt = nowIso;
+      counts.refcountsRecomputed += 1;
+    }
+    writes.native += 1;
+    return { schema, ok: true, committed: true, recoveredChatId: payload.recoveredChatId, recoveredSnapshotId: snapshotId, counts };
+  }
+  return { store, invoke, chats, snapshots, assets, links, writes, reloads, nativePayloads, casKey };
 }
 
 check('J.0 export/share contract exists', () => {
@@ -1782,31 +1921,17 @@ checkAsync('M09 P0.3c ZIP staged hash and length mismatches both fail closed', a
   }
 });
 
-checkAsync('M08 portable ZIP reaches the shared import-as-new core; failures and dry-run write nothing', async () => {
+checkAsync('M08 portable ZIP reaches the shared import-as-new core (asset-bearing: asset-restoration path, imported-asset-complete); failures and dry-run write nothing', async () => {
   const mem = createBehaviorFs();
   const pkg = makeBehaviorPackage({ schemaVersion: 2, chatId: 'm08_zip_import', withAsset: true });
   const sourceRoot = installBehaviorPackage(mem, pkg);
-  const chats = new Map();
-  const snapshots = new Map();
-  const writes = { chats: 0, snapshots: 0 };
-  const store = {
-    chats: {
-      get: async (id) => chats.get(id) || null,
-      upsert: async (patch) => { writes.chats += 1; chats.set(patch.chatId, JSON.parse(JSON.stringify(patch))); return patch; },
-    },
-    snapshots: {
-      get: async (id) => snapshots.has(id) ? { snapshot: snapshots.get(id) } : null,
-      listByChat: async (chatId) => [...snapshots.values()].filter((row) => row.chatId === chatId),
-      create: async (patch) => {
-        writes.snapshots += 1;
-        const row = { ...JSON.parse(JSON.stringify(patch)), snapshotId: `m08-created-${writes.snapshots}` };
-        snapshots.set(row.snapshotId, row);
-        return { snapshot: row };
-      },
-    },
-    assets: { listBySnapshot: async () => [] },
-  };
-  const runtime = loadBehaviorRuntime(mem, store);
+  /* T02: the package carries an asset, so the import side models the current
+   * production dependencies (real asset CAS over the behavior fs, asset
+   * registry surface, bounded native recovery-transaction double). */
+  const model = createAssetRecoveryModel(mem);
+  const { store, chats, snapshots, writes } = model;
+  const runtime = loadBehaviorRuntime(mem, store, undefined, { assetRestoration: true, invoke: model.invoke });
+  assert.equal(typeof runtime.H2O.Studio.ingestion.assetCas.putAssetBytes, 'function', 'the REAL asset CAS module is installed for the import runtime');
   const exported = await runtime.H2O.Studio.archiveExporter.exportVerifiedPackageZip({
     packagePath: sourceRoot,
     exportName: 'm08-roundtrip.h2ochat.zip',
@@ -1815,10 +1940,12 @@ checkAsync('M08 portable ZIP reaches the shared import-as-new core; failures and
   const zipBytes = mem.files.get(mem.key(mem.HOME, 'H2O Studio Exports/m08-roundtrip.h2ochat.zip'));
   const zipBefore = Buffer.from(zipBytes);
   const importer = runtime.H2O.Studio.archiveImporter;
+  const noWrites = { chats: 0, snapshots: 0, cas: 0, native: 0 };
 
   const dry = await importer.dryRunImportZip({ zipBytes, sourceName: 'm08-roundtrip.h2ochat.zip' });
   assert.equal(dry.decision, 'import-ready', dry.reason);
-  assert.deepEqual(writes, { chats: 0, snapshots: 0 }, 'ZIP dry-run mutated the store');
+  assert.equal(dry.assets && dry.assets.requiredAssetCount, 1, 'dry-run reports the trusted asset count');
+  assert.deepEqual(writes, noWrites, 'ZIP dry-run mutated the store');
   const decodedForStored = await runtime.H2O.Studio.ingestion.savedChatPortableZip.readPortablePackageZip(zipBytes);
   const storedZip = await runtime.H2O.Studio.ingestion.savedChatPortableZip.buildPortableZip(
     decodedForStored.entries.map((entry) => ({ name: `${decodedForStored.packageDirName}/${entry.name}`, bytes: entry.bytes })),
@@ -1826,10 +1953,19 @@ checkAsync('M08 portable ZIP reaches the shared import-as-new core; failures and
   );
   const storedDry = await importer.dryRunImportZip({ zipBytes: storedZip, sourceName: 'm08-stored.h2ochat.zip' });
   assert.equal(storedDry.decision, 'import-ready', storedDry.reason);
-  assert.deepEqual(writes, { chats: 0, snapshots: 0 }, 'method-0 compatibility dry-run mutated the store');
+  assert.deepEqual(writes, noWrites, 'method-0 compatibility dry-run mutated the store');
   const imported = await importer.importVerifiedZip({ zipBytes, sourceName: 'm08-roundtrip.h2ochat.zip', mode: 'import-as-new' });
   assert.equal(imported.status, 'imported', imported.reason);
-  assert.deepEqual(writes, { chats: 1, snapshots: 1 });
+  /* the asset-bearing path: CAS ensure → ONE native commit; the legacy
+   * chats.upsert / snapshots.create adapters are never used for it */
+  assert.equal(imported.assets && imported.assets.result, 'imported-asset-complete', 'CURRENT truthful success state for an asset-bearing portable package');
+  assert.equal(imported.assets.requiredCount, 1);
+  assert.equal(imported.assets.linkCount, 1);
+  assert.deepEqual([].concat(imported.assets.materialized), [pkg.assetSha]);
+  assert.deepEqual([].concat(imported.assets.proofProblems), []);
+  const afterImport = { chats: 0, snapshots: 0, cas: 1, native: 1 };
+  assert.deepEqual(writes, afterImport, 'exactly one CAS materialization and one native recovery commit; no legacy adapter write');
+  assert.deepEqual(model.reloads, { chats: 1, snapshots: 1, assets: 1 }, 'affected store views reloaded after the native commit');
   assert.notEqual(imported.recovered.newChatId, pkg.chatId);
   assert.notEqual(imported.recovered.newSnapshotId, pkg.snapshotId);
   const recoveredChat = chats.get(imported.recovered.newChatId);
@@ -1838,13 +1974,24 @@ checkAsync('M08 portable ZIP reaches the shared import-as-new core; failures and
   assert.equal(recoveredChat.meta.recovered.portableZipName, 'm08-roundtrip.h2ochat.zip');
   assert.equal(recoveredChat.meta.recovered.packagePath, undefined, 'ZIP provenance must not invent an archive path');
   assert.equal(recoveredSnapshot.turns.length, pkg.snapshot.messages.length);
+  /* registry / link / CAS state of the restored asset */
+  const nativePayload = model.nativePayloads[0];
+  assert.equal(nativePayload.originalChatId, pkg.chatId);
+  assert.equal(nativePayload.originalSnapshotId, pkg.snapshotId);
+  assert.deepEqual(nativePayload.links.map((l) => `${l.turnIdx}:${l.sha256}`), [`0:${pkg.assetSha}`]);
+  assert.deepEqual(model.links.map((l) => [l.snapshotId, l.turnIdx, l.sha256]), [[imported.recovered.newSnapshotId, 0, pkg.assetSha]]);
+  assert.equal(model.assets.get(pkg.assetSha).refcount, 1);
+  assert.equal(model.assets.get(pkg.assetSha).byteSize, pkg.assetBytes.length);
+  const casObject = mem.files.get(mem.key(mem.APP, model.casKey(pkg.assetSha.replace(/^sha256-/, ''))));
+  assert.ok(casObject, 'the verified asset was materialized into the destination CAS');
+  assert.deepEqual(casObject, pkg.assetBytes, 'destination CAS holds the exact trusted bytes');
   assert.deepEqual(mem.files.get(mem.key(mem.HOME, 'H2O Studio Exports/m08-roundtrip.h2ochat.zip')), zipBefore, 'source ZIP changed during import');
 
   const corrupt = Uint8Array.from(zipBytes);
   corrupt[0] ^= 0xff;
   const refused = await importer.importVerifiedZip({ zipBytes: corrupt, sourceName: 'bad.h2ochat.zip' });
   assert.equal(refused.status, 'rejected');
-  assert.deepEqual(writes, { chats: 1, snapshots: 1 }, 'bad ZIP caused persistent writes');
+  assert.deepEqual(writes, afterImport, 'bad ZIP caused persistent writes');
 
   const badManifest = JSON.parse(pkg.manifestText);
   badManifest.contentHash = `sha256-${'0'.repeat(64)}`;
@@ -1860,7 +2007,7 @@ checkAsync('M08 portable ZIP reaches the shared import-as-new core; failures and
   const invalidPackageZip = await runtime.H2O.Studio.ingestion.savedChatPortableZip.buildPortableZip(packageEntries);
   const packageRefused = await importer.importVerifiedZip({ zipBytes: invalidPackageZip, sourceName: 'bad-package.h2ochat.zip' });
   assert.equal(packageRefused.status, 'rejected');
-  assert.deepEqual(writes, { chats: 1, snapshots: 1 }, 'corrupt contained package caused persistent writes');
+  assert.deepEqual(writes, afterImport, 'corrupt contained package caused persistent writes');
 
   const corruptAssetEntries = validPackageEntries.map((entry) => ({ name: entry.name, bytes: Buffer.from(entry.bytes) }));
   const corruptAsset = corruptAssetEntries.find((entry) => entry.name.endsWith(pkg.assetPath));
@@ -1868,7 +2015,7 @@ checkAsync('M08 portable ZIP reaches the shared import-as-new core; failures and
   const corruptAssetZip = await runtime.H2O.Studio.ingestion.savedChatPortableZip.buildPortableZip(corruptAssetEntries);
   const assetRefused = await importer.importVerifiedZip({ zipBytes: corruptAssetZip, sourceName: 'bad-asset.h2ochat.zip' });
   assert.equal(assetRefused.status, 'rejected');
-  assert.deepEqual(writes, { chats: 1, snapshots: 1 }, 'corrupt contained asset caused persistent writes');
+  assert.deepEqual(writes, afterImport, 'corrupt contained asset caused persistent writes');
 
   const corruptRendererEntries = validPackageEntries.map((entry) => ({ name: entry.name, bytes: Buffer.from(entry.bytes) }));
   const corruptRenderer = corruptRendererEntries.find((entry) => entry.name.endsWith('/chat.md'));
@@ -1876,7 +2023,8 @@ checkAsync('M08 portable ZIP reaches the shared import-as-new core; failures and
   const corruptRendererZip = await runtime.H2O.Studio.ingestion.savedChatPortableZip.buildPortableZip(corruptRendererEntries);
   const rendererRefused = await importer.importVerifiedZip({ zipBytes: corruptRendererZip, sourceName: 'bad-renderer.h2ochat.zip' });
   assert.equal(rendererRefused.status, 'rejected');
-  assert.deepEqual(writes, { chats: 1, snapshots: 1 }, 'corrupt contained renderer caused persistent writes');
+  assert.deepEqual(writes, afterImport, 'corrupt contained renderer caused persistent writes');
+  assert.equal(model.nativePayloads.length, 1, 'no refusal reached the native recovery transaction');
 });
 
 checkAsync('M08 hostile ZIP structure, paths and resource declarations fail closed', async () => {

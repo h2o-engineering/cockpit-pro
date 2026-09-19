@@ -149,6 +149,9 @@ const state = {
   /* S4C: the currently mounted Reader render's { root, semanticIndex, decorationContributions } (read-only bridge; disposed + cleared on unmount). */
   currentReaderRender: null,
   currentReaderNavigationTarget: null,
+  /* M02 T3: private, page-lifetime Reader continuity ledger. The controller
+   * retains only frozen value records; it is never exposed on H2O.Studio. */
+  readerResume: null,
   /* M04 P2 T4: the one application-lifetime Appearance subscription that refreshes an open Reader when the presentation preference changes (unsubscribe handle only; never DOM). */
   readerPresentationUnsubscribe: null,
   titleStateByChat: {},
@@ -403,6 +406,7 @@ try {
 hydrateFolderOperatorModeFromStore().catch(() => {});
 
 function studioHostUnmount(reason = "studio:unmount") {
+  try { state.readerResume?.remember?.(reason); } catch {}
   state.currentReaderEditOverrides = null;
   /* S4C slice B: the render's decorations are disposed BEFORE the binding is
    * forgotten; a cleanup error is diagnosed and never blocks the teardown. */
@@ -450,6 +454,255 @@ function getReaderSemanticIndex(root){
   if (root !== undefined && root !== current.root) return null;
   return current.semanticIndex;
 }
+
+/* M02 T3: private current-session Reader resume continuity. The ledger is
+ * deliberately rooted in Studio page state, not a public namespace or durable
+ * store. Every observation is copied from the current Renderer Semantic Index;
+ * no DOM/index/render object enters a record. */
+function createReaderResumeController(){
+  const CAPACITY = 16;
+  const TOMBSTONE_CAPACITY = 16;
+  const READING_LINE_OFFSET_PX = 120;
+  const PRE_LEAVE_REASONS = new Set([
+    "studio:route-scope:list",
+    "studio:route-scope:library",
+    "studio:route-scope:migrate",
+    "studio:route-scope:settings",
+  ]);
+  const ledger = new Map();
+  const tombstones = new Map();
+
+  const text = value => String(value == null ? "" : value).trim();
+  const finite = value => Number.isFinite(Number(value));
+  const clampFraction = value => Math.max(0, Math.min(0.9999, Number(value) || 0));
+  const freezeValue = value => {
+    if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+    for (const child of Object.values(value)) freezeValue(child);
+    return Object.freeze(value);
+  };
+
+  function currentBinding(){
+    const current = state.currentReaderRender;
+    const root = current?.root;
+    const index = current?.semanticIndex;
+    const reader = document.getElementById("viewReader");
+    if (state.activeRoute !== "reader"
+      || !root?.isConnected
+      || !reader?.contains(root)
+      || W.H2O?.studioHost?.getReaderRoot?.() !== root
+      || !index
+      || typeof index.getConversation !== "function"
+      || typeof index.turns !== "function") return null;
+    const conversation = index.getConversation();
+    const chatId = text(conversation?.sourceRef?.chatId);
+    const snapshotId = text(conversation?.sourceRef?.snapshotId);
+    const turns = index.turns();
+    if (!chatId || !snapshotId || !Array.isArray(turns)) return null;
+    return { root, index, conversation, chatId, snapshotId, turns };
+  }
+
+  function turnRef(binding, turn){
+    if (!turn || !binding.turns.includes(turn)) return null;
+    const message = binding.index.getMessage?.(turn.messageKey);
+    if (!message || message.turnKey !== turn.projectionKey) return null;
+    const projectionKey = text(turn.projectionKey);
+    const role = text(turn.role);
+    const ordinal = Number(turn.ordinal);
+    const turnNo = Number(turn.turnNo);
+    if (!projectionKey || !role || !Number.isInteger(ordinal) || ordinal < 0 || !finite(turnNo) || turnNo <= 0) return null;
+    return freezeValue({
+      projectionKey,
+      ordinal,
+      turnNo,
+      role,
+      messageId: text(message.sourceRef?.messageId) || null,
+      turnId: text(turn.sourceRef?.turnId || message.sourceRef?.turnId) || null,
+    });
+  }
+
+  function selectedRef(binding){
+    const target = state.currentReaderNavigationTarget;
+    if (target?.currentRendererRoot !== binding.root) return null;
+    const turn = binding.index.getTurn?.(target.projectionKey);
+    if (!turn?.target?.isConnected || !binding.root.contains(turn.target)) return null;
+    return turnRef(binding, turn);
+  }
+
+  function scrollMetrics(binding){
+    const scroller = binding.root.closest?.(".wbMain");
+    if (!scroller?.isConnected || typeof scroller.getBoundingClientRect !== "function") return null;
+    const bounds = scroller.getBoundingClientRect();
+    const style = W.getComputedStyle?.(scroller);
+    const paddingTop = Number.parseFloat(style?.paddingTop || "0") || 0;
+    const paddingBottom = Number.parseFloat(style?.paddingBottom || "0") || 0;
+    const contentTop = bounds.top + (Number(scroller.clientTop) || 0) + paddingTop;
+    const contentBottom = bounds.top + (Number(scroller.clientTop) || 0)
+      + (Number(scroller.clientHeight) || 0) - paddingBottom;
+    if (!finite(contentTop) || !finite(contentBottom) || contentBottom <= contentTop) return null;
+    return { scroller, contentTop, contentBottom, readingLine: contentTop + READING_LINE_OFFSET_PX };
+  }
+
+  function turnGeometry(binding, turn){
+    if (!turn?.target?.isConnected || !binding.root.contains(turn.target)) return null;
+    const geometry = binding.index.getGeometry?.(turn.projectionKey);
+    if (!geometry
+      || geometry.coordinateSpace !== "viewport"
+      || !finite(geometry.top)
+      || !finite(geometry.bottom)
+      || !finite(geometry.height)
+      || !finite(geometry.width)
+      || Number(geometry.height) <= 0
+      || Number(geometry.width) <= 0) return null;
+    return geometry;
+  }
+
+  function visibleTurnGeometry(binding, turn, metrics){
+    const geometry = turnGeometry(binding, turn);
+    if (!geometry
+      || Number(geometry.bottom) <= metrics.contentTop
+      || Number(geometry.top) >= metrics.contentBottom) return null;
+    return geometry;
+  }
+
+  function viewportObservation(binding){
+    const metrics = scrollMetrics(binding);
+    if (!metrics) return null;
+    const visible = [];
+    for (const turn of binding.turns) {
+      const geometry = visibleTurnGeometry(binding, turn, metrics);
+      if (geometry) visible.push({ turn, geometry });
+    }
+    if (!visible.length) return null;
+    let anchor = null;
+    for (const row of visible) {
+      if (Number(row.geometry.top) <= metrics.readingLine) anchor = row;
+    }
+    if (!anchor) {
+      const ref = turnRef(binding, visible[0].turn);
+      return ref ? freezeValue({ ref, fraction: 0 }) : null;
+    }
+    const ref = turnRef(binding, anchor.turn);
+    if (!ref) return null;
+    return freezeValue({
+      ref,
+      fraction: clampFraction((metrics.readingLine - Number(anchor.geometry.top)) / Number(anchor.geometry.height)),
+    });
+  }
+
+  function capture(reason){
+    const normalizedReason = text(reason);
+    if (normalizedReason !== "studio:reader-replace" && !PRE_LEAVE_REASONS.has(normalizedReason)) return "NOT_CAPTURED";
+    const binding = currentBinding();
+    if (!binding || tombstones.has(binding.chatId)) return "NOT_CAPTURED";
+    const record = freezeValue({
+      content: { chatId: binding.chatId, snapshotId: binding.snapshotId },
+      render: { renderMode: text(binding.index.renderMode), turnCount: binding.turns.length },
+      selection: selectedRef(binding),
+      viewport: viewportObservation(binding),
+    });
+    ledger.delete(binding.chatId);
+    ledger.set(binding.chatId, record);
+    while (ledger.size > CAPACITY) ledger.delete(ledger.keys().next().value);
+    return "CAPTURED";
+  }
+
+  function resolve(record, ref, binding){
+    if (!record || !ref || record.content?.chatId !== binding.chatId) return null;
+    const storedMessageId = text(ref.messageId);
+    const storedTurnId = text(ref.turnId);
+    const storedRole = text(ref.role);
+    if (storedMessageId || storedTurnId) {
+      const primary = storedMessageId ? "messageId" : "turnId";
+      const wanted = storedMessageId || storedTurnId;
+      let candidates = binding.turns.filter(turn => {
+        const current = turnRef(binding, turn);
+        if (!current || current.role !== storedRole || text(current[primary]) !== wanted) return false;
+        if (storedMessageId && storedTurnId && current.messageId && current.turnId && current.turnId !== storedTurnId) return false;
+        return true;
+      });
+      if (candidates.length > 1) {
+        if (record.content?.snapshotId !== binding.snapshotId
+          || record.render?.renderMode !== text(binding.index.renderMode)) return null;
+        candidates = candidates.filter(turn => turn.projectionKey === ref.projectionKey);
+      }
+      return candidates.length === 1 ? { outcome: "RESTORED_IDENTITY", turn: candidates[0] } : null;
+    }
+    if (record.content?.snapshotId !== binding.snapshotId
+      || record.render?.renderMode !== text(binding.index.renderMode)
+      || record.render?.turnCount !== binding.turns.length
+      || !Number.isInteger(ref.ordinal)) return null;
+    const turn = binding.turns[ref.ordinal];
+    const current = turnRef(binding, turn);
+    if (!current
+      || current.messageId
+      || current.turnId
+      || current.projectionKey !== ref.projectionKey
+      || current.role !== storedRole
+      || current.turnNo !== ref.turnNo) return null;
+    return { outcome: "RESTORED_STRUCTURAL", turn };
+  }
+
+  function clearSelection(binding){
+    for (const turn of binding.root.querySelectorAll?.("[data-turn]") || []) turn.classList.remove("is-ribbon-selected");
+    state.currentReaderNavigationTarget = null;
+    const ribbon = W.H2O?.Studio?.ribbon;
+    if (typeof ribbon?.setContext === "function") {
+      ribbon.setContext(Object.assign({}, ribbon.getContext?.() || {}, {
+        selectedMessageId: null,
+        selectedTurnIdx: null,
+      }));
+    }
+  }
+
+  function restoreViewport(record, binding){
+    const resolved = resolve(record, record?.viewport?.ref, binding);
+    if (!resolved) return "NOT_RESTORED";
+    const metrics = scrollMetrics(binding);
+    if (!metrics) return "NOT_RESTORED";
+    const geometry = turnGeometry(binding, resolved.turn);
+    if (!geometry) return "NOT_RESTORED";
+    const fraction = clampFraction(record.viewport.fraction);
+    metrics.scroller.scrollTo({
+      top: Number(metrics.scroller.scrollTop || 0)
+        + Number(geometry.top) + Number(geometry.height) * fraction - metrics.readingLine,
+      left: Number(metrics.scroller.scrollLeft || 0),
+      behavior: "auto",
+    });
+    return resolved.outcome;
+  }
+
+  function restore(){
+    const binding = currentBinding();
+    if (!binding) return freezeValue({ selection: "NOT_RESTORED", viewport: "NOT_RESTORED" });
+    tombstones.delete(binding.chatId);
+    const record = ledger.get(binding.chatId) || null;
+    const selection = resolve(record, record?.selection, binding);
+    let selectionOutcome = "NOT_RESTORED";
+    if (selection) {
+      const allTurns = Array.from(binding.root.querySelectorAll("[data-turn]"));
+      if (publishReaderTurnSelection(binding.root, selection.turn, allTurns)) selectionOutcome = selection.outcome;
+      else clearSelection(binding);
+    } else {
+      clearSelection(binding);
+    }
+    const viewportOutcome = restoreViewport(record, binding);
+    return freezeValue({ selection: selectionOutcome, viewport: viewportOutcome });
+  }
+
+  function forget(chatKey){
+    const key = text(chatKey);
+    if (!key) return false;
+    ledger.delete(key);
+    tombstones.delete(key);
+    tombstones.set(key, true);
+    while (tombstones.size > TOMBSTONE_CAPACITY) tombstones.delete(tombstones.keys().next().value);
+    return true;
+  }
+
+  return Object.freeze({ remember: capture, restore, forget });
+}
+
+state.readerResume = createReaderResumeController();
 
 /* M01: navigation targets are turn projection keys scoped to one current
  * render. The Renderer index remains the only transcript/identity authority. */
@@ -922,6 +1175,10 @@ async function executeDeleteChat(chatId, snapshotId, articleEl){
       deleted = true;
     } catch {
       try { await callArchive("deleteSnapshot", { snapshotId, chatId }); deleted = true; } catch {}
+    }
+
+    if (deleted) {
+      try { state.readerResume?.forget?.(chatId); } catch {}
     }
 
     // Remove the snapshot's canonical edit-overlay record and sync projection.
@@ -1857,6 +2114,9 @@ function forgetPublicationTarget(chatId){
 }
 
 function setStudioRouteScope(routeName, opts = {}){
+  try {
+    state.readerResume?.remember?.(`studio:route-scope:${normalizeStudioRouteScope(routeName)}`);
+  } catch {}
   state.activeRoute = normalizeStudioRouteScope(routeName);
   if (opts && opts.clearReader) state.currentReaderSnapshot = null;
   syncDesktopRibbonHiddenScope(state.activeRoute);
@@ -2029,7 +2289,15 @@ async function loadSnapshotFromStoresDesktop(snapshotId){
   try {
     const raw = await snapStore.get(id);
     if (!raw) return null;
-    return projectSqliteSnapshotToCanonical(raw);
+    const canonical = projectSqliteSnapshotToCanonical(raw);
+    // Saved-Chat asset restoration (L-STORAGE-SAVED-CHATS T02, EXT-SAVED-CHAT-T02-STUDIO-JS-LEASE):
+    // ephemeral hydration of a RECOVERED snapshot's exact package asset refs on this
+    // projected copy only. The helper owns the gate (recovered provenance + persisted
+    // links + per-turn assetRefs), is total, and is never persisted; absent or failing,
+    // the canonical projection is returned unchanged.
+    const hydrate = W.H2O?.Studio?.archiveImporter?.hydrateRecoveredSnapshotProjectionV1;
+    if (!canonical || typeof hydrate !== 'function') return canonical;
+    try { return (await hydrate(canonical)) || canonical; } catch { return canonical; }
   } catch (e) {
     try { console.warn('[H2O.Studio] loadSnapshotFromStoresDesktop failed', e); } catch {}
     return null;
@@ -5579,6 +5847,10 @@ async function renderReader(snapshotId){
     setActiveSidebarChat(state.selectedSnapshotId);
     syncSelectionControls();
     applyUiState();
+    if (token !== state.renderToken) return;
+    if (!canReuseMountedReader) {
+      try { state.readerResume?.restore?.(); } catch {}
+    }
     /* D3.2.2: the snapshot loaded asynchronously after the initial
      * hashchange, so notify the Dock shell to re-render the active tab
      * with the now-resolved chatId. applyUiState() above already
@@ -6536,6 +6808,26 @@ async function renderRoute(opts = {}){
         const __hasSnap = !!(__snap && typeof __snap === 'object' && __snap.snapshotId);
         const __meta = (__hasSnap && __snap.meta && typeof __snap.meta === 'object') ? __snap.meta : null;
         const __title = __hasSnap ? String((__meta && __meta.title) || __snap.chatId || '') : null;
+        let __selectedMessageId = null;
+        let __selectedTurnIdx = null;
+        if (__isRead && __hasSnap) {
+          const __current = state.currentReaderRender;
+          const __target = state.currentReaderNavigationTarget;
+          const __root = __current?.root;
+          const __index = __current?.semanticIndex;
+          const __turn = (__target?.currentRendererRoot === __root)
+            ? __index?.getTurn?.(__target.projectionKey)
+            : null;
+          const __message = __turn ? __index?.getMessage?.(__turn.messageKey) : null;
+          const __turns = (__root?.isConnected && __turn?.target?.isConnected && __root.contains(__turn.target))
+            ? Array.from(__root.querySelectorAll('[data-turn]'))
+            : [];
+          const __turnPosition = __turns.indexOf(__turn?.target) + 1;
+          if (__turnPosition > 0 && __message?.turnKey === __turn.projectionKey) {
+            __selectedTurnIdx = __turnPosition;
+            __selectedMessageId = String(__message.sourceRef?.messageId || '').trim() || null;
+          }
+        }
         __ribbon.setContext({
           route: __r && __r.name ? String(__r.name) : null,
           chatType: (__isRead && __hasSnap) ? 'saved' : null,
@@ -6546,6 +6838,8 @@ async function renderRoute(opts = {}){
           title: __title || null,
           originalUrl: null,
           readOnly: false,
+          selectedMessageId: __selectedMessageId,
+          selectedTurnIdx: __selectedTurnIdx,
         });
       }
     } catch (_) { /* swallow — ribbon sync must never break routing */ }
