@@ -45,6 +45,24 @@
     } catch (_) { /* preserve the caller-supplied path below */ }
     return raw;
   }
+  /* C5-C — loaded-runtime identity. One Promise-based flow on every adapter;
+   * the fallback reports every fact as unavailable and never synthesizes an
+   * id, name, version or Desktop build identity. */
+  var LOADED_RUNTIME_IDENTITY_SCHEMA = 'h2o.studio.platform.loaded-runtime-identity.v1';
+  function loadedRuntimeIdentityUnavailable() {
+    return Promise.resolve(Object.freeze({
+      schema: LOADED_RUNTIME_IDENTITY_SCHEMA,
+      adapter: current && current.name ? current.name : 'fallback',
+      available: false,
+      reason: 'runtime-identity-unavailable',
+      runtimeId: null,
+      displayName: null,
+      version: null,
+      versionName: null,
+      desktopBuildIdentity: null,
+      desktopBuildIdentityError: null,
+    }));
+  }
   function inferenceUnavailableStatus() {
     return {
       ok: true,
@@ -130,8 +148,14 @@
     runtime: {
       resolveAsset: resolveAssetAgainstDocument,
       openUrl: unavailableAsync('runtime.openUrl'),
+      getLoadedRuntimeIdentity: loadedRuntimeIdentityUnavailable,
     },
-    files: { available: false },
+    /* C5-C — files.importFile is always present on the surface; without an
+     * adapter it rejects (unavailable is an error, cancellation is not). */
+    files: {
+      available: false,
+      importFile: unavailableAsync('files.importFile'),
+    },
     capture: { available: false },
     auth: { available: false },
     inference: {
@@ -164,6 +188,10 @@
     current = Object.assign({}, fallback, impl);
     current.env = Object.assign({}, fallback.env, impl.env || {});
     current.runtime = Object.assign({}, fallback.runtime, impl.runtime || {});
+    /* C5-C — the files contract is normalized like runtime so importFile is
+     * always callable: an adapter without its own importFile keeps the
+     * fail-closed rejecter while its available/exportBlob facts win. */
+    current.files = Object.assign({}, fallback.files, impl.files || {});
     /* STAB-03 D1 compatibility normalization. Older Tauri adapters expose
      * openUrl at the adapter top level; promote that existing capability into
      * the canonical runtime provider until caller migration retires the alias. */

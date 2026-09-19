@@ -4,11 +4,16 @@
  * renders only when the Tauri adapter positively identifies Desktop, keeps no
  * persistent state, and never substitutes extension metadata for a Desktop
  * checkpoint.
+ *
+ * Transport (C5-C): the governed payload arrives through
+ * `H2O.Studio.platform.runtime.getLoadedRuntimeIdentity().desktopBuildIdentity`.
+ * Host Integration owns the native command invocation; this panel only
+ * validates the returned schema for display and never resolves Tauri
+ * internals itself.
  */
 (function installDesktopBuildIdentityPanel(global) {
   'use strict';
 
-  const COMMAND = 'h2o_studio_desktop_build_identity';
   const SCHEMA = 'h2o.studio.desktop-build-identity.v1';
   const UNSTAMPED = 'UNSTAMPED';
   let identityPromise = null;
@@ -17,13 +22,23 @@
     return global.H2O?.Studio?.platform?.env?.isTauri === true;
   }
 
-  function resolveInvoke() {
-    const internals = global.__TAURI_INTERNALS__;
-    if (internals && typeof internals.invoke === 'function') return internals.invoke.bind(internals);
-    const tauri = global.__TAURI__;
-    if (tauri?.core && typeof tauri.core.invoke === 'function') return tauri.core.invoke.bind(tauri.core);
-    if (tauri && typeof tauri.invoke === 'function') return tauri.invoke.bind(tauri);
+  function resolveLoadedRuntimeIdentity() {
+    const runtime = global.H2O?.Studio?.platform?.runtime;
+    if (runtime && typeof runtime.getLoadedRuntimeIdentity === 'function') {
+      return () => runtime.getLoadedRuntimeIdentity();
+    }
     return null;
+  }
+
+  function desktopBuildIdentityFrom(loaded) {
+    const payload = loaded && typeof loaded === 'object' ? loaded.desktopBuildIdentity : null;
+    if (!payload || typeof payload !== 'object') {
+      const detail = loaded && typeof loaded === 'object'
+        ? (loaded.desktopBuildIdentityError || loaded.reason)
+        : '';
+      throw new Error(detail ? String(detail) : 'desktop-build-identity-unavailable');
+    }
+    return payload;
   }
 
   function escapeHtml(value) {
@@ -61,9 +76,12 @@
   function load() {
     if (!isDesktop()) return Promise.resolve(null);
     if (identityPromise) return identityPromise;
-    const invoke = resolveInvoke();
-    if (!invoke) return Promise.reject(new Error('desktop-build-identity-runtime-unavailable'));
-    const attempt = Promise.resolve(invoke(COMMAND)).then(normalizeIdentity);
+    const getLoadedRuntimeIdentity = resolveLoadedRuntimeIdentity();
+    if (!getLoadedRuntimeIdentity) return Promise.reject(new Error('desktop-build-identity-runtime-unavailable'));
+    const attempt = Promise.resolve()
+      .then(getLoadedRuntimeIdentity)
+      .then(desktopBuildIdentityFrom)
+      .then(normalizeIdentity);
     const cachedAttempt = attempt.catch((error) => {
       if (identityPromise === cachedAttempt) identityPromise = null;
       throw error;

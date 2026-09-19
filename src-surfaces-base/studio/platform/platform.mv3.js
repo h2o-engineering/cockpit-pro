@@ -284,6 +284,45 @@
     return Promise.reject(new Error('platform.runtime.openUrl: MV3/browser open primitive unavailable'));
   }
 
+  /* ───────────────────────── runtime identity (C5-C) ─────────────────
+   * Loaded-runtime facts only: the extension id and the loaded manifest's
+   * name / version / version_name, read here so feature code never touches
+   * chrome.runtime. version_name is passed through as an opaque loaded
+   * fact. Nothing is derived from these strings — build channel, variant,
+   * Lane, BTP role, source commit and checkpoint are Build & Delivery facts
+   * an MV3 page cannot know, so they are simply absent from the record. */
+  var LOADED_RUNTIME_IDENTITY_SCHEMA = 'h2o.studio.platform.loaded-runtime-identity.v1';
+
+  function loadedFact(value) {
+    return (typeof value === 'string' && value !== '') ? value : null;
+  }
+
+  function runtimeGetLoadedRuntimeIdentity() {
+    return new Promise(function (resolve) {
+      var runtimeId = null;
+      var manifest = null;
+      if (hasRuntime) {
+        try { runtimeId = loadedFact(chromeApi.runtime.id); } catch (_) { runtimeId = null; }
+        try {
+          manifest = (typeof chromeApi.runtime.getManifest === 'function') ? chromeApi.runtime.getManifest() : null;
+        } catch (_) { manifest = null; }
+      }
+      if (!manifest || typeof manifest !== 'object') manifest = {};
+      resolve(Object.freeze({
+        schema: LOADED_RUNTIME_IDENTITY_SCHEMA,
+        adapter: ADAPTER_NAME,
+        available: runtimeId !== null,
+        reason: runtimeId !== null ? null : 'chrome-runtime-unavailable',
+        runtimeId: runtimeId,
+        displayName: loadedFact(manifest.name),
+        version: loadedFact(manifest.version),
+        versionName: loadedFact(manifest.version_name),
+        desktopBuildIdentity: null,
+        desktopBuildIdentityError: null,
+      }));
+    });
+  }
+
   /* ───────────────────────── files (Phase 3a) ─────────────────────────
    * exportBlob downloads a Blob via the standard browser Blob +
    * URL.createObjectURL + <a download> dance. Mirrors the long-standing
@@ -340,12 +379,112 @@
     });
   }
 
+  /* ───────────────────────── files.importFile (C5-C) ─────────────────
+   * One UTF-8 text file, picked through a transient hidden <input type="file">
+   * and read here with the browser File API. The caller receives the
+   * already-read text plus host-neutral facts; the browser File never leaves
+   * this adapter. Cancellation — the picker's `cancel` event, or a change
+   * event that carries no file — resolves null and is not an error. JSON
+   * parsing, bundle/schema recognition and every migration decision stay
+   * with the caller (Saved Chats / C5-B); this seam only delivers text. */
+  var LOCAL_FILE_SCHEMA = 'h2o.studio.platform.local-file.v1';
+
+  function utf8ByteLength(text) {
+    try {
+      if (typeof global.TextEncoder === 'function') return new global.TextEncoder().encode(text).length;
+    } catch (_) { /* fall through */ }
+    try { return unescape(encodeURIComponent(text)).length; } catch (_) { return text.length; }
+  }
+
+  function normalizeLocalFileRecord(name, size, type, text) {
+    var s = String(text == null ? '' : text);
+    var bytes = (typeof size === 'number' && isFinite(size) && size >= 0) ? Math.floor(size) : utf8ByteLength(s);
+    return Object.freeze({
+      schema: LOCAL_FILE_SCHEMA,
+      name: String(name == null ? '' : name),
+      size: bytes,
+      type: String(type == null ? '' : type),
+      text: s,
+    });
+  }
+
+  function importAcceptList(opts) {
+    var out = [];
+    function push(list, prefix) {
+      if (!Array.isArray(list)) return;
+      for (var i = 0; i < list.length; i += 1) {
+        var raw = String(list[i] == null ? '' : list[i]).trim();
+        if (!raw) continue;
+        out.push(prefix ? prefix + raw.replace(/^\.+/, '') : raw);
+      }
+    }
+    push(opts.mimeTypes, '');
+    push(opts.extensions, '.');
+    return out.join(',');
+  }
+
+  function readFileText(file) {
+    if (typeof file.text === 'function') {
+      return Promise.resolve(file.text());
+    }
+    return new Promise(function (resolve, reject) {
+      if (typeof global.FileReader !== 'function') {
+        return reject(new Error('platform.files.importFile: FileReader unavailable'));
+      }
+      var reader = new global.FileReader();
+      reader.onload = function () { resolve(String(reader.result == null ? '' : reader.result)); };
+      reader.onerror = function () { reject(reader.error || new Error('platform.files.importFile: read failed')); };
+      reader.readAsText(file, 'utf-8');
+    });
+  }
+
+  function filesImportFile(opts) {
+    var options = (opts && typeof opts === 'object') ? opts : {};
+    return new Promise(function (resolve, reject) {
+      var doc = global.document;
+      if (!doc || typeof doc.createElement !== 'function' || !doc.body) {
+        return reject(new Error('platform.files.importFile: document unavailable'));
+      }
+      var input = doc.createElement('input');
+      input.type = 'file';
+      input.multiple = false;
+      var accept = importAcceptList(options);
+      if (accept) input.accept = accept;
+      input.setAttribute('data-h2o-platform-import-file', '1');
+      input.style.display = 'none';
+      var settled = false;
+      function finish(fn, value) {
+        if (settled) return;
+        settled = true;
+        try { if (input.parentNode) input.parentNode.removeChild(input); } catch (_) { /* ignore */ }
+        fn(value);
+      }
+      input.addEventListener('change', function () {
+        var file = input.files && input.files[0];
+        if (!file) return finish(resolve, null);
+        readFileText(file).then(function (text) {
+          finish(resolve, normalizeLocalFileRecord(file.name, file.size, file.type, text));
+        }, function (e) {
+          finish(reject, e);
+        });
+      });
+      input.addEventListener('cancel', function () { finish(resolve, null); });
+      try {
+        doc.body.appendChild(input);
+        input.click();
+      } catch (e) {
+        finish(reject, e);
+      }
+    });
+  }
+
   var files = {
     available: true,
     exportBlob: filesExportBlob,
-    /* exportJson / importJson / importFile remain placeholders for now.
-     * Add when a feature genuinely needs them — Phase 3a only requires
-     * exportBlob. */
+    importFile: filesImportFile,
+    /* exportJson / importJson remain placeholders. Add when a feature
+     * genuinely needs them — importJson in particular would carry Saved
+     * Chats parsing semantics that do not belong in this adapter. */
   };
 
   /* ───────────────────────── placeholders ───────────────────────── */
@@ -400,7 +539,11 @@
       onAnyChange: broadcastOnAnyChange,
     },
     storage: { get: storageGet, set: storageSet, remove: storageRemove },
-    runtime: { resolveAsset: runtimeResolveAsset, openUrl: runtimeOpenUrl },
+    runtime: {
+      resolveAsset: runtimeResolveAsset,
+      openUrl: runtimeOpenUrl,
+      getLoadedRuntimeIdentity: runtimeGetLoadedRuntimeIdentity,
+    },
     files: files,
     capture: capture,
     auth: auth,
