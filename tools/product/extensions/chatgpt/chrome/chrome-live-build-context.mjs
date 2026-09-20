@@ -157,8 +157,11 @@ export function createChromeLiveBuildContext() {
 // establish-governed-lane-browser-test-profiles-and-build-visibility, T03).
 //
 // Opt-in only: nothing is emitted unless H2O_EXT_BUILD_CHANNEL is set AND the
-// build is a development-profile Developer Controls family build. Production and
-// studio-launcher outputs therefore stay byte-identical (owner condition C4).
+// build is either a development-profile Developer Controls family build or the
+// exact studio-launcher variant. Production and other variants remain unchanged.
+// Studio Launcher opts in only through its canonical publisher so its governed
+// candidate can carry the same deterministic source/version identity without
+// changing Host behavior.
 // Every value derives from the deterministic source-revision stamp — never from
 // the wall clock — so version_name is a fact about the committed source:
 //   version_name = <DEV_VERSION>-<channel>+g<sha8>
@@ -200,7 +203,9 @@ export function resolveChromeBuildVisibility({
   sourceRevision = null,
 } = {}) {
   const channel = String(environment?.[CHROME_BUILD_VISIBILITY.CHANNEL_ENV] || "").trim();
-  const enabled = channel !== "" && manifestProfile === "development" && studioOnly !== true;
+  const studioLauncherIdentity = studioOnly === true && variant === "studio-launcher";
+  const developmentIdentity = manifestProfile === "development" && studioOnly !== true;
+  const enabled = channel !== "" && (developmentIdentity || studioLauncherIdentity);
   const disabled = Object.freeze({
     enabled: false,
     channel: null,

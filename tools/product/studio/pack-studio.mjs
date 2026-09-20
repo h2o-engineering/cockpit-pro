@@ -2243,6 +2243,32 @@ export function syncP02CoreModulesToOut(srcRoot, outDir) {
   return { sourceDir, outCoreDir, files: P02_CORE_SOURCE_FILES.slice() };
 }
 
+// Read-only byte comparison for the P02 Chrome adapter family, consistent with
+// the other mapped comparison helpers. Publisher validation uses this to prove
+// that every recognized staged path came from the existing canonical mapping;
+// this helper does not change mapping membership or copy behavior.
+export function compareP02ChromeAdaptersToSource(srcRoot, outDir) {
+  const sourceDir = p02ChromeAdapterSourceDir(srcRoot);
+  const outAdapterDir = p02ChromeAdapterOutDir(outDir);
+  const files = P02_CHROME_ADAPTER_SOURCE_FILES.map((name) => {
+    const sourcePath = path.join(sourceDir, name);
+    const outPath = path.join(outAdapterDir, name);
+    const sourceExists = fileExists(sourcePath);
+    const outExists = fileExists(outPath);
+    return {
+      name,
+      sourceExists,
+      outExists,
+      equal: sourceExists && outExists &&
+        fs.readFileSync(sourcePath).equals(fs.readFileSync(outPath)),
+    };
+  });
+  return {
+    files,
+    matches: files.every((item) => item.sourceExists && item.outExists && item.equal),
+  };
+}
+
 export function compareP02CoreModulesToSource(srcRoot, outDir) {
   const sourceDir = p02CoreSourceDir(srcRoot);
   const outCoreDir = p02CoreOutDir(outDir);

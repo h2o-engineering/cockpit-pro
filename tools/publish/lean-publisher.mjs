@@ -27,7 +27,18 @@ import { deriveSharedAnchor } from "./canonical-delivery-lib.mjs";
 import { getExtensionId } from "../product/extensions/chatgpt/chrome/chrome-extension-keys.mjs";
 import {
   ARCHIVE_WORKBENCH_OUT_FILES,
+  ITEM9_BROWSER_ADAPTER_OUT_REL,
+  ITEM9_BROWSER_ADAPTER_OUT_FILES,
+  P02_CORE_OUT_REL,
+  P02_CORE_SOURCE_FILES,
+  P02_CHROME_ADAPTER_OUT_REL,
+  P02_CHROME_ADAPTER_SOURCE_FILES,
+  LOCAL_PUBLICATION_MODULE_MAPPINGS,
   compareArchiveWorkbenchToSource,
+  compareItem9BrowserAdaptersToSource,
+  compareP02CoreModulesToSource,
+  compareP02ChromeAdaptersToSource,
+  compareLocalPublicationModulesToSource,
   parseStudioHtmlScriptRefs,
 } from "../product/studio/pack-studio.mjs";
 
@@ -94,6 +105,43 @@ const STUDIO_LAUNCHER_SHELL_FILES = Object.freeze([
   "icons/icon1024.png",
   "icons/manifest-icons.json",
 ]);
+
+// The Studio packer also copies four governed Sync module families beside the
+// Archive Workbench. Derive their exact artifact paths from the existing pack
+// mappings and byte-compare every family against the authorized source root.
+// This keeps the file-set gate exact without creating a second composition
+// authority or accepting arbitrary files merely because they were emitted.
+const STUDIO_SUPPLEMENTAL_FAMILIES = Object.freeze([
+  Object.freeze({
+    family: "item9-browser-adapters",
+    outputs: ITEM9_BROWSER_ADAPTER_OUT_FILES.map((name) => path.join(ITEM9_BROWSER_ADAPTER_OUT_REL, name)),
+    compare: compareItem9BrowserAdaptersToSource,
+  }),
+  Object.freeze({
+    family: "p02-core",
+    outputs: P02_CORE_SOURCE_FILES.map((name) => path.join(P02_CORE_OUT_REL, name)),
+    compare: compareP02CoreModulesToSource,
+  }),
+  Object.freeze({
+    family: "p02-chrome-adapters",
+    outputs: P02_CHROME_ADAPTER_SOURCE_FILES.map((name) => path.join(P02_CHROME_ADAPTER_OUT_REL, name)),
+    compare: compareP02ChromeAdaptersToSource,
+  }),
+  Object.freeze({
+    family: "local-publication-adapters",
+    outputs: LOCAL_PUBLICATION_MODULE_MAPPINGS.map(({ outRel }) => outRel),
+    compare: compareLocalPublicationModulesToSource,
+  }),
+]);
+
+function artifactRelativePath(relative) {
+  return String(relative).split(path.sep).join("/");
+}
+
+function studioSupplementalOutputFiles() {
+  return STUDIO_SUPPLEMENTAL_FAMILIES.flatMap((entry) =>
+    entry.outputs.map(artifactRelativePath));
+}
 
 const STUDIO_REQUIRED_ORDER = Object.freeze([
   "platform/selectors.contract.js",
@@ -899,6 +947,7 @@ function stageExtension(stage, buildTimestamp, sourceRoot, policy = publisherTar
     return runBuilder("studio-launcher", "tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs", {
       H2O_EXT_OUT_DIR: stage.extensionRoot,
       H2O_EXT_DEV_VARIANT: STUDIO_LAUNCHER_TARGET,
+      H2O_EXT_BUILD_CHANNEL: "candidate",
       H2O_BUILD_TS: buildTimestamp,
     }, sourceRoot);
   }
@@ -1096,7 +1145,8 @@ export function validateStagedStudioLauncher(stage, source, worktreeRoots) {
   }
 
   const expectedFiles = [...STUDIO_LAUNCHER_SHELL_FILES,
-    ...ARCHIVE_WORKBENCH_OUT_FILES.map((name) => `surfaces/studio/${name}`)]
+    ...ARCHIVE_WORKBENCH_OUT_FILES.map((name) => `surfaces/studio/${name}`),
+    ...studioSupplementalOutputFiles()]
     .sort((left, right) => left.localeCompare(right, "en"));
   const actualFiles = relativeArtifactFiles(stage.extensionRoot);
   for (const relative of actualFiles) {
@@ -1148,6 +1198,16 @@ export function validateStagedStudioLauncher(stage, source, worktreeRoots) {
         .map((entry) => entry.name),
     });
   }
+  for (const entry of STUDIO_SUPPLEMENTAL_FAMILIES) {
+    const compared = entry.compare(source.sourceRoot ?? source.repository, stage.extensionRoot);
+    if (!compared.matches) {
+      fail("studio-stage-supplemental-drift", "Packed Studio Sync module family differs from its authorized source.", {
+        family: entry.family,
+        mismatches: compared.files.filter((item) => !item.sourceExists || !item.outExists || !item.equal)
+          .map((item) => artifactRelativePath(item.outRel ?? item.name)),
+      });
+    }
+  }
   const studioHtml = fs.readFileSync(path.join(stage.extensionRoot, "surfaces", "studio", "studio.html"), "utf8");
   const refs = parseStudioHtmlScriptRefs(studioHtml);
   const positions = STUDIO_REQUIRED_ORDER.map((name) => refs.indexOf(name));
@@ -1160,7 +1220,7 @@ export function validateStagedStudioLauncher(stage, source, worktreeRoots) {
   const approvedWorktree = realAware(source.sourceRoot ?? source.repository);
   const foreignWorktrees = worktreeRoots.filter((root) => root !== approvedWorktree);
   for (const relative of actualFiles) {
-    if (!/\.(?:js|json|txt|html|css)$/u.test(relative)) continue;
+    if (!/\.(?:js|mjs|json|txt|html|css)$/u.test(relative)) continue;
     const text = fs.readFileSync(path.join(stage.extensionRoot, ...relative.split("/")), "utf8");
     for (const foreign of foreignWorktrees) {
       if (text.includes(foreign)) {
@@ -1248,6 +1308,17 @@ function studioGenerationId({ source, artifactManifest, buildTimestamp }) {
     artifactTreeDigest: artifactManifest.treeDigest,
     buildMarker: buildTimestamp,
   }));
+}
+
+function sourceCommitTimestampMilliseconds(sourceRoot) {
+  const seconds = git(sourceRoot, ["log", "-1", "--format=%ct", "HEAD"]);
+  if (!/^\d+$/u.test(seconds) || Number(seconds) <= 0) {
+    fail("source-commit-timestamp-invalid", "Studio staging requires a deterministic source commit timestamp.", {
+      sourceRoot,
+      observed: seconds,
+    });
+  }
+  return String(Number(seconds) * 1000);
 }
 
 export function validateCrossOutput(stage) {
@@ -1387,8 +1458,10 @@ export async function runLeanPublisher({ argv = [] } = {}) {
   const policy = publisherTargetPolicy(parsed.targetId);
 
   const startedAt = new Date().toISOString();
-  const buildTimestamp = String(Date.now());
   const source = runSourcePreflight({ sourceWorktree: parsed.sourceWorktree });
+  const buildTimestamp = policy.targetId === STUDIO_LAUNCHER_TARGET
+    ? sourceCommitTimestampMilliseconds(source.sourceRoot)
+    : String(Date.now());
   if (policy.exactCanonicalHeadRequired &&
       (source.sourceHead !== parsed.authorizedHead || source.approvedHead !== parsed.authorizedHead)) {
     fail("authorized-head-mismatch", "Studio source, authorized HEAD and canonical main must be exactly equal.", {

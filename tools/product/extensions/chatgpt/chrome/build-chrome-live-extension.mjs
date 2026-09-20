@@ -86,6 +86,7 @@ const IDENTITY_PROVIDER_OAUTH_GOOGLE = "google";
 const {
   SRC,
   CHROME_BUILD_IDENTITY,
+  BUILD_VISIBILITY,
   OUT_DIR,
   PROXY_PACK_URL,
   CHAT_MATCH,
@@ -513,6 +514,7 @@ async function main() {
       DEV_ACTION_TITLE,
       DEV_NAME,
       DEV_VERSION,
+      DEV_VERSION_NAME: BUILD_VISIBILITY.versionName,
       DEV_DESCRIPTION,
       MANIFEST_PROFILE,
       IDENTITY_PROVIDER_OPTIONAL_HOST_PERMISSIONS: identityProviderOptionalHostPermissions,

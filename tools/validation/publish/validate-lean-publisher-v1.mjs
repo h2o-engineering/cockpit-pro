@@ -28,6 +28,7 @@ import {
   validateStagedAliases,
   validateStagedDevOutput,
   validateStagedExtension,
+  validateStagedStudioLauncher,
   validateCrossOutput,
   publisherTargetPolicy,
   DEV_CONTROLS_TARGET,
@@ -52,7 +53,7 @@ const PUBLICATION_AUTHORITY_ROUND_PATHS = Object.freeze([
   "tools/validation/publish/validate-lean-activator-v1.mjs",
   "tools/validation/publish/validate-lean-payload-transaction-v1.mjs",
 ].sort());
-const EXPECTED_RUNTIME_SCENARIOS = 64;
+const EXPECTED_RUNTIME_SCENARIOS = 65;
 const EXPECTED_SCOPE_SCENARIOS = 9;
 const LOCK_PENDING_PREFIX = ".h2o-publisher-lock.pending-";
 const FORBIDDEN_STALE_PREFIX = ".h2o-publisher-lock.stale-";
@@ -673,6 +674,10 @@ async function runRuntimeScenarios() {
     assert.equal(staged.result.status, 0, staged.result.stderr);
     assert.ok(staged.receipt, "receipt was not produced");
     assertSandboxPath(fixture.repository);
+    const manifest = JSON.parse(fs.readFileSync(
+      path.join(staged.receipt.outputPaths.extension, "manifest.json"), "utf8"));
+    assert.equal(Object.hasOwn(manifest, "version_name"), false,
+      "a non-Studio build without selected build identity must remain unchanged");
     preservedStagingRoots.push(staged.stagingRoot);
   });
   let studioStaged = null;
@@ -696,6 +701,15 @@ async function runRuntimeScenarios() {
     assert.match(receipt.generationId, /^[a-f0-9]{64}$/u);
     assert.equal(receipt.validatorResult.extension.exactFileSet, true);
     assert.equal(receipt.validatorResult.extension.extensionId, receipt.expectedExtensionId);
+    const manifest = JSON.parse(fs.readFileSync(
+      path.join(receipt.outputPaths.extension, "manifest.json"), "utf8"));
+    assert.equal(manifest.version, "1.3.0");
+    assert.equal(manifest.version_name, `1.3.0-candidate+g${authorizedHead.slice(0, 8)}`);
+    assert.equal(Object.hasOwn(manifest, "content_scripts"), false);
+    assert.deepEqual(manifest.web_accessible_resources, []);
+    assert.deepEqual(manifest.permissions, ["storage", "tabs", "contextMenus", "alarms"]);
+    assert.equal(Object.hasOwn(manifest.action, "default_popup"), false);
+    assert.equal(Object.hasOwn(manifest, "externally_connectable"), false);
     // Independent, explicit expectation of the publisher's STUDIO_REQUIRED_ORDER
     // (never derived from the list under test). M04 P2 T3 (HDA decision A /
     // EXT-BUILD-LISTS): the previous 7-entry literal predated the accepted M03
@@ -731,6 +745,24 @@ async function runRuntimeScenarios() {
     for (const flag of ["activationPerformed", "runtimeActivationPerformed", "browserReloadPerformed",
       "browserCanaryPerformed", "deploymentPerformed", "releasePerformed", "pushPerformed"]) {
       assert.equal(receipt[flag], false, flag);
+    }
+  });
+  await test("Studio exact inventory rejects one synthetic unauthorized extra", () => {
+    const extensionRoot = studioStaged.receipt.outputPaths.extension;
+    const unauthorizedRelative = "surfaces/studio/unauthorized-extra.mjs";
+    const unauthorized = path.join(extensionRoot, ...unauthorizedRelative.split("/"));
+    fs.writeFileSync(unauthorized, "export const unauthorized = true;\n");
+    try {
+      const error = expectPublisherError("studio-stage-file-set", () =>
+        validateStagedStudioLauncher(
+          { extensionRoot },
+          { repository: fixture.repository, sourceRoot: fixture.repository },
+          [fixture.repository],
+        ));
+      assert.deepEqual(error.details.missing, []);
+      assert.deepEqual(error.details.unexpected, [unauthorizedRelative]);
+    } finally {
+      fs.rmSync(unauthorized, { force: true });
     }
   });
   await test("Studio staging rejects an older ancestral source before building", () => {
