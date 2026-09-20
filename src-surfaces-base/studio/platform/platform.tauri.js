@@ -320,6 +320,82 @@
     }
   }
 
+  /* ── runtime.getLoadedRuntimeIdentity (C5-C) ────────────────────────
+   * Loaded Desktop facts through existing, already-granted invoke seams:
+   *   plugin:app|identifier / name / version   (core:default)
+   *     → runtimeId, displayName, version
+   *   h2o_studio_desktop_build_identity        (registered native command)
+   *     → desktopBuildIdentity
+   * The native payload is Build & Delivery authority and is handed through
+   * exactly as returned — never normalized, re-keyed, defaulted or
+   * inferred here; presentation/validation of its schema stays with the
+   * consumer. Each seam fails on its own: a missing fact is null, a failed
+   * native transport is reported in desktopBuildIdentityError, and the
+   * record is `available` only when at least one loaded fact arrived. */
+  var LOADED_RUNTIME_IDENTITY_SCHEMA = 'h2o.studio.platform.loaded-runtime-identity.v1';
+  var DESKTOP_BUILD_IDENTITY_COMMAND = 'h2o_studio_desktop_build_identity';
+
+  function invokeLoadedFact(invoke, command) {
+    var p;
+    try { p = invoke(command); } catch (_) { return Promise.resolve(null); }
+    return Promise.resolve(p).then(function (value) {
+      return (typeof value === 'string' && value !== '') ? value : null;
+    }, function () { return null; });
+  }
+
+  function invokeDesktopBuildIdentity(invoke) {
+    var p;
+    try { p = invoke(DESKTOP_BUILD_IDENTITY_COMMAND); } catch (e) { return Promise.resolve({ payload: null, error: String((e && e.message) || e) }); }
+    return Promise.resolve(p).then(function (payload) {
+      if (payload && typeof payload === 'object') return { payload: payload, error: null };
+      return { payload: null, error: 'desktop-build-identity-empty' };
+    }, function (e) {
+      return { payload: null, error: String((e && e.message) || e) };
+    });
+  }
+
+  function runtimeGetLoadedRuntimeIdentity() {
+    var invoke = getTauriInvoke();
+    if (!invoke) {
+      return Promise.resolve(Object.freeze({
+        schema: LOADED_RUNTIME_IDENTITY_SCHEMA,
+        adapter: ADAPTER_NAME,
+        available: false,
+        reason: 'tauri-invoke-unavailable',
+        runtimeId: null,
+        displayName: null,
+        version: null,
+        versionName: null,
+        desktopBuildIdentity: null,
+        desktopBuildIdentityError: 'tauri-invoke-unavailable',
+      }));
+    }
+    return Promise.all([
+      invokeLoadedFact(invoke, 'plugin:app|identifier'),
+      invokeLoadedFact(invoke, 'plugin:app|name'),
+      invokeLoadedFact(invoke, 'plugin:app|version'),
+      invokeDesktopBuildIdentity(invoke),
+    ]).then(function (facts) {
+      var runtimeId = facts[0];
+      var displayName = facts[1];
+      var version = facts[2];
+      var native = facts[3];
+      var available = runtimeId !== null || displayName !== null || version !== null || native.payload !== null;
+      return Object.freeze({
+        schema: LOADED_RUNTIME_IDENTITY_SCHEMA,
+        adapter: ADAPTER_NAME,
+        available: available,
+        reason: available ? null : 'runtime-identity-unavailable',
+        runtimeId: runtimeId,
+        displayName: displayName,
+        version: version,
+        versionName: null,
+        desktopBuildIdentity: native.payload,
+        desktopBuildIdentityError: native.error,
+      });
+    });
+  }
+
   /* ── files.exportBlob (Phase 3a) ────────────────────────────────────
    * Tries the native save flow first:
    *   1. plugin:dialog|save        — returns the chosen path (or null on
@@ -502,6 +578,118 @@
       try { console.warn('[H2O.Studio.platform.tauri] plugin:dialog|save rejected; falling back to blob+anchor', dialogErr); }
       catch (_) { /* ignore */ }
       return blobAnchorFallback();
+    });
+  }
+
+  /* ── files.importFile (C5-C) ────────────────────────────────────────
+   *   1. plugin:dialog|open        — one file, no directory; null when the
+   *                                   user dismisses the dialog.
+   *   2. plugin:fs|read_text_file  — UTF-8 text at the chosen path (the
+   *                                   dialog plugin scopes the picked file).
+   * Both commands are already granted (dialog:allow-open,
+   * fs:allow-read-text-file); no new plugin, command or capability.
+   *
+   * The caller receives a normalized { name, size, type, text } record:
+   * name is the chosen path's last segment, size the byte length actually
+   * read, type '' (the OS dialog reports no MIME and none is guessed),
+   * text the decoded UTF-8 contents. The chosen path never leaves this
+   * adapter. Cancellation resolves null and is not an error. JSON parsing
+   * and every bundle/schema/migration decision remain with the caller. */
+  var LOCAL_FILE_SCHEMA = 'h2o.studio.platform.local-file.v1';
+
+  function utf8ByteLength(text) {
+    try {
+      if (typeof global.TextEncoder === 'function') return new global.TextEncoder().encode(text).length;
+    } catch (_) { /* fall through */ }
+    try { return unescape(encodeURIComponent(text)).length; } catch (_) { return text.length; }
+  }
+
+  function normalizeLocalFileRecord(name, size, type, text) {
+    var s = String(text == null ? '' : text);
+    var bytes = (typeof size === 'number' && isFinite(size) && size >= 0) ? Math.floor(size) : utf8ByteLength(s);
+    return Object.freeze({
+      schema: LOCAL_FILE_SCHEMA,
+      name: String(name == null ? '' : name),
+      size: bytes,
+      type: String(type == null ? '' : type),
+      text: s,
+    });
+  }
+
+  function importDialogFilters(opts) {
+    var exts = [];
+    if (Array.isArray(opts.extensions)) {
+      for (var i = 0; i < opts.extensions.length; i += 1) {
+        var raw = String(opts.extensions[i] == null ? '' : opts.extensions[i]).trim().replace(/^\.+/, '');
+        if (raw) exts.push(raw);
+      }
+    }
+    if (!exts.length) return [];
+    var label = String(opts.filterName || '').trim() || (exts.join('/').toUpperCase() + ' file');
+    return [{ name: label, extensions: exts }];
+  }
+
+  function pickedPathString(picked) {
+    if (typeof picked === 'string') return picked;
+    if (picked && typeof picked === 'object' && typeof picked.path === 'string') return picked.path;
+    return '';
+  }
+
+  function fileNameFromPath(path) {
+    var s = String(path).replace(/[\\/]+$/, '');
+    var idx = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+    return idx >= 0 ? s.slice(idx + 1) : s;
+  }
+
+  /* tauri-plugin-fs read_text_file returns a String, but some V2
+   * serialization paths surface it as a byte array (see
+   * sync/folder-sync.tauri.js). Coerce either shape to text + byte size. */
+  function decodeTextRead(raw) {
+    if (typeof raw === 'string') return { text: raw, size: utf8ByteLength(raw) };
+    var bytes = null;
+    if (raw instanceof Uint8Array) bytes = raw;
+    else if (raw instanceof ArrayBuffer) bytes = new Uint8Array(raw);
+    else if (Array.isArray(raw)) {
+      bytes = new Uint8Array(raw.length);
+      for (var i = 0; i < raw.length; i += 1) {
+        var v = raw[i];
+        if (typeof v !== 'number' || v < 0 || v > 255 || (v | 0) !== v) {
+          throw new Error('platform.files.importFile: read_text_file element ' + i + ' is not a byte');
+        }
+        bytes[i] = v;
+      }
+    }
+    if (!bytes) {
+      var ctor = (raw && raw.constructor && raw.constructor.name) || typeof raw;
+      throw new Error('platform.files.importFile: unsupported read_text_file response ' + ctor);
+    }
+    return { text: new TextDecoder('utf-8').decode(bytes), size: bytes.length };
+  }
+
+  function filesImportFile(opts) {
+    var options = (opts && typeof opts === 'object') ? opts : {};
+    var invoke = getTauriInvoke();
+    if (!invoke) return Promise.reject(new Error('platform.files.importFile: tauri invoke unavailable'));
+    var dialogOptions = { multiple: false, directory: false };
+    var filters = importDialogFilters(options);
+    if (filters.length) dialogOptions.filters = filters;
+    if (typeof options.title === 'string' && options.title.trim()) dialogOptions.title = options.title.trim();
+    var openPromise;
+    try {
+      openPromise = invoke('plugin:dialog|open', { options: dialogOptions });
+    } catch (e) {
+      return Promise.reject(e);
+    }
+    return Promise.resolve(openPromise).then(function (picked) {
+      if (picked == null) return null;
+      var path = pickedPathString(picked);
+      if (!path) {
+        throw new Error('platform.files.importFile: unexpected picker response shape');
+      }
+      return Promise.resolve(invoke('plugin:fs|read_text_file', { path: path })).then(function (raw) {
+        var read = decodeTextRead(raw);
+        return normalizeLocalFileRecord(fileNameFromPath(path), read.size, '', read.text);
+      });
     });
   }
 
@@ -950,7 +1138,10 @@
       onAnyChange: broadcastOnAnyChange,
     },
     storage: { get: storageGet, set: storageSet, remove: storageRemove },
-    files: { available: true, exportBlob: filesExportBlob },
+    /* resolveAsset and openUrl keep their existing index.js fallback /
+     * D1 top-level promotion; only the C5-C capability is added here. */
+    runtime: { getLoadedRuntimeIdentity: runtimeGetLoadedRuntimeIdentity },
+    files: { available: true, exportBlob: filesExportBlob, importFile: filesImportFile },
     capture: { available: false },
     auth: { available: false },
     clipboard: { writeText: clipboardWriteText },
