@@ -9770,204 +9770,30 @@ function settingsFolderCleanupIsF5DReviewCandidate(row){
   return parts.some((value) => /f5d/i.test(value));
 }
 
-function settingsFolderCleanupReviewCandidate(row, classification, opts = {}){
-  const src = row && typeof row === "object" ? row : {};
-  const folderId = String(src.folderId || src.id || opts.folderId || "").trim();
-  const name = String(src.name || opts.name || folderId || "Folder review item").trim();
-  const knownCount = settingsFolderCleanupNumber(src.knownCount ?? src.knownStudioCount);
-  const localBindingCount = settingsFolderCleanupRowBindingCount(src);
-  const bindingCount = Math.max(localBindingCount, knownCount);
-  const canonicalCount = settingsFolderCleanupNumber(src.canonicalCount ?? src.nativeMembershipCount);
-  const orphanCount = settingsFolderCleanupNumber(src.orphanCount || opts.orphanCount);
-  const warnings = Array.isArray(opts.warnings) ? opts.warnings.slice() : [];
-  const badges = Array.isArray(src.badges) ? src.badges.map((badge) => String(badge || "").trim()).filter(Boolean) : [];
-  const isCanonical = !!src.isCanonical || !!opts.isCanonical;
-  const isConflict = !!src.isConflict || classification === "same-name-conflict";
-  const isTestCandidate = !!src.isTestCandidate;
-  const isExtra = !!src.isExtra;
-  const nativePresence = isCanonical || !!opts.nativePresence;
-
-  if (isCanonical) warnings.push("Protected canonical folder. Never a cleanup candidate.");
-  if (isConflict) warnings.push("Same-name/different-ID conflict. Review-only; no automatic merge.");
-  if (bindingCount > 0 && !isCanonical) warnings.push("Folder has local bindings or known rows. Review-only.");
-  if (orphanCount > 0) warnings.push("Native memberships are not represented by known Studio rows.");
-  if (settingsFolderCleanupIsF5DReviewCandidate(src)) {
-    warnings.push("Desktop/F5D review required.");
-    warnings.push("Not eligible for Chrome mirror P7b deletion.");
-  }
-
-  let proposedAction = "Review only. No P7a mutation is available.";
-  let riskLevel = "review";
-  let requiresApproval = true;
-  if (classification === "safe-empty") {
-    proposedAction = "Future P8i cleanup candidate only after explicit preview and typed approval.";
-    riskLevel = "low-review-required";
-  } else if (classification === "orphan-membership") {
-    proposedAction = "Review membership coverage. Not a folder removal candidate.";
-    riskLevel = "review-required";
-  } else if (classification === "canonical-protected") {
-    proposedAction = "Preserve canonical folder.";
-    riskLevel = "protected";
-    requiresApproval = false;
-  } else if (classification === "bound-review") {
-    proposedAction = "Inspect bindings before any future action.";
-    riskLevel = "high-review-required";
-  } else if (classification === "same-name-conflict") {
-    proposedAction = "Resolve only through a future conflict review plan.";
-    riskLevel = "high-review-required";
-  } else if (classification === "unsafe-to-delete") {
-    proposedAction = "Keep review-only until a later plan explains exact ownership and blockers.";
-    riskLevel = "high-review-required";
-  }
-
-  return {
-    folderId,
-    name,
-    normalizedName: String(src.normalizedName || name).trim().toLowerCase(),
-    classification,
-    source: String(src.source || opts.source || "").trim(),
-    kind: String(src.kind || opts.kind || "").trim(),
-    surface: String(opts.surface || src.surface || ""),
-    isCanonical,
-    isExtra,
-    isTestCandidate,
-    isConflict,
-    bindingCount,
-    canonicalCount,
-    nativeMembershipCount: canonicalCount,
-    knownCount,
-    localBindingCount,
-    savedCount: settingsFolderCleanupNumber(src.savedCount),
-    linkedCount: settingsFolderCleanupNumber(src.linkedCount),
-    orphanCount,
-    badges,
-    displayCountLabel: String(src.displayCountLabel || opts.displayCountLabel || "").trim(),
-    nativePresence,
-    proposedAction,
-    riskLevel,
-    requiresApproval,
-    reversible: false,
-    warnings: Array.from(new Set(warnings.filter(Boolean))),
-  };
-}
-
+// C5-D: folder-maintenance review classification is Library-owned
+// (H2O.Library.Maintenance in S0F1f). The Shell only delegates here and keeps
+// presentation/orchestration; it no longer decides safe-empty / conflict /
+// bound-review / orphan / canonical-protected / unsafe-to-delete rows.
 function settingsFolderCleanupBuildReviewPlan(selfCheck, displayModel){
-  const rows = Array.isArray(displayModel?.rows) ? displayModel.rows : [];
-  const surface = String(selfCheck?.surface || displayModel?.surface || "");
-  const rowCandidate = (row, classification, opts = {}) => settingsFolderCleanupReviewCandidate(row, classification, { ...opts, surface });
-  const isSafeEmpty = (row) => {
-    const bindingCount = settingsFolderCleanupRowBindingCount(row);
-    const knownCount = settingsFolderCleanupNumber(row?.knownCount);
-    return !row?.isCanonical
-      && (!!row?.isExtra || !!row?.isTestCandidate)
-      && !row?.isConflict
-      && !settingsFolderCleanupIsF5DReviewCandidate(row)
-      && bindingCount === 0
-      && knownCount === 0;
-  };
-  const safeEmptyCandidates = rows
-    .filter(isSafeEmpty)
-    .map((row) => rowCandidate(row, "safe-empty", { nativePresence: false }));
-  const sameNameConflicts = rows
-    .filter((row) => !row?.isCanonical && !!row?.isConflict)
-    .map((row) => rowCandidate(row, "same-name-conflict", { nativePresence: false }));
-  const boundReviewCandidates = rows
-    .filter((row) => {
-      const bindingCount = settingsFolderCleanupRowBindingCount(row);
-      const knownCount = settingsFolderCleanupNumber(row?.knownCount);
-      return !row?.isCanonical
-        && (!!row?.isExtra || !!row?.isTestCandidate)
-        && !row?.isConflict
-        && (bindingCount > 0 || knownCount > 0 || settingsFolderCleanupIsF5DReviewCandidate(row));
-    })
-    .map((row) => rowCandidate(row, "bound-review", { nativePresence: false }));
-  const orphanRows = rows
-    .filter((row) => !!row?.isCanonical && settingsFolderCleanupNumber(row?.orphanCount) > 0)
-    .map((row) => rowCandidate(row, "orphan-membership", {
-      isCanonical: true,
-      nativePresence: true,
-      orphanCount: settingsFolderCleanupNumber(row?.orphanCount),
-    }));
-  const orphanCheck = (Array.isArray(selfCheck?.checks) ? selfCheck.checks : [])
-    .find((check) => String(check?.id || "") === "folder.binding.orphan");
-  const orphanCount = settingsFolderCleanupNumber(selfCheck?.summary?.orphanMembershipCount || orphanCheck?.details?.orphanMembershipCount);
-  const orphanMemberships = orphanRows.length || orphanCount === 0
-    ? orphanRows
-    : [settingsFolderCleanupReviewCandidate({
-      name: "Canonical orphan memberships",
-      orphanCount,
-      knownCount: settingsFolderCleanupNumber(orphanCheck?.details?.knownStudioRowTotal),
-    }, "orphan-membership", {
-      surface,
-      orphanCount,
-      nativePresence: true,
-      warnings: ["Aggregate self-check item. It is not a folder deletion candidate."],
-    })];
-  const canonicalProtected = rows
-    .filter((row) => !!row?.isCanonical)
-    .map((row) => rowCandidate(row, "canonical-protected", { isCanonical: true, nativePresence: true }));
-  const groupedIds = new Set([
-    ...safeEmptyCandidates,
-    ...sameNameConflicts,
-    ...boundReviewCandidates,
-  ].map((candidate) => String(candidate.folderId || "").trim()).filter(Boolean));
-  const unsafeToDelete = rows
-    .filter((row) => {
-      const id = String(row?.folderId || row?.id || "").trim();
-      return !row?.isCanonical && id && !groupedIds.has(id);
-    })
-    .map((row) => rowCandidate(row, "unsafe-to-delete", {
-      nativePresence: false,
-      warnings: ["Review row does not meet empty-test cleanup requirements."],
-    }));
-
-  const groups = {
-    safeEmptyCandidates,
-    sameNameConflicts,
-    boundReviewCandidates,
-    orphanMemberships,
-    canonicalProtected,
-    unsafeToDelete,
-  };
-  return {
-    readOnly: true,
-    noMutation: true,
-    generatedAt: new Date().toISOString(),
-    surface,
-    selfCheckSummary: selfCheck?.summary || null,
-    selfCheckSeverity: selfCheck?.severity || "",
-    counts: {
-      safeEmpty: safeEmptyCandidates.length,
-      conflicts: sameNameConflicts.length,
-      boundReview: boundReviewCandidates.length,
-      orphanMemberships: orphanMemberships.length,
-      canonicalProtected: canonicalProtected.length,
-      unsafeToDelete: unsafeToDelete.length,
-    },
-    groups,
-    safetyRules: [
-      "P8i-c1 is review-only.",
-      "No folder cleanup is performed.",
-      "No Chrome storage, SQLite, or native folder-state writes are performed.",
-      "Canonical f_* folders are protected.",
-      "Conflicts and bound folders are review-only.",
-      "Desktop/F5D test folders are review-only in P8i-c1.",
-    ],
-  };
+  const maintenance = W.H2O?.Library?.Maintenance;
+  if (!maintenance || typeof maintenance.buildFolderReviewPlan !== "function") {
+    throw new Error("Library.Maintenance folder review APIs unavailable");
+  }
+  return maintenance.buildFolderReviewPlan(selfCheck, displayModel);
 }
 
 async function settingsFolderCleanupLoadReviewInputs(){
-  const parity = W.H2O?.Library?.FolderParity;
-  if (!parity || typeof parity.selfCheck !== "function" || typeof parity.getDisplayModel !== "function") {
-    throw new Error("FolderParity review APIs unavailable");
+  const maintenance = W.H2O?.Library?.Maintenance;
+  if (!maintenance || typeof maintenance.getFolderReviewPlan !== "function") {
+    throw new Error("Library.Maintenance folder review APIs unavailable");
   }
-  const selfCheck = await promiseWithTimeout(parity.selfCheck({ fresh: true }), STUDIO_BOOT_AUX_TIMEOUT_MS, "FolderParity.selfCheck");
-  const displayModel = await promiseWithTimeout(parity.getDisplayModel({ fresh: true }), STUDIO_BOOT_AUX_TIMEOUT_MS, "FolderParity.getDisplayModel");
-  return {
-    selfCheck,
-    displayModel,
-    plan: settingsFolderCleanupBuildReviewPlan(selfCheck, displayModel),
-  };
+  // Library runs the two sequential FolderParity reads (selfCheck, getDisplayModel);
+  // keep the same worst-case wait the two per-call timeouts allowed before C5-D.
+  return promiseWithTimeout(
+    maintenance.getFolderReviewPlan({ fresh: true }),
+    STUDIO_BOOT_AUX_TIMEOUT_MS * 2,
+    "Library.Maintenance.getFolderReviewPlan"
+  );
 }
 
 function settingsFolderCleanupIsChromeSurface(){
