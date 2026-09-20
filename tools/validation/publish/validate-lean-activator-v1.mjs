@@ -167,7 +167,7 @@ const BATCH11_VALIDATOR_SHA256 = "c8a1abd5c21a9328dc13a8bf19aba508ab476095d9e988
 // Reader presentation profile (one STUDIO_REQUIRED_ORDER entry, HDA decision
 // A / EXT-BUILD-LISTS; previous pin 7ed0065a...), so this moving pin follows the
 // new committed publisher bytes.
-const SYNCED_PUBLISHER_SHA256 = "ee993b9ed573ac28a637263c5aa3cb283b5afe1581115c7ac66e564f886ab9c3";
+const SYNCED_PUBLISHER_SHA256 = "8e739913b4c3cfacb9e89c0496de8f499f8ef6b0c51567bdffd8939380694a78";
 const ACCEPTED_ACTIVATOR_SHA256 = "531bb4e9b5d7d61584e013d0d10c8007c78f75498988ba64bac4d24a8d4f2f36";
 const REQUIRED_FILES = Object.freeze([
   "manifest.json", "loader.js", "bg.js", "title-contract-bridge.js",
