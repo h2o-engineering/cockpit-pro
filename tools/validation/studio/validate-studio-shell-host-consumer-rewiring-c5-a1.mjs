@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '../../..');
-const BASE = '8e18cf5f6771f1d1663d63bcf6e69efb7c7b3ed3';
+const EXPECTED_BASE = String(process.env.C5_A1_EXPECTED_BASE || '').trim();
 const STUDIO_REL = 'src-surfaces-base/studio/studio.js';
 const VALIDATOR_REL = 'tools/validation/studio/validate-studio-shell-host-consumer-rewiring-c5-a1.mjs';
 const PLATFORM_PREFIX = 'src-surfaces-base/studio/platform/';
@@ -17,6 +17,22 @@ const PACK = 'tools/product/studio/pack-studio.mjs';
 
 function read(rel) { return fs.readFileSync(path.join(ROOT, rel), 'utf8'); }
 function git(args) { return execFileSync('git', args, { cwd: ROOT, encoding: 'utf8' }).trim(); }
+
+if (!EXPECTED_BASE) {
+  console.error('REFUSE EXPECTED_BASE_MISSING');
+  process.exit(2);
+}
+if (!/^[0-9a-f]{40}$/.test(EXPECTED_BASE)) {
+  console.error('REFUSE EXPECTED_BASE_INVALID');
+  process.exit(2);
+}
+const CANDIDATE_PARENT = git(['rev-parse', 'HEAD^']);
+if (CANDIDATE_PARENT !== EXPECTED_BASE) {
+  console.error(`REFUSE EXPECTED_BASE_IS_NOT_CANDIDATE_PARENT expected=${EXPECTED_BASE} actual=${CANDIDATE_PARENT}`);
+  process.exit(3);
+}
+const BASE = EXPECTED_BASE;
+
 function baseRead(rel) { return git(['show', `${BASE}:${rel}`]); }
 function changedPaths() {
   return git(['diff', '--name-only', `${BASE}...HEAD`]).split('\n').filter(Boolean);
