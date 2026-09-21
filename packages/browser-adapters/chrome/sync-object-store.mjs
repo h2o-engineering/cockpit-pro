@@ -31,6 +31,36 @@ const APPLY_STATE_SCHEMA_VERSION = 1;
 /* P02 Wave 1 / Z6 (frozen V2): additive retained-branch-evidence store. */
 const BRANCH_EVIDENCE_SCHEMA = 'h2o.studio.sync-branch-evidence.p02.v1';
 const BRANCH_EVIDENCE_SCHEMA_VERSION = 1;
+/*
+ * P02 T05 / D3 — DOMAIN-QUALIFIED relationship-state regime.
+ *
+ * The accepted chat regime keys its branch evidence and apply state by the
+ * bare objectId (`v1:<peer>:<sha256(objectId)>`). A chat-folder-binding shares
+ * the saved chat's objectId string, so reading or writing it through those
+ * keys would let a binding inherit the chat's applied anchor - or overwrite
+ * it. The relationship regime therefore lives in the SAME two stores (no
+ * DATABASE_VERSION bump, no new object store, no migration, no rewrite of any
+ * legacy row) under a structurally distinct record/key regime:
+ *
+ *   objectKey     = SHA-256(objectDomain || 0x00 || objectId)   (the P02 key)
+ *   peerObjectKey = p02:<peerFingerprint>:<objectKey>
+ *   record key    = p02:<peerFingerprint>:<objectKey>:<sha256(revisionId)>
+ *
+ * with their own schema tags. A `p02:` key can never equal a `v1:` key, the
+ * legacy readers filter by their own schema/peerObjectKey and so never see a
+ * relationship record, and the relationship readers never see a legacy one.
+ * The chat family keeps its accepted legacy read path untouched; these ports
+ * refuse the chat domain by construction.
+ */
+const RELATIONSHIP_KEY_PREFIX = 'p02';
+const RELATIONSHIP_BRANCH_EVIDENCE_SCHEMA =
+  'h2o.studio.sync-branch-evidence.p02-relationship.v1';
+const RELATIONSHIP_BRANCH_EVIDENCE_SCHEMA_VERSION = 1;
+const RELATIONSHIP_APPLY_STATE_SCHEMA =
+  'h2o.studio.sync-apply-state.p02-relationship.v1';
+const RELATIONSHIP_APPLY_STATE_SCHEMA_VERSION = 1;
+const CHAT_OBJECT_DOMAIN_LEGACY = 'studio.chat.saved-state.v1';
+const OBJECT_DOMAIN_RE = /^[A-Za-z0-9._-]{1,128}$/;
 const MAX_BLOB_BYTES = 8 * 1024 * 1024;
 const MAX_HEAD_BYTES = 64 * 1024;
 const MAX_ID_LENGTH = 512;
@@ -75,7 +105,11 @@ const ERROR_CODE = Object.freeze({
     'local-publication-foreign-intent-not-pending',
   LOCAL_PUBLICATION_PENDING_UNRESOLVED: 'local-publication-pending-unresolved',
   BRANCH_EVIDENCE_INVALID: 'p02-z6-branch-evidence-invalid',
-  BRANCH_EVIDENCE_CONFLICT: 'p02-z6-branch-evidence-conflict'
+  BRANCH_EVIDENCE_CONFLICT: 'p02-z6-branch-evidence-conflict',
+  /* T05 / D3: the domain-qualified relationship regime. */
+  RELATIONSHIP_DOMAIN_INVALID: 'p02-t05-relationship-domain-invalid',
+  RELATIONSHIP_STATE_INVALID: 'p02-t05-relationship-state-invalid',
+  RELATIONSHIP_STATE_CONFLICT: 'p02-t05-relationship-state-conflict'
 });
 
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -630,6 +664,89 @@ function cloneApplyState(record) {
   });
 }
 
+/* A relationship objectDomain: a strict ASCII domain tag that is NOT the chat
+ * family. The chat family keeps its accepted objectId-keyed regime and is
+ * refused here so no caller can route chat state through the new ports. */
+function isRelationshipObjectDomain(value) {
+  return typeof value === 'string' &&
+    OBJECT_DOMAIN_RE.test(value) &&
+    value !== CHAT_OBJECT_DOMAIN_LEGACY;
+}
+
+function isRelationshipRecordSchema(record) {
+  return isPlainObject(record) &&
+    (record.schema === RELATIONSHIP_BRANCH_EVIDENCE_SCHEMA ||
+      record.schema === RELATIONSHIP_APPLY_STATE_SCHEMA);
+}
+
+/* The branch-evidence-v2 reference, additionally pinned to the relationship
+ * object's domain and objectKey so a reference minted for one domain can never
+ * be staged or committed under another. */
+function validateRelationshipApplyReference(value, keys, objectDomain) {
+  if (!isPlainObject(value) || value.referenceKind !== 'branch-evidence-v2') {
+    fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+  }
+  const reference = validateApplyReference(value);
+  if (reference.objectDomain !== objectDomain ||
+      reference.objectKey !== keys.objectKey ||
+      !reference.branchEvidenceKey.startsWith(`${keys.peerObjectKey}:`)) {
+    fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+  }
+  return reference;
+}
+
+function validateRelationshipApplyStateRecord(record, fingerprint, keys, objectDomain, objectId) {
+  if (record == null) return null;
+  if (!isPlainObject(record) ||
+      record.key !== keys.peerObjectKey ||
+      record.schema !== RELATIONSHIP_APPLY_STATE_SCHEMA ||
+      record.schemaVersion !== RELATIONSHIP_APPLY_STATE_SCHEMA_VERSION ||
+      record.peerFingerprintSha256Hex !== fingerprint ||
+      record.objectDomain !== objectDomain ||
+      record.objectId !== objectId ||
+      record.objectKey !== keys.objectKey ||
+      !isIsoTimestamp(record.updatedAt)) {
+    fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+  }
+  return {
+    ...record,
+    lastApplied: record.lastApplied === null
+      ? null
+      : validateRelationshipApplyReference(record.lastApplied, keys, objectDomain),
+    pending: record.pending === null
+      ? null
+      : validateRelationshipApplyReference(record.pending, keys, objectDomain)
+  };
+}
+
+function validateRelationshipBranchRecord(record, fingerprint, keys, objectDomain, objectId) {
+  if (!isPlainObject(record) ||
+      record.schema !== RELATIONSHIP_BRANCH_EVIDENCE_SCHEMA ||
+      record.schemaVersion !== RELATIONSHIP_BRANCH_EVIDENCE_SCHEMA_VERSION ||
+      record.peerFingerprintSha256Hex !== fingerprint ||
+      record.objectDomain !== objectDomain ||
+      record.objectId !== objectId ||
+      record.objectKey !== keys.objectKey ||
+      record.peerObjectKey !== keys.peerObjectKey ||
+      typeof record.key !== 'string' ||
+      !record.key.startsWith(`${keys.peerObjectKey}:`) ||
+      !isNonEmptyId(record.revisionId) ||
+      !SHA256_RE.test(record.revisionBlobSha256Hex || '') ||
+      (record.parentRevisionId !== null && !isNonEmptyId(record.parentRevisionId)) ||
+      (record.parentRevisionBlobSha256Hex !== null &&
+        !SHA256_RE.test(record.parentRevisionBlobSha256Hex || '')) ||
+      ((record.parentRevisionId === null) !== (record.parentRevisionBlobSha256Hex === null)) ||
+      !isNonEmptyId(record.disposition) ||
+      record.applyState !== 'not-applied' ||
+      !isIsoTimestamp(record.firstObservedAt) ||
+      !isIsoTimestamp(record.lastObservedAt) ||
+      !Number.isSafeInteger(record.observationCount) ||
+      record.observationCount < 1) {
+    fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+  }
+  return record;
+}
+
 function validateLinearObservationGraph(observations) {
   if (observations.length === 0) return null;
   const byRevision = new Map();
@@ -1122,6 +1239,41 @@ export function createChromeSyncObjectStore({
     };
   }
 
+  /*
+   * T05 / D3 key derivation for the relationship regime. The objectKey is the
+   * P02 identity SHA-256(objectDomain || 0x00 || objectId) - the same formula
+   * the frozen v2 contract uses - derived HERE from the pair, never taken from
+   * the caller, so a caller cannot file one domain's state under another's.
+   */
+  async function relationshipKeys(objectDomain, objectId, revisionId = null) {
+    if (!isRelationshipObjectDomain(objectDomain)) {
+      fail(ERROR_CODE.RELATIONSHIP_DOMAIN_INVALID);
+    }
+    if (!isNonEmptyId(objectId) || (revisionId !== null && !isNonEmptyId(revisionId))) {
+      fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+    }
+    const objectKey = await sha256Hex(
+      cryptoImplementation,
+      textBytes(`${objectDomain}\u0000${objectId}`),
+      ERROR_CODE.RELATIONSHIP_STATE_INVALID
+    );
+    const peerObjectKey = `${RELATIONSHIP_KEY_PREFIX}:${peerFingerprintSha256Hex}:${objectKey}`;
+    if (revisionId === null) {
+      return { objectKey, peerObjectKey, revisionKeySha256Hex: null, key: null };
+    }
+    const revisionKeySha256Hex = await sha256Hex(
+      cryptoImplementation,
+      textBytes(revisionId),
+      ERROR_CODE.RELATIONSHIP_STATE_INVALID
+    );
+    return {
+      objectKey,
+      peerObjectKey,
+      revisionKeySha256Hex,
+      key: `${peerObjectKey}:${revisionKeySha256Hex}`
+    };
+  }
+
   async function validateStoredObservation(record, expectedObjectId, expectedRevisionId = null) {
     const bytes = bytesFrom(record?.revisionBlobBytes);
     if (!isPlainObject(record) ||
@@ -1310,6 +1462,22 @@ export function createChromeSyncObjectStore({
     }
 
     for (const record of applyStates) {
+      /* T05 / D3: a relationship apply-state record is not a chat object. It
+       * is validated by its own regime and never enumerated as a chat. */
+      if (isRelationshipRecordSchema(record)) {
+        if (!isRelationshipObjectDomain(record.objectDomain) ||
+            !isNonEmptyId(record.objectId)) {
+          fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+        }
+        validateRelationshipApplyStateRecord(
+          record,
+          peerFingerprintSha256Hex,
+          await relationshipKeys(record.objectDomain, record.objectId),
+          record.objectDomain,
+          record.objectId
+        );
+        continue;
+      }
       if (!isPlainObject(record) || !isNonEmptyId(record.objectId)) {
         fail(ERROR_CODE.APPLY_STATE_INVALID);
       }
@@ -1323,6 +1491,20 @@ export function createChromeSyncObjectStore({
       objectIds.add(record.objectId);
     }
     for (const record of branchEvidence) {
+      if (isRelationshipRecordSchema(record)) {
+        if (!isRelationshipObjectDomain(record.objectDomain) ||
+            !isNonEmptyId(record.objectId)) {
+          fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+        }
+        validateRelationshipBranchRecord(
+          record,
+          peerFingerprintSha256Hex,
+          await relationshipKeys(record.objectDomain, record.objectId),
+          record.objectDomain,
+          record.objectId
+        );
+        continue;
+      }
       if (!isPlainObject(record) ||
           record.schema !== BRANCH_EVIDENCE_SCHEMA ||
           record.schemaVersion !== BRANCH_EVIDENCE_SCHEMA_VERSION ||
@@ -2825,6 +3007,417 @@ export function createChromeSyncObjectStore({
     }
   }
 
+  /* ------------------------------------------------------------------ */
+  /* T05 / D3 — domain-qualified relationship-state ports                */
+  /* ------------------------------------------------------------------ */
+
+  async function recordRelationshipBranchEvidence(input) {
+    const objectDomain = input?.objectDomain;
+    const objectId = input?.objectId;
+    const revisionId = input?.revisionId;
+    const disposition = input?.disposition;
+    if (!isRelationshipObjectDomain(objectDomain)) {
+      fail(ERROR_CODE.RELATIONSHIP_DOMAIN_INVALID);
+    }
+    if (!isNonEmptyId(objectId) ||
+        !isNonEmptyId(revisionId) ||
+        !isNonEmptyId(disposition) ||
+        !SHA256_RE.test(input?.revisionBlobSha256Hex || '')) {
+      fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+    }
+    const parentRevisionId = input?.parentRevisionId ?? null;
+    const parentRevisionBlobSha256Hex = input?.parentRevisionBlobSha256Hex ?? null;
+    if ((parentRevisionId === null) !== (parentRevisionBlobSha256Hex === null) ||
+        (parentRevisionId !== null && !isNonEmptyId(parentRevisionId)) ||
+        (parentRevisionBlobSha256Hex !== null &&
+          !SHA256_RE.test(parentRevisionBlobSha256Hex))) {
+      fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+    }
+    const closureType = input?.closureType ?? null;
+    if (closureType !== null &&
+        closureType !== 'branch-superseded' &&
+        closureType !== 'object-deleted') {
+      fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+    }
+    const revisionBlobBytes = bytesFrom(input?.revisionBlobBytes);
+    if (!revisionBlobBytes ||
+        revisionBlobBytes.byteLength === 0 ||
+        revisionBlobBytes.byteLength > MAX_BLOB_BYTES) {
+      fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+    }
+    /* Address derived from bytes and verified, never trusted (E.2). */
+    const actualBlobHash = await sha256Hex(
+      cryptoImplementation,
+      revisionBlobBytes,
+      ERROR_CODE.RELATIONSHIP_STATE_INVALID
+    );
+    if (actualBlobHash !== input.revisionBlobSha256Hex) {
+      fail(ERROR_CODE.BLOB_HASH_MISMATCH);
+    }
+    const timestamp = clock();
+    if (!isIsoTimestamp(timestamp)) fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+    const db = await activeDatabase();
+    const keys = await relationshipKeys(objectDomain, objectId, revisionId);
+    const proposed = {
+      key: keys.key,
+      peerObjectKey: keys.peerObjectKey,
+      schema: RELATIONSHIP_BRANCH_EVIDENCE_SCHEMA,
+      schemaVersion: RELATIONSHIP_BRANCH_EVIDENCE_SCHEMA_VERSION,
+      peerFingerprintSha256Hex,
+      objectDomain,
+      objectId,
+      objectKey: keys.objectKey,
+      revisionId,
+      revisionKeySha256Hex: keys.revisionKeySha256Hex,
+      revisionBlobSha256Hex: input.revisionBlobSha256Hex,
+      parentRevisionId,
+      parentRevisionBlobSha256Hex,
+      disposition,
+      reason: input?.reason ?? null,
+      closureType,
+      /* Pinned: retained evidence is never Apply-eligible by itself. */
+      applyState: 'not-applied',
+      firstObservedAt: timestamp,
+      lastObservedAt: timestamp,
+      observationCount: 1,
+      revisionBlobBytes
+    };
+    const transaction = db.transaction(
+      [AUTHORITY_STORE, BRANCH_EVIDENCE_STORE],
+      'readwrite'
+    );
+    const completion = transactionResult(transaction);
+    try {
+      const authority = await requestResult(
+        transaction.objectStore(AUTHORITY_STORE).get(AUTHORITY_KEY)
+      );
+      if (!authorityRecordMatches(authority, peerFingerprintSha256Hex)) {
+        fail(ERROR_CODE.PEER_AUTHORITY_MISMATCH);
+      }
+      const store = transaction.objectStore(BRANCH_EVIDENCE_STORE);
+      const existing = await requestResult(store.get(keys.key));
+      if (existing) {
+        validateRelationshipBranchRecord(
+          existing, peerFingerprintSha256Hex, keys, objectDomain, objectId
+        );
+        /* Immutability: same identity with divergent bytes or ancestry fails
+         * closed; only the replay counter advances. */
+        if (existing.revisionBlobSha256Hex !== proposed.revisionBlobSha256Hex ||
+            existing.revisionId !== proposed.revisionId ||
+            existing.parentRevisionId !== proposed.parentRevisionId ||
+            existing.parentRevisionBlobSha256Hex !== proposed.parentRevisionBlobSha256Hex ||
+            existing.closureType !== proposed.closureType) {
+          fail(ERROR_CODE.RELATIONSHIP_STATE_CONFLICT);
+        }
+        const updated = {
+          ...existing,
+          lastObservedAt: timestamp,
+          observationCount: Number(existing.observationCount) + 1
+        };
+        if (!Number.isSafeInteger(updated.observationCount)) {
+          fail(ERROR_CODE.RELATIONSHIP_STATE_CONFLICT);
+        }
+        await requestResult(store.put(updated));
+        await completion;
+        return Object.freeze({
+          ok: true,
+          verdict: 'identical-replay',
+          unchangedNoOp: true,
+          applyEligible: false,
+          record: safeBranchEvidence(updated)
+        });
+      }
+      await requestResult(store.add(proposed));
+      await completion;
+      return Object.freeze({
+        ok: true,
+        verdict: 'branch-evidence-retained',
+        unchangedNoOp: false,
+        applyEligible: false,
+        record: safeBranchEvidence(proposed)
+      });
+    } catch (error) {
+      abortQuietly(transaction);
+      try { await completion; } catch (_) { /* expected after abort */ }
+      fail(safeCode(error, ERROR_CODE.DATABASE_TRANSACTION_FAILED));
+    }
+  }
+
+  async function listRelationshipBranchEvidence({ objectDomain, objectId } = {}) {
+    const db = await activeDatabase();
+    const keys = await relationshipKeys(objectDomain, objectId);
+    const transaction = db.transaction([BRANCH_EVIDENCE_STORE], 'readonly');
+    const completion = transactionResult(transaction);
+    try {
+      const all = await requestResult(
+        transaction.objectStore(BRANCH_EVIDENCE_STORE).getAll()
+      );
+      await completion;
+      const matching = all.filter((record) =>
+        isPlainObject(record) &&
+        record.schema === RELATIONSHIP_BRANCH_EVIDENCE_SCHEMA &&
+        record.peerObjectKey === keys.peerObjectKey);
+      for (const record of matching) {
+        validateRelationshipBranchRecord(
+          record, peerFingerprintSha256Hex, keys, objectDomain, objectId
+        );
+      }
+      return Object.freeze(matching
+        .sort((left, right) => left.revisionId.localeCompare(right.revisionId))
+        .map((record) => safeBranchEvidence(record)));
+    } catch (error) {
+      abortQuietly(transaction);
+      try { await completion; } catch (_) { /* expected after abort */ }
+      fail(safeCode(error, ERROR_CODE.DATABASE_TRANSACTION_FAILED));
+    }
+  }
+
+  /* The relationship object's own apply state and retained evidence. The
+   * objectId-keyed chat stores are never read: a binding that shares a chat's
+   * objectId inherits nothing from it. */
+  async function readRelationshipApplyState({ objectDomain, objectId } = {}) {
+    const db = await activeDatabase();
+    const keys = await relationshipKeys(objectDomain, objectId);
+    const transaction = db.transaction(
+      [AUTHORITY_STORE, APPLY_STATE_STORE, BRANCH_EVIDENCE_STORE],
+      'readonly'
+    );
+    const completion = transactionResult(transaction);
+    let authority;
+    let applyRecord;
+    let branchRecords;
+    try {
+      [authority, applyRecord, branchRecords] = await Promise.all([
+        requestResult(transaction.objectStore(AUTHORITY_STORE).get(AUTHORITY_KEY)),
+        requestResult(transaction.objectStore(APPLY_STATE_STORE).get(keys.peerObjectKey)),
+        requestResult(transaction.objectStore(BRANCH_EVIDENCE_STORE).getAll())
+      ]);
+      await completion;
+    } catch (error) {
+      abortQuietly(transaction);
+      try { await completion; } catch (_) { /* expected after abort */ }
+      fail(safeCode(error, ERROR_CODE.DATABASE_TRANSACTION_FAILED));
+    }
+    if (!authorityRecordMatches(authority, peerFingerprintSha256Hex)) {
+      fail(ERROR_CODE.PEER_AUTHORITY_MISMATCH);
+    }
+    const applyState = validateRelationshipApplyStateRecord(
+      applyRecord, peerFingerprintSha256Hex, keys, objectDomain, objectId
+    );
+    const branchEvidence = (Array.isArray(branchRecords) ? branchRecords : [])
+      .filter((record) =>
+        isPlainObject(record) &&
+        record.schema === RELATIONSHIP_BRANCH_EVIDENCE_SCHEMA &&
+        record.peerObjectKey === keys.peerObjectKey)
+      .map((record) => safeBranchEvidence(validateRelationshipBranchRecord(
+        record, peerFingerprintSha256Hex, keys, objectDomain, objectId
+      )))
+      .sort((left, right) => left.revisionId.localeCompare(right.revisionId));
+    return Object.freeze({
+      ok: true,
+      regime: RELATIONSHIP_KEY_PREFIX,
+      peerFingerprintSha256Hex,
+      objectDomain,
+      objectId,
+      objectKey: keys.objectKey,
+      peerObjectKey: keys.peerObjectKey,
+      applyState: cloneApplyState(applyState),
+      branchEvidence: Object.freeze(branchEvidence)
+    });
+  }
+
+  async function stageRelationshipApplyIntent(input) {
+    if (!isPlainObject(input)) fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+    const { objectDomain, objectId } = input;
+    const keys = await relationshipKeys(objectDomain, objectId);
+    const reference = validateRelationshipApplyReference(input, keys, objectDomain);
+    const canonicalAnchorRevisionId = input.canonicalAnchorRevisionId == null
+      ? null
+      : input.canonicalAnchorRevisionId;
+    if (canonicalAnchorRevisionId !== null && !isNonEmptyId(canonicalAnchorRevisionId)) {
+      fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+    }
+    const revisionKeys = await relationshipKeys(objectDomain, objectId, reference.revisionId);
+    const db = await activeDatabase();
+    const transaction = db.transaction(
+      [AUTHORITY_STORE, APPLY_STATE_STORE, BRANCH_EVIDENCE_STORE],
+      'readwrite'
+    );
+    const completion = transactionResult(transaction);
+    let result;
+    try {
+      const authority = await requestResult(
+        transaction.objectStore(AUTHORITY_STORE).get(AUTHORITY_KEY)
+      );
+      if (!authorityRecordMatches(authority, peerFingerprintSha256Hex)) {
+        fail(ERROR_CODE.PEER_AUTHORITY_MISMATCH);
+      }
+      const branch = await requestResult(
+        transaction.objectStore(BRANCH_EVIDENCE_STORE).get(reference.branchEvidenceKey)
+      );
+      if (!isPlainObject(branch) ||
+          branch.key !== revisionKeys.key ||
+          branch.revisionId !== reference.revisionId ||
+          branch.revisionBlobSha256Hex !== reference.revisionBlobSha256Hex ||
+          (branch.parentRevisionId ?? null) !== reference.parentRevisionId ||
+          (branch.parentRevisionBlobSha256Hex ?? null) !==
+            reference.parentRevisionBlobSha256Hex) {
+        fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+      }
+      validateRelationshipBranchRecord(
+        branch, peerFingerprintSha256Hex, keys, objectDomain, objectId
+      );
+      const store = transaction.objectStore(APPLY_STATE_STORE);
+      const existing = validateRelationshipApplyStateRecord(
+        await requestResult(store.get(keys.peerObjectKey)),
+        peerFingerprintSha256Hex, keys, objectDomain, objectId
+      );
+      if (existing?.pending) {
+        if (!applyReferenceMatches(existing.pending, reference)) {
+          fail(ERROR_CODE.APPLY_PENDING_UNRESOLVED);
+        }
+        result = Object.freeze({
+          ok: true,
+          verdict: 'pending-existing',
+          unchangedNoOp: true,
+          applyState: cloneApplyState(existing)
+        });
+      } else if (existing?.lastApplied?.revisionId === reference.revisionId) {
+        if (!applyReferenceMatches(existing.lastApplied, reference)) {
+          fail(ERROR_CODE.RELATIONSHIP_STATE_CONFLICT);
+        }
+        result = Object.freeze({
+          ok: true,
+          verdict: 'already-applied',
+          unchangedNoOp: true,
+          applyState: cloneApplyState(existing)
+        });
+      } else {
+        /* The anchor a relationship Apply chains to may be the object's
+         * PUBLISHED ledger tip (this peer rooted the object) as well as its
+         * applied anchor, so - exactly as the accepted chat stage does - only
+         * the reference's own anchor claim is pinned here. */
+        if (reference.canonicalAnchorRevisionId !== canonicalAnchorRevisionId) {
+          fail(ERROR_CODE.RELATIONSHIP_STATE_CONFLICT);
+        }
+        const updatedAt = clock();
+        if (!isIsoTimestamp(updatedAt)) fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+        const updated = {
+          key: keys.peerObjectKey,
+          schema: RELATIONSHIP_APPLY_STATE_SCHEMA,
+          schemaVersion: RELATIONSHIP_APPLY_STATE_SCHEMA_VERSION,
+          peerFingerprintSha256Hex,
+          objectDomain,
+          objectId,
+          objectKey: keys.objectKey,
+          lastApplied: existing?.lastApplied || null,
+          pending: reference,
+          updatedAt
+        };
+        await requestResult(store.put(updated));
+        result = Object.freeze({
+          ok: true,
+          verdict: 'intent-staged',
+          unchangedNoOp: false,
+          applyState: cloneApplyState(updated)
+        });
+      }
+      await completion;
+    } catch (error) {
+      abortQuietly(transaction);
+      try { await completion; } catch (_) { /* expected after abort */ }
+      fail(safeCode(error, ERROR_CODE.DATABASE_TRANSACTION_FAILED));
+    }
+    return result;
+  }
+
+  /*
+   * Commit is LOCKSTEP with the publication ledger: the applied anchor and the
+   * ledger's convergence direction for this object's P02 objectKey are written
+   * in ONE transaction, exactly as the accepted chat commit does. The objectKey
+   * is derived from (objectDomain, objectId) here, so the direction can never
+   * land on another domain's ledger row.
+   */
+  async function commitRelationshipApplyIntent({
+    objectDomain, objectId, revisionId, applyReference
+  } = {}) {
+    const keys = await relationshipKeys(objectDomain, objectId);
+    if (!isNonEmptyId(revisionId)) fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+    const reference = validateRelationshipApplyReference(applyReference, keys, objectDomain);
+    if (reference.revisionId !== revisionId) fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+    const db = await activeDatabase();
+    const transaction = db.transaction(
+      [AUTHORITY_STORE, APPLY_STATE_STORE, LOCAL_PUBLICATION_LEDGER_STORE, BRANCH_EVIDENCE_STORE],
+      'readwrite'
+    );
+    const completion = transactionResult(transaction);
+    let result;
+    try {
+      const authority = await requestResult(
+        transaction.objectStore(AUTHORITY_STORE).get(AUTHORITY_KEY)
+      );
+      if (!authorityRecordMatches(authority, peerFingerprintSha256Hex)) {
+        fail(ERROR_CODE.PEER_AUTHORITY_MISMATCH);
+      }
+      const branch = await requestResult(
+        transaction.objectStore(BRANCH_EVIDENCE_STORE).get(reference.branchEvidenceKey)
+      );
+      if (!isPlainObject(branch) ||
+          branch.revisionId !== reference.revisionId ||
+          branch.revisionBlobSha256Hex !== reference.revisionBlobSha256Hex) {
+        fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+      }
+      validateRelationshipBranchRecord(
+        branch, peerFingerprintSha256Hex, keys, objectDomain, objectId
+      );
+      const store = transaction.objectStore(APPLY_STATE_STORE);
+      const existing = validateRelationshipApplyStateRecord(
+        await requestResult(store.get(keys.peerObjectKey)),
+        peerFingerprintSha256Hex, keys, objectDomain, objectId
+      );
+      if (!existing?.pending) {
+        if (existing?.lastApplied?.revisionId !== revisionId ||
+            !applyReferenceMatches(existing.lastApplied, reference)) {
+          fail(ERROR_CODE.APPLY_PENDING_UNRESOLVED);
+        }
+        result = Object.freeze({
+          ok: true,
+          verdict: 'committed-replay',
+          unchangedNoOp: true,
+          applyState: cloneApplyState(existing)
+        });
+      } else {
+        if (!applyReferenceMatches(existing.pending, reference)) {
+          fail(ERROR_CODE.APPLY_PENDING_UNRESOLVED);
+        }
+        const updatedAt = clock();
+        if (!isIsoTimestamp(updatedAt)) fail(ERROR_CODE.RELATIONSHIP_STATE_INVALID);
+        const updated = {
+          ...existing,
+          lastApplied: existing.pending,
+          pending: null,
+          updatedAt
+        };
+        await requestResult(store.put(updated));
+        await writeLedgerDirection(
+          transaction, objectId, keys.objectKey, CONVERGED_DIRECTION.APPLIED, updatedAt
+        );
+        result = Object.freeze({
+          ok: true,
+          verdict: 'committed',
+          unchangedNoOp: false,
+          applyState: cloneApplyState(updated)
+        });
+      }
+      await completion;
+    } catch (error) {
+      abortQuietly(transaction);
+      try { await completion; } catch (_) { /* expected after abort */ }
+      fail(safeCode(error, ERROR_CODE.DATABASE_TRANSACTION_FAILED));
+    }
+    return result;
+  }
+
   function close() {
     try { database?.close(); } catch (_) { /* ignore */ }
     database = null;
@@ -2855,6 +3448,12 @@ export function createChromeSyncObjectStore({
     readLocalPublicationRetiredForeignIntents,
     markLocalPublicationRetry,
     commitLocalPublicationIntent,
+    /* T05 / D3: the domain-qualified relationship-state ports. */
+    recordRelationshipBranchEvidence,
+    listRelationshipBranchEvidence,
+    readRelationshipApplyState,
+    stageRelationshipApplyIntent,
+    commitRelationshipApplyIntent,
     close
   });
 }
@@ -2881,6 +3480,11 @@ export const ITEM9_1_CONSTANTS = Object.freeze({
   APPLY_STATE_SCHEMA_VERSION,
   BRANCH_EVIDENCE_SCHEMA,
   BRANCH_EVIDENCE_SCHEMA_VERSION,
+  RELATIONSHIP_KEY_PREFIX,
+  RELATIONSHIP_BRANCH_EVIDENCE_SCHEMA,
+  RELATIONSHIP_BRANCH_EVIDENCE_SCHEMA_VERSION,
+  RELATIONSHIP_APPLY_STATE_SCHEMA,
+  RELATIONSHIP_APPLY_STATE_SCHEMA_VERSION,
   MAX_BLOB_BYTES,
   MAX_HEAD_BYTES,
   EXPECTED_IDENTITY,

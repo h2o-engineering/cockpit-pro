@@ -178,12 +178,21 @@ function makeLedger(events, { chatApplyState = null } = {}) {
     return rows.get(objectKey);
   };
   const applyReads = [];
+  const relationshipApplyReads = [];
   return {
-    rows, applyReads,
+    rows, applyReads, relationshipApplyReads,
     listReadOnlyObjectIds: async () => [],
     async readApplySnapshot(objectId) {
       applyReads.push(objectId);
       return { ok: true, observations: [], applyState: chatApplyState };
+    },
+    /* T05 / D3: the domain-qualified relationship apply-state port the
+     * protocol-state helper now requires for the relationship families. This
+     * publication world never applies, so the state is always empty; the
+     * chat objectId-keyed snapshot above is never consulted for them. */
+    async readRelationshipApplyState({ objectDomain, objectId }) {
+      relationshipApplyReads.push(`${objectDomain}:${objectId}`);
+      return { ok: true, objectDomain, objectId, objectKey: await objectKeyHex(objectDomain, objectId, webcrypto), applyState: null, branchEvidence: [] };
     },
     readLocalPublicationTip: async (objectKey) => row(objectKey).tip,
     readLocalPublicationConvergence: async (objectKey) => ({ tip: row(objectKey).tip, convergedDirection: row(objectKey).direction }),
@@ -297,8 +306,9 @@ await section('A folder authoritative-source projection', async () => {
   const one = await projectFolderCatalogState(folderRecord('f_study', 'Study'), { cryptoImplementation: webcrypto });
   check(one.eligible === true && one.eligibility === ELIG.ELIGIBLE, 'local user folder is eligible');
   check(one.objectDomain === FOLDER_DOMAIN && one.objectId === 'f_study', 'folder objectId is the verbatim H2O id');
-  check(JSON.stringify(one.payload) === JSON.stringify({ createdAt: SOURCE_AT, folderId: 'f_study', name: 'Study', schema: 'h2o.studio.folderCatalogState.v1' }),
-    'canonical payload = exact-key set {schema, folderId, name, createdAt} in canonical JSON key order');
+  /* T05 D1: exactly schema/folderId/name; createdAt never enters the payload. */
+  check(JSON.stringify(one.payload) === JSON.stringify({ folderId: 'f_study', name: 'Study', schema: 'h2o.studio.folderCatalogState.v1' }),
+    'canonical payload = exact-key set {schema, folderId, name} in canonical JSON key order (no createdAt)');
   check(one.payloadText === canonicalJson(one.payload) && one.payloadSha256Hex === await sha256HexText(one.payloadText), 'payload bytes are canonical JSON and hashed exactly');
   check(one.revisionId === `relstate-${one.payloadSha256Hex}` && one.revisionBlobSha256Hex === one.payloadSha256Hex, 'deterministic local-source identity derives from the canonical state');
   check(one.sourceUpdatedAtIso === SOURCE_AT, 'sourceUpdatedAtIso from the authoritative updatedAt epoch');
@@ -308,8 +318,14 @@ await section('A folder authoritative-source projection', async () => {
   const coloured = await projectFolderCatalogState(folderRecord('f_study', 'Study', { iconColor: '#FF0000', color: '#FF0000', sortOrder: 3, parent_id: '' }), { cryptoImplementation: webcrypto });
   check(coloured.eligible === true && coloured.payloadText === one.payloadText, 'colour / sortOrder / empty hierarchy never enter the payload (colour deferred)');
   const noCreated = await projectFolderCatalogState({ id: 'fold_chrome_ab12', name: '  Code   Review ', updatedAt: '2026-09-14T11:00:00.000Z' }, { cryptoImplementation: webcrypto });
-  check(noCreated.eligible === true && !('createdAt' in noCreated.payload) && noCreated.payload.name === 'Code Review', 'createdAt optional-absent; name projected in canonical (collapsed, trimmed) form');
+  check(noCreated.eligible === true && !('createdAt' in noCreated.payload) && noCreated.payload.name === 'Code Review', 'no createdAt in the payload; name projected in canonical (collapsed, trimmed) form');
   check(noCreated.sourceUpdatedAtIso === '2026-09-14T11:00:00.000Z', 'ISO source timestamps are normalized, not invented');
+  const createdOnly = await projectFolderCatalogState({ id: 'f_created_only', name: 'Created only', createdAt: SOURCE_MS }, { cryptoImplementation: webcrypto });
+  check(createdOnly.eligible === true && !('createdAt' in createdOnly.payload) && createdOnly.sourceUpdatedAtIso === SOURCE_AT,
+    'D1: the authoritative createdAt is the sourceUpdatedAtIso FALLBACK (head metadata only) and never a payload key');
+  const renamedLater = await projectFolderCatalogState(folderRecord('f_study', 'Study', { updatedAt: Date.parse(RENAME_AT) }), { cryptoImplementation: webcrypto });
+  check(renamedLater.payloadText === one.payloadText && renamedLater.payloadSha256Hex === one.payloadSha256Hex && renamedLater.sourceUpdatedAtIso === RENAME_AT,
+    'D1: a later updatedAt changes only the head timestamp; byte-identical state keeps its payload digest (no false echo)');
   const idOnly = await projectFolderCatalogState({ id: 'fold_3f2504e0-4f89-41d3-9a0c-0305e82c3301', name: 'x', createdAt: SOURCE_MS }, { cryptoImplementation: webcrypto });
   check(idOnly.eligible === true && idOnly.payload.folderId === 'fold_3f2504e0-4f89-41d3-9a0c-0305e82c3301', 'fold_<uuid> ids are adopted verbatim (never minted, never slugified)');
   check((await projectFolderCatalogState({ id: 'f_nostamp', name: 'No stamp' }, { cryptoImplementation: webcrypto })).eligibility === ELIG.INVALID_SOURCE_RECORD,
@@ -586,7 +602,7 @@ await section('I folder root composition', async () => {
   const revision = t.readRevision(studyKey, blob);
   check(revision.schema === 'h2o.studio.syncRevision.v2' && revision.objectDomain === FOLDER_DOMAIN && revision.objectId === 'f_study' && revision.writerSyncPeerId === LOCAL, 'folder root is a v2 envelope of the folder domain');
   check(revision.previousRevisionId === null && revision.previousRevisionBlobSha256 === null, 'folder root has a null parent pair');
-  check(JSON.stringify(revision.payload) === JSON.stringify({ createdAt: SOURCE_AT, folderId: 'f_study', name: 'Study', schema: 'h2o.studio.folderCatalogState.v1' }), 'folder root payload is the canonical folder state');
+  check(JSON.stringify(revision.payload) === JSON.stringify({ folderId: 'f_study', name: 'Study', schema: 'h2o.studio.folderCatalogState.v1' }), 'folder root payload is the canonical folder state (no createdAt)');
   check(revision.payloadSha256 === await sha256HexText(canonicalJson(revision.payload)), 'payload hash matches canonical bytes');
   const head = t.currentHeads().heads.find((h) => h.objectKey === studyKey);
   check(head?.objectDomain === FOLDER_DOMAIN && head.revisionId === revision.revisionId && head.previousRevisionId === null && head.sourceUpdatedAtIso === SOURCE_AT, 'folder head names the root with the source timestamp');
@@ -615,7 +631,7 @@ await section('K folder rename descendant', async () => {
   const child = revisions.find((r) => r.previousRevisionId !== null);
   check(child.previousRevisionId === root.revisionId && child.previousRevisionBlobSha256 === sha256(t.fsa.read(`${REPOSITORY}/objects/${studyKey}/revisions/${blobs.find((b) => t.readRevision(studyKey, b).previousRevisionId === null)}.json`)),
     'descendant names the root by id and blob address');
-  check(child.objectId === 'f_study' && child.payload.name === 'Study Notes' && child.payload.folderId === 'f_study' && child.payload.createdAt === SOURCE_AT, 'rename keeps identity and createdAt; only name changes');
+  check(child.objectId === 'f_study' && child.payload.name === 'Study Notes' && child.payload.folderId === 'f_study' && !('createdAt' in child.payload) && Object.keys(child.payload).sort().join(',') === 'folderId,name,schema', 'rename keeps identity; only name changes; still no createdAt');
   const head = t.currentHeads().heads.find((h) => h.objectKey === studyKey);
   check(head.revisionId === child.revisionId && head.previousRevisionId === root.revisionId && head.sourceUpdatedAtIso === RENAME_AT, 'head advanced to the descendant with the new source timestamp');
 });
@@ -722,17 +738,32 @@ await section('S no native ChatGPT mutation path', async () => {
     for (const token of forbidden) check(!source.includes(token), `${path.basename(file)} contains no ${token}`);
   }
   const background = read('tools/product/extensions/chatgpt/chrome/chrome-live-background.mjs');
-  const strictBlock = background.slice(background.indexOf('const P02_RELATIONSHIP_SOURCE_UNAVAILABLE'), background.indexOf('async function setFolderBindingBridge('));
+  /* The strict READ helpers (T02) are unchanged: no write, no fallback. */
+  const strictBlock = background.slice(background.indexOf('const P02_RELATIONSHIP_SOURCE_UNAVAILABLE'), background.indexOf('/* ---- P02 T05 (Host lease'));
   for (const token of ['setFolderBinding', 'setFolderIconColor', 'moveChatToProject', 'PROJECTS_executeNativeMove', 'importFullBundle', 'storageSet']) {
     check(!strictBlock.includes(token), `background strict helpers contain no ${token}`);
   }
+  /* The strict WRITE wrappers (T05 Host lease) sit beside them and reach the
+   * page bridge only in strict mode: no cache, no localStorage, no archive. */
+  const strictWriteBlock = background.slice(background.indexOf('/* ---- P02 T05 (Host lease'), background.indexOf('async function setFolderBindingBridge('));
+  for (const token of ['setFolderIconColor', 'moveChatToProject', 'PROJECTS_executeNativeMove', 'importFullBundle', 'storageSet', 'localStorage.', 'normalizeFolderBinding(', 'chrome.storage', 'readJson(', 'writeJson(']) {
+    check(!stripComments(strictWriteBlock).includes(token), `background strict write wrappers contain no ${token}`);
+  }
+  check(strictWriteBlock.includes('queryFolderBridge("applyFolderMetadataOperation", { strict: true') && strictWriteBlock.includes('queryFolderBridge("setFolderBinding", { strict: true'),
+    'background strict write wrappers call the page bridge in strict mode only');
   const bridge = bridgeModule.makeChromeLiveFolderBridgePageJs();
-  const strictBridge = bridge.slice(bridge.indexOf('P02 T02 strict reads'), bridge.indexOf('function setFolderIconColor('));
+  const strictBridge = bridge.slice(bridge.indexOf('P02 T02 strict reads'), bridge.indexOf('P02 T05 strict writes'));
   for (const token of ['setBinding(', 'setFolderIconColor', 'writeJson(', 'localStorage.setItem', 'removeItem', 'dispatchEvent', 'archiveBoot', 'upsertLatestSnapshotMeta', 'tryLoadFoldersFallback', 'keyArchiveFolder']) {
     check(!strictBridge.includes(token), `page-bridge strict reads contain no ${token}`);
   }
+  const strictWriteBridge = bridge.slice(bridge.indexOf('P02 T05 strict writes'), bridge.indexOf('function setFolderIconColor('));
+  for (const token of ['setFolderIconColor', 'writeJson(', 'readJson(', 'localStorage.', 'removeItem', 'delKey(', 'dispatchEvent', 'archiveBoot', 'upsertLatestSnapshotMeta', 'tryLoadFoldersFallback', 'keyArchiveFolder', 'resolveFolderInfo(', 'H2O.projects', 'moveChatToProject']) {
+    check(!stripComments(strictWriteBridge).includes(token), `page-bridge strict writes contain no ${token}`);
+  }
+  check(strictWriteBridge.includes('api.applyMetadataOperation(operation, {})') && strictWriteBridge.includes('api.setBinding(chatId, folderId, { source: STRICT_WRITE_SOURCE_TAG') && strictWriteBridge.includes('api.getBinding(chatId)'),
+    'page-bridge strict writes use only H2O.folders.applyMetadataOperation / setBinding and read back through getBinding');
   check(t.source.state.calls.every((call) => call === 'listFolders' || call.startsWith('resolveBindings:')), 'the owner only ever called the two read operations on the relationship source');
-  check(P02_CHROME_PUBLICATION_V2.NON_CHAT_RECEIVE === 'disabled-until-domain-qualified-idb-state', 'non-chat receive stays disabled');
+  check(P02_CHROME_PUBLICATION_V2.NON_CHAT_RECEIVE === 'disabled-until-domain-qualified-idb-state', 'publication owner diagnostic label unchanged (T05 receive posture lives in the counterpart; owner not in the T05 write set)');
   const reconcile = read('packages/browser-adapters/chrome/sync-background-reconcile.mjs');
   check(!reconcile.includes('relationshipAuthority.listFolders(') && !reconcile.includes('relationshipAuthority.resolveBindings('), 'the background runtime hands the relationship authority to the owner and never reads it itself');
   check(reconcile.includes('relationshipAuthority = null') && reconcile.includes('relationshipAuthority,\n    lockManager,'), 'runtime composes the optional relationship authority into the publication owner');
@@ -758,7 +789,7 @@ console.log(JSON.stringify({
   sections,
   failures,
   publications: results.map((r) => ({ outcome: r.outcome, objectDomain: r.selectedObjectDomain ?? null, objectId: r.selectedObjectId ?? null, eligibleCount: r.eligibleCount })),
-  directionCoverage: 'RELATIONSHIP_SYNC_DIRECTION_COVERAGE=CHROME_TO_DESKTOP_ONLY',
+  directionCoverage: 'RELATIONSHIP_SYNC_DIRECTION_COVERAGE=BIDIRECTIONAL',
   liveMutation: 'none (memory repository, in-memory ledger doubles, vm-hosted page bridge)'
 }, null, 2));
 process.exit(failures.length === 0 ? 0 : 1);

@@ -70,6 +70,20 @@ import { createChromeVerifiedTipMemo } from './sync-p02-tip-memo-chrome-v2.mjs';
 import { createP02AnchorSet } from '../../core/sync-p02-anchor-set-v2.mjs';
 import { createChromeP02PublicationOwner }
   from './sync-p02-publication-chrome-v2.mjs';
+/*
+ * P02 T05. The Chrome relationship COUNTERPART: Receive/admission/Apply of the
+ * folder and chat-folder-binding families over the store's domain-qualified
+ * ports, materialized only through the strict H2O Folder owner writer. Imported
+ * here so the packer's esbuild bundle carries it into bg.js beside the accepted
+ * chat path; nothing about the chat archive Apply is routed through it.
+ */
+import {
+  P02_CHROME_RELATIONSHIP_COUNTERPART_V2,
+  createChromeRelationshipCounterpart,
+  partitionTrustedPeerAdvertisements,
+  sortMergedDescriptors
+} from './sync-relationship-counterpart-chrome-v2.mjs';
+import { isRelationshipObjectDomain } from '../../core/sync-relationship-domains-v2.mjs';
 
 /*
  * Z7 composition provenance, asserted by the generated-production validator so
@@ -107,12 +121,17 @@ export const P02_BACKGROUND_COMPOSITION = Object.freeze({
   firstPublication: 'trusted-human-manual-only',
   automaticPublication: 'auto-mode-descendants-only',
   /* P02 T02: relationship families publish through the same owner from the
-   * strict page-world source; Chrome receive/apply of non-chat families stays
-   * disabled until domain-qualified IDB state lands (T05). */
+   * strict page-world source. P02 T05: they are also received, admitted and
+   * applied on Chrome through the domain-qualified counterpart, whose only
+   * write path is the strict H2O Folder owner API. */
   relationshipFamilies: Object.freeze(['studio.folder.v1', 'studio.chat-folder-binding.v1']),
   relationshipSource: 'strict-page-world-h2o-folders',
   candidateSequencing: 'deterministic-one-object-per-attempt',
-  nonChatReceive: 'disabled-until-domain-qualified-idb-state',
+  nonChatReceive: P02_CHROME_RELATIONSHIP_COUNTERPART_V2.NON_CHAT_RECEIVE,
+  relationshipCounterpart: P02_CHROME_RELATIONSHIP_COUNTERPART_V2.SCHEMA,
+  relationshipWriter: 'strict-h2o-folders-owner-api',
+  relationshipApply: 'trusted-human-manual-one-object-per-attempt',
+  relationshipDirectionCoverage: P02_CHROME_RELATIONSHIP_COUNTERPART_V2.DIRECTION_COVERAGE,
   webdavReachable: false
 });
 
@@ -482,6 +501,12 @@ export function createChromeBackgroundSyncRuntime({
    * folder-bridge helpers in STRICT mode. Optional: absent, the publication
    * owner publishes the chat family only, exactly as before. It is never
    * defaulted to a mirror, cache or fallback here.
+   *
+   * P02 T05. The same object may carry the strict WRITE capabilities
+   * ({ applyFolderOperation, setBinding }) - fixed-purpose service-worker
+   * wrappers over the strict folder-bridge write operations. When present,
+   * the relationship counterpart can Apply; when absent, relationship Apply
+   * is a typed refusal (writer unavailable) and nothing else changes.
    */
   relationshipAuthority = null,
   findActiveStudioContexts,
@@ -516,7 +541,11 @@ export function createChromeBackgroundSyncRuntime({
   }
   if (relationshipAuthority !== null &&
       (typeof relationshipAuthority?.listFolders !== 'function' ||
-        typeof relationshipAuthority?.resolveBindings !== 'function')) {
+        typeof relationshipAuthority?.resolveBindings !== 'function' ||
+        (relationshipAuthority?.applyFolderOperation !== undefined &&
+          typeof relationshipAuthority.applyFolderOperation !== 'function') ||
+        (relationshipAuthority?.setBinding !== undefined &&
+          typeof relationshipAuthority.setBinding !== 'function'))) {
     throw codeError('background-sync-runtime-unavailable');
   }
 
@@ -1191,9 +1220,54 @@ export function createChromeBackgroundSyncRuntime({
   }
 
   /*
+   * P02 T05. The relationship counterpart, composed once and only when the
+   * strict relationship source is supplied. Its revision reads are bound to
+   * the CURRENT repository handle scope, so it can only read inside the two
+   * entry points that open one; outside a scope the read fails closed.
+   */
+  let relationshipCounterpartInstance = null;
+  function relationshipCounterpart() {
+    if (relationshipAuthority === null) return null;
+    if (relationshipCounterpartInstance === null) {
+      relationshipCounterpartInstance = createChromeRelationshipCounterpart({
+        syncStore,
+        relationshipAuthority,
+        archiveAuthority,
+        sha256HexBytes,
+        cryptoImplementation,
+        readRevisionBytes: (input) => {
+          const surfaces = repositoryReadSurfaces();
+          if (surfaces === null) throw codeError('repository-handle-absent');
+          return surfaces.fsa.readRevision(input);
+        }
+      });
+    }
+    return relationshipCounterpartInstance;
+  }
+
+  /* Relationship descriptors are classified through the counterpart so the
+   * dependency block (folder-missing / chat-missing) and the strict-source
+   * read of the candidate ride beside the shared graph verdict; chat
+   * descriptors keep the accepted classifier call exactly. */
+  async function classifyDescriptor(descriptor) {
+    const counterpart = relationshipCounterpart();
+    if (counterpart !== null && isRelationshipObjectDomain(descriptor?.objectDomain)) {
+      return counterpart.classifyRelationshipDescriptor(descriptor);
+    }
+    return classifyObjectState(descriptor);
+  }
+
+  /*
    * The full read-only descriptor enumerator, replacing the ids-only seam. It
    * owns realm translation and nothing else: the classifier and the ancestry
    * model stay in the shared cores.
+   *
+   * P02 T05: the trusted advertisements are partitioned by family. Relationship
+   * heads are described by the counterpart (domain-qualified state); every
+   * other head still goes to the accepted chat enumerator, where an unknown
+   * domain fails closed exactly as before. The merged set keeps a deterministic
+   * family order (folder, chat, binding) and the accepted per-descriptor order
+   * within a family.
    */
   async function enumerateDescriptors() {
     const peers = await configuredPeerRows();
@@ -1210,9 +1284,14 @@ export function createChromeBackgroundSyncRuntime({
       return [];
     }
     const surfaces = repositoryReadSurfaces();
-    const trustedPeerAdvertisements = surfaces === null
+    const discovered = surfaces === null
       ? []
       : await discoverTrustedPeerAdvertisements(surfaces, peers);
+    const counterpart = relationshipCounterpart();
+    const partitioned = counterpart === null
+      ? { chat: discovered, relationship: [] }
+      : partitionTrustedPeerAdvertisements(discovered);
+    const trustedPeerAdvertisements = partitioned.chat;
     const branchEvidenceReader = async ({ objectDomain, objectId }) => {
       const rows = typeof syncStore.listBranchEvidence === 'function'
         ? await syncStore.listBranchEvidence(objectId)
@@ -1245,7 +1324,12 @@ export function createChromeBackgroundSyncRuntime({
       branchEvidenceReader,
       cryptoImplementation
     }).enumerate();
-    return enumeration?.descriptors ?? [];
+    const chatDescriptors = enumeration?.descriptors ?? [];
+    if (counterpart === null || partitioned.relationship.length === 0) return chatDescriptors;
+    const relationshipDescriptors = await counterpart.enumerateRemoteDescriptors({
+      trustedPeerAdvertisements: partitioned.relationship
+    });
+    return sortMergedDescriptors([...chatDescriptors, ...relationshipDescriptors]);
   }
 
   async function descriptorFor(scope) {
@@ -1268,7 +1352,7 @@ export function createChromeBackgroundSyncRuntime({
       : await descriptorFor(descriptorOrScope);
     const current = descriptor ?? descriptorOrScope;
     return Object.freeze({
-      ...classifyObjectState(current),
+      ...(await classifyDescriptor(current)),
       descriptor: current
     });
   }
@@ -1279,21 +1363,48 @@ export function createChromeBackgroundSyncRuntime({
       manualApplyEligibility = null;
       return descriptors;
     }
-    const eligible = descriptors.filter((descriptor) => {
-      const verdict = classifyObjectState(descriptor);
-      return verdict.classification === 'remote-ahead' &&
-        verdict.applyEligibleByEvidence === true &&
-        clean(verdict.applyCandidateRevisionId) !== '';
-    });
-    manualApplyEligibility = eligible.length === 1
-      ? Object.freeze({ status: 'selected', count: 1 })
-      : Object.freeze({
+    /* One object per manual Apply, in the deterministic merged order: the
+     * FIRST eligible descriptor (a folder before the binding that needs it)
+     * is the selection; the others wait for the next trusted click. */
+    const eligible = [];
+    for (const descriptor of descriptors) {
+      const verdict = await classifyDescriptor(descriptor);
+      if (verdict.classification === 'remote-ahead' &&
+          verdict.applyEligibleByEvidence === true &&
+          clean(verdict.applyCandidateRevisionId) !== '') {
+        eligible.push(descriptor);
+      }
+    }
+    /* Accepted chat rule UNCHANGED: several eligible CHAT objects remain an
+     * ambiguous selection and nothing is applied. Relationship candidates
+     * (P02 T05) are sequenced one per attempt in the deterministic family
+     * order (folder, chat, binding): with at most one eligible chat, the
+     * first member of the merged order is the selection and the rest wait. */
+    const chatEligible = eligible.filter((descriptor) =>
+      !isRelationshipObjectDomain(descriptor.objectDomain));
+    const relationshipEligible = eligible.filter((descriptor) =>
+      isRelationshipObjectDomain(descriptor.objectDomain));
+    if (chatEligible.length > 1 || eligible.length === 0) {
+      manualApplyEligibility = Object.freeze({
         status: eligible.length === 0
           ? 'no-eligible-apply'
           : 'multiple-eligible-apply',
         count: eligible.length
       });
-    return eligible.length === 1 ? eligible : [];
+      return [];
+    }
+    if (relationshipEligible.length === 0) {
+      manualApplyEligibility = Object.freeze({ status: 'selected', count: 1 });
+      return chatEligible;
+    }
+    const ordered = sortMergedDescriptors([...chatEligible, ...relationshipEligible]);
+    manualApplyEligibility = Object.freeze({
+      status: 'selected', count: eligible.length,
+      selectedObjectDomain: ordered[0].objectDomain,
+      selectedObjectId: ordered[0].objectId,
+      deferredCount: eligible.length - 1
+    });
+    return [ordered[0]];
   }
 
   /*
@@ -1314,7 +1425,17 @@ export function createChromeBackgroundSyncRuntime({
       readRevisionBytes: ({ objectKey, revisionBlobSha256 }) =>
         surfaces.fsa.readRevision({ objectKey, revisionBlobSha256 }),
       fetchAncestry: (input) => surfaces.reader.fetchAncestry(input),
-      readAdmittedEvidence: async ({ objectId }) => {
+      /* P02 T05: every port below dispatches on the tip's own objectDomain.
+       * Relationship families read and admit through the counterpart's
+       * domain-qualified ports; the chat family keeps the accepted path
+       * byte-for-byte. A relationship tip without a composed counterpart is a
+       * typed refusal, never a chat admission. */
+      readAdmittedEvidence: async ({ objectDomain, objectId }) => {
+        if (isRelationshipObjectDomain(objectDomain)) {
+          const counterpart = relationshipCounterpart();
+          if (counterpart === null) throw codeError('relationship-counterpart-not-composed');
+          return counterpart.readAdmittedEvidence({ objectDomain, objectId });
+        }
         const rows = typeof syncStore.listBranchEvidence === 'function'
           ? await syncStore.listBranchEvidence(objectId)
           : [];
@@ -1324,14 +1445,31 @@ export function createChromeBackgroundSyncRuntime({
           disposition: record.disposition
         }));
       },
-      admitRevision: (input) => branchAdmission.admitV2Revision({
-        revision: input.revision,
-        revisionBlobBytes: input.revisionBlobBytes,
-        protocolState: input.protocolState
-      }),
+      admitRevision: (input) => {
+        if (isRelationshipObjectDomain(input.objectDomain)) {
+          const counterpart = relationshipCounterpart();
+          if (counterpart === null) throw codeError('relationship-counterpart-not-composed');
+          return counterpart.admissionFor(input.objectDomain).admitV2Revision({
+            revision: input.revision,
+            revisionBlobBytes: input.revisionBlobBytes,
+            protocolState: input.protocolState
+          });
+        }
+        return branchAdmission.admitV2Revision({
+          revision: input.revision,
+          revisionBlobBytes: input.revisionBlobBytes,
+          protocolState: input.protocolState
+        });
+      },
       classifyObject: async (input) => {
         const descriptor = await descriptorFor(input);
-        if (descriptor) return classifyObjectState(descriptor);
+        if (descriptor) return classifyDescriptor(descriptor);
+        if (isRelationshipObjectDomain(input.objectDomain)) {
+          const counterpart = relationshipCounterpart();
+          if (counterpart === null) throw codeError('relationship-counterpart-not-composed');
+          return counterpart.classifyRelationshipDescriptor(
+            await counterpart.describeScope(input));
+        }
         const retained = typeof syncStore.listBranchEvidence === 'function'
           ? await syncStore.listBranchEvidence(input.objectId)
           : [];
@@ -1355,13 +1493,23 @@ export function createChromeBackgroundSyncRuntime({
       },
       anchorSetFor: async (scope) => {
         const descriptor = await descriptorFor(scope);
-        return descriptor?.p02AnchorSet ?? createP02AnchorSet({ pairs: [] });
+        if (descriptor?.p02AnchorSet) return descriptor.p02AnchorSet;
+        const counterpart = relationshipCounterpart();
+        if (counterpart !== null && isRelationshipObjectDomain(scope.objectDomain)) {
+          return counterpart.anchorSetFor(scope);
+        }
+        return createP02AnchorSet({ pairs: [] });
       },
       readTipMemo: (input) => tipMemo.read(input),
       writeTipMemo: (input) => tipMemo.record(input),
       protocolStateFor: async (scope) => {
         const descriptor = await descriptorFor(scope);
-        return descriptor?.protocolState ?? {};
+        if (descriptor?.protocolState) return descriptor.protocolState;
+        const counterpart = relationshipCounterpart();
+        if (counterpart !== null && isRelationshipObjectDomain(scope.objectDomain)) {
+          return counterpart.protocolStateFor(scope);
+        }
+        return {};
       },
       /* W-2: Apply structurally unavailable. W-3 injects the Chrome adapter. */
       applyAuthority: null
@@ -1374,8 +1522,16 @@ export function createChromeBackgroundSyncRuntime({
     enumerate: enumerateRuntimeDescriptors,
     classify: classifyCurrentDescriptor,
     retainedEvidenceFor: async (descriptor) => {
-      if (typeof syncStore.listBranchEvidence !== 'function') return [];
-      const rows = await syncStore.listBranchEvidence(descriptor.objectId);
+      /* P02 T05: capacity accounting reads the relationship regime for the
+       * relationship families and the accepted chat regime otherwise. */
+      const relationship = isRelationshipObjectDomain(descriptor?.objectDomain) &&
+        typeof syncStore.listRelationshipBranchEvidence === 'function';
+      if (!relationship && typeof syncStore.listBranchEvidence !== 'function') return [];
+      const rows = relationship
+        ? await syncStore.listRelationshipBranchEvidence({
+          objectDomain: descriptor.objectDomain, objectId: descriptor.objectId
+        })
+        : await syncStore.listBranchEvidence(descriptor.objectId);
       return (rows || []).map((record) => ({
         revisionId: record.revisionId,
         revisionBlobSha256: record.revisionBlobSha256Hex,
@@ -1445,6 +1601,19 @@ export function createChromeBackgroundSyncRuntime({
           if (peers.length !== 1 || !configuredPeer) {
             throw codeError('p02-chrome-apply-v2-peer-authority-invalid');
           }
+          /* P02 T05: a relationship candidate is applied by the counterpart
+           * (strict H2O Folder owner writes, domain-qualified state). The
+           * chat archive Apply below is untouched. */
+          if (isRelationshipObjectDomain(descriptor?.objectDomain)) {
+            const counterpart = relationshipCounterpart();
+            if (counterpart === null) throw codeError('relationship-counterpart-not-composed');
+            lastManualApplyResult = await counterpart.applySelectedRelationshipRevision({
+              descriptor,
+              classifierVerdict: freshVerdict,
+              configuredPeer
+            });
+            return lastManualApplyResult;
+          }
           const applyV2 = createChromeV2Apply({
             evidenceStore: syncStore,
             archiveAuthority,
@@ -1504,7 +1673,11 @@ export function createChromeBackgroundSyncRuntime({
       p02GateState: p02Runtime.gateDecision()?.state ?? 'not-yet-read',
       p02Active: false,
       p02WriterDiscovery: lastWriterDiscovery,
-      p02Publication: p02Publication.diagnose()
+      p02Publication: p02Publication.diagnose(),
+      /* P02 T05: the composed receiving half of the relationship families. */
+      p02RelationshipCounterpart: relationshipAuthority === null
+        ? Object.freeze({ composed: false, nonChatReceive: 'not-composed' })
+        : Object.freeze({ composed: true, ...relationshipCounterpart().diagnose() })
     });
   }
 

@@ -3520,6 +3520,70 @@ async function resolveFolderBindingsStrict(chatIds, nsDisk = DEFAULT_NS_DISK) {
   return p02StrictEnvelope(result, "bindings");
 }
 
+/* ---- P02 T05 (Host lease EXT-P02-T05-HOST-CHROME-RELATIONSHIP-WRITE-ADAPTER):
+ * STRICT relationship WRITE wrappers for the Sync counterpart.
+ * Fixed-purpose service-worker wrappers over the strict folder-bridge write
+ * operations: create-with-verbatim-id / rename through the H2O-owned
+ * H2O.folders.applyMetadataOperation and bind / move / unbind through
+ * H2O.folders.setBinding. Every result must carry the strict owner tag
+ * { source: "H2O.folders", strict: true } and a boolean ok; anything else -
+ * no ChatGPT tab, bridge timeout, owner API missing, untagged result - is the
+ * typed relationship-source-unavailable refusal. No cache, no localStorage,
+ * no archive-derived fallback, no retry, no unrelated background behaviour. */
+const P02_RELATIONSHIP_WRITE_UNSUPPORTED = "relationship-write-operation-unsupported";
+
+function p02StrictWriteEnvelope(result, writer) {
+  const valid = result && typeof result === "object" &&
+    result.strict === true && result.source === "H2O.folders" &&
+    result.writer === writer && typeof result.ok === "boolean";
+  if (!valid) throw p02RelationshipSourceError(new Error(P02_RELATIONSHIP_SOURCE_UNAVAILABLE + ":write-not-strict"));
+  return result;
+}
+
+function p02RelationshipWriteError(error) {
+  const text = String(error && (error.message || error) || "");
+  if (text.includes(P02_RELATIONSHIP_WRITE_UNSUPPORTED)) {
+    const typed = new Error(text.slice(text.indexOf(P02_RELATIONSHIP_WRITE_UNSUPPORTED)).split("\\n")[0]);
+    typed.code = P02_RELATIONSHIP_WRITE_UNSUPPORTED;
+    return typed;
+  }
+  return p02RelationshipSourceError(error);
+}
+
+async function applyFolderMetadataOperationStrict(operation, nsDisk = DEFAULT_NS_DISK) {
+  const operationType = String(operation && operation.operationType || "").trim();
+  const folderId = String(operation && operation.folderId || "").trim();
+  const name = typeof (operation && operation.name) === "string" ? operation.name : "";
+  if ((operationType !== "create-folder" && operationType !== "rename-folder") || !folderId || !name) {
+    const typed = new Error(P02_RELATIONSHIP_WRITE_UNSUPPORTED + ":" + (operationType || "operation-type-missing"));
+    typed.code = P02_RELATIONSHIP_WRITE_UNSUPPORTED;
+    throw typed;
+  }
+  let result;
+  try {
+    result = await queryFolderBridge("applyFolderMetadataOperation", { strict: true, operationType, folderId, name }, nsDisk);
+  } catch (error) {
+    throw p02RelationshipWriteError(error);
+  }
+  return p02StrictWriteEnvelope(result, "H2O.folders.applyMetadataOperation");
+}
+
+async function setFolderBindingStrict(chatId, folderId, nsDisk = DEFAULT_NS_DISK) {
+  const id = normalizeChatId(chatId);
+  if (!id) {
+    const typed = new Error(P02_RELATIONSHIP_WRITE_UNSUPPORTED + ":chat-id-missing");
+    typed.code = P02_RELATIONSHIP_WRITE_UNSUPPORTED;
+    throw typed;
+  }
+  let result;
+  try {
+    result = await queryFolderBridge("setFolderBinding", { strict: true, chatId: id, folderId: String(folderId || "") }, nsDisk);
+  } catch (error) {
+    throw p02RelationshipWriteError(error);
+  }
+  return p02StrictWriteEnvelope(result, "H2O.folders.setBinding");
+}
+
 async function setFolderBindingBridge(chatId, folderId, nsDisk = DEFAULT_NS_DISK) {
   const id = normalizeChatId(chatId);
   if (!id) throw new Error("missing chatId");
@@ -14078,10 +14142,15 @@ if (ARCHIVE_WORKBENCH_ENABLED &&
           importFullBundle: ({ bundle, mode = "merge" } = {}) =>
             importFullBundle(bundle, mode),
         }),
-        /* P02 T02: strict page-world relationship source (read-only). */
+        /* P02 T02: strict page-world relationship source (read-only).
+         * P02 T05 (Sync-owned): the strict write capabilities the relationship
+         * counterpart may invoke - and nothing else - ride on the same object.
+         * They are the Host-leased wrappers above; no other writer exists. */
         relationshipAuthority: Object.freeze({
           listFolders: () => getFoldersListStrict(),
           resolveBindings: (chatIds) => resolveFolderBindingsStrict(chatIds),
+          applyFolderOperation: (operation) => applyFolderMetadataOperationStrict(operation),
+          setBinding: ({ chatId, folderId } = {}) => setFolderBindingStrict(chatId, folderId),
         }),
       });
     __h2oBackgroundSyncRuntime.install();

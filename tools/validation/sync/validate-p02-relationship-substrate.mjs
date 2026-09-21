@@ -24,8 +24,11 @@
  *   I  runtime collision regression: same peer, same objectId, chat + binding
  *      rows; the chat runtime and the Desktop enumerator select only the chat
  *      row and never touch the binding row;
- *   J  Chrome publication-side domain-qualified protocol state: a binding
- *      descriptor never inherits the chat object's apply/protocol state;
+ *   J  Chrome domain-qualified protocol state: a binding descriptor never
+ *      inherits the chat object's apply/protocol state; since T05 the
+ *      relationship families read their OWN domain-qualified apply state
+ *      (D3) while the chat family keeps its accepted read path, and the
+ *      Chrome IDB DATABASE_VERSION remains 4;
  *   K  pack / dist inventory carries the new modules and the packed layout
  *      resolves their imports;
  *   L  writer identity: the generic allowlist does not name
@@ -143,8 +146,15 @@ await section('A domain registration', async () => {
     'folder family registered with the ratified schema tag');
   check(R.BINDING.OBJECT_DOMAIN === BINDING_DOMAIN && R.BINDING.PAYLOAD_SCHEMA === 'h2o.studio.chatFolderBinding.v1',
     'binding family registered with the ratified schema tag');
-  check(R.FOLDER.REQUIRED_KEYS.join(',') === 'schema,folderId,name' && R.FOLDER.OPTIONAL_KEYS.join(',') === 'createdAt',
-    'folder exact-key set: schema, folderId, name (+ optional-absent createdAt)');
+  /* T05 D1 (RC-P02-T05-D1-01): the exact key set IS the required set. */
+  check(R.FOLDER.REQUIRED_KEYS.join(',') === 'schema,folderId,name' && R.FOLDER.OPTIONAL_KEYS.length === 0,
+    'folder exact-key set: schema, folderId, name (no optional keys)');
+  check(Array.isArray(R.FOLDER.PROHIBITED_KEYS) && R.FOLDER.PROHIBITED_KEYS.includes('createdAt') &&
+    vectors.contract.folderCreatedAt === 'PROHIBITED_FROM_CANONICAL_PAYLOAD' &&
+    vectors.contract.folderCanonicalPayloadKeys.join(',') === 'schema,folderId,name',
+  'D1: createdAt is prohibited from canonical folder payload bytes (contract + shared vectors)');
+  check(!('FOLDER_CREATED_AT_INVALID' in domains.P02_RELATIONSHIP_DOMAIN_ERROR),
+    'D1: no createdAt acceptance semantics remain in the core contract');
   check(R.BINDING.REQUIRED_KEYS.join(',') === 'schema,chatId,folderId' && R.BINDING.OPTIONAL_KEYS.length === 0,
     'binding exact-key set: schema, chatId, folderId');
   check(R.FOLDER.ID_GRAMMAR === '^[A-Za-z0-9_.:-]{1,160}$' && R.FOLDER.NAME_MAX_CODE_POINTS === 200,
@@ -212,7 +222,14 @@ await section('B folder strict contract vectors', async () => {
     domains.isCanonicalFolderName('Study Notes') && !domains.isCanonicalFolderName('Study  Notes'),
   'canonicalFolderName collapses whitespace for projectors; validator refuses uncollapsed');
   const view = domains.validateFolderCatalogStatePayload(vectors.folder.positive[0].payload, vectors.folder.positive[0].objectId);
-  check(Object.isFrozen(view) && view.objectDomain === FOLDER_DOMAIN && view.createdAt === null, 'folder validator returns a frozen typed view');
+  check(Object.isFrozen(view) && view.objectDomain === FOLDER_DOMAIN && !('createdAt' in view) &&
+    Object.keys(view).sort().join(',') === 'folderId,name,objectDomain,objectId', 'folder validator returns a frozen typed view without createdAt');
+  /* D1 negative control independent of the vector file: any createdAt value
+   * shape is the exact-key refusal naming the key. */
+  for (const value of ['2026-09-14T10:15:30.123Z', null, 1757844930123]) {
+    check(await codeOf(() => domains.validateFolderCatalogStatePayload({ schema: 'h2o.studio.folderCatalogState.v1', folderId: 'f_abc123', name: 'Study', createdAt: value }, 'f_abc123')) === 'p02-rel-folder-payload-key-rejected',
+      `D1: createdAt (${JSON.stringify(value)}) is refused as an unknown key`);
+  }
 });
 
 await section('C binding strict contract vectors', async () => {
@@ -620,7 +637,19 @@ await section('J Chrome publication-side domain-qualified protocol state', async
     },
     async readLocalPublicationTip(objectKey) { calls.push(['readLocalPublicationTip', objectKey]); return ledger.get(objectKey)?.tip ?? null; },
     async readLocalPublicationConvergence(objectKey) { calls.push(['readLocalPublicationConvergence', objectKey]); const e = ledger.get(objectKey); return e ? { tip: e.tip, convergedDirection: e.convergedDirection } : { tip: null, convergedDirection: null }; },
-    async resolveLocalPublicationPending(objectKey) { calls.push(['resolveLocalPublicationPending', objectKey]); return { state: ledger.get(objectKey)?.pending ?? 'Clean' }; }
+    async resolveLocalPublicationPending(objectKey) { calls.push(['resolveLocalPublicationPending', objectKey]); return { state: ledger.get(objectKey)?.pending ?? 'Clean' }; },
+    /* T05 / D3: the domain-qualified relationship apply state, keyed by
+     * (objectDomain, objectId). The binding row shares the chat objectId and
+     * carries its OWN applied anchor; the folder has none. */
+    async readRelationshipApplyState({ objectDomain, objectId }) {
+      calls.push(['readRelationshipApplyState', objectDomain, objectId]);
+      const objectKey = await contract.objectKeyHex(objectDomain, objectId, webcrypto);
+      if (objectDomain === BINDING_DOMAIN && objectId === OBJECT) {
+        return { ok: true, objectDomain, objectId, objectKey, branchEvidence: [{ revisionId: 'binding-applied-r1' }],
+          applyState: { lastApplied: { referenceKind: 'branch-evidence-v2', revisionId: 'binding-applied-r1', revisionBlobSha256Hex: '8'.repeat(64), payloadSha256Hex: '9'.repeat(64) }, pending: null } };
+      }
+      return { ok: true, objectDomain, objectId, objectKey, branchEvidence: [], applyState: null };
+    }
   };
   const chat = await chromeState.readChromeDomainProtocolState({ objectDomain: CHAT_DOMAIN, objectId: OBJECT, syncStore, cryptoImplementation: webcrypto });
   check(chat.objectKey === chatKey && chat.applyStateSource === 'chat-object-id-apply-store' && chat.nonChatReceive === null, 'chat: objectKey and apply source as accepted');
@@ -635,12 +664,16 @@ await section('J Chrome publication-side domain-qualified protocol state', async
   const binding = await chromeState.readChromeDomainProtocolState({ objectDomain: BINDING_DOMAIN, objectId: OBJECT, syncStore, cryptoImplementation: webcrypto });
   check(binding.objectKey === bindingKey && binding.objectKey !== chat.objectKey, 'binding: distinct objectKey for the same objectId');
   check(calls.every((c) => c[0] !== 'readApplySnapshot'), 'binding: the objectId-keyed apply store is NEVER read');
-  check(calls.every((c) => c[0] === 'readApplySnapshot' || c[1] === bindingKey), 'binding: every ledger read uses the binding objectKey');
-  check(binding.applyStateSource === 'none-until-domain-qualified-idb' && binding.nonChatReceive === 'disabled-until-domain-qualified-idb-state',
-    'binding: apply source typed absent, receive disabled until domain-qualified IDB');
-  check(binding.protocolState.lastApplied === null && binding.protocolState.pendingApply === null && binding.protocolState.consumedRevisionBlobSha256 === null &&
-    binding.protocolState.retainedObservationRevisionIds.length === 0 && binding.identity.appliedPayloadSha256 === null,
-  'binding: inherits none of the chat object\'s applied anchor, pending apply or observations');
+  check(calls.every((c) => c[0] === 'readApplySnapshot' || c[0] === 'readRelationshipApplyState' || c[1] === bindingKey), 'binding: every ledger read uses the binding objectKey');
+  check(binding.applyStateSource === 'relationship-domain-qualified-apply-store' && binding.nonChatReceive === 'domain-qualified-idb-state',
+    'binding: apply source is the T05 domain-qualified relationship store; receive posture domain-qualified');
+  check(calls.some((c) => c[0] === 'readRelationshipApplyState' && c[1] === BINDING_DOMAIN && c[2] === OBJECT),
+    'binding: apply state read through the domain-qualified port for (binding domain, objectId)');
+  check(binding.protocolState.lastApplied?.revisionId === 'binding-applied-r1' && binding.protocolState.lastApplied?.payloadSha256 === '9'.repeat(64) &&
+    binding.protocolState.lastApplied?.revisionId !== 'chat-applied-r1' && binding.protocolState.pendingApply === null &&
+    binding.protocolState.consumedRevisionBlobSha256 === '8'.repeat(64) &&
+    binding.protocolState.retainedObservationRevisionIds.join(',') === 'binding-applied-r1' && binding.identity.appliedPayloadSha256 === '9'.repeat(64),
+  'binding: carries its OWN applied anchor and inherits none of the chat object\'s applied anchor, pending apply or observations');
   check(binding.protocolState.lastPublished?.revisionId === 'binding-pub-r1' && binding.identity.publishedPayloadSha256 === '4'.repeat(64) && binding.protocolState.pendingOperation === null && binding.pending === false,
     'binding: its own publication tip only');
 
@@ -648,6 +681,21 @@ await section('J Chrome publication-side domain-qualified protocol state', async
   const folder = await chromeState.readChromeDomainProtocolState({ objectDomain: FOLDER_DOMAIN, objectId: 'f_study', syncStore, cryptoImplementation: webcrypto });
   check(folder.objectKey === folderKey && folder.protocolState.lastPublished === null && folder.protocolState.lastApplied === null && calls.every((c) => c[0] !== 'readApplySnapshot'),
     'folder: unpublished, no apply-store read');
+  check(await codeOf(() => chromeState.readChromeDomainProtocolState({ objectDomain: BINDING_DOMAIN, objectId: OBJECT, syncStore: { ...syncStore, readRelationshipApplyState: undefined }, cryptoImplementation: webcrypto })) === 'p02-chrome-domain-protocol-state-store-invalid',
+    'relationship family without the domain-qualified port is a typed refusal (never an empty read)');
+  check(chromeState.P02_CHROME_DOMAIN_PROTOCOL_STATE_V2.DIRECTION_COVERAGE === 'RELATIONSHIP_SYNC_DIRECTION_COVERAGE=BIDIRECTIONAL',
+    'T05 direction coverage is bidirectional');
+  /* D3: the real store keeps DATABASE_VERSION 4 and its migration ladder;
+   * the relationship regime is additive in the existing stores. */
+  const storeModule = await importRepo('packages/browser-adapters/chrome/sync-object-store.mjs');
+  check(storeModule.ITEM9_1_CONSTANTS.DATABASE_VERSION === 4 && storeModule.MIGRATIONS.length === 4 &&
+    storeModule.validateMigrationRegistry(storeModule.MIGRATIONS, 4) === true, 'Chrome IDB DATABASE_VERSION remains 4 with the four accepted migrations');
+  const storeSource = read('packages/browser-adapters/chrome/sync-object-store.mjs');
+  check(!/createObjectStore\((?!AUTHORITY_STORE|OBSERVATION_STORE|LOCAL_PUBLICATION_LEDGER_STORE|ADMISSION_EVIDENCE_STORE|APPLY_STATE_STORE|BRANCH_EVIDENCE_STORE)/.test(storeSource) &&
+    (storeSource.match(/createObjectStore\(/g) || []).length === 6 && !storeSource.includes('deleteObjectStore'),
+  'no new object store and no store deletion');
+  check(storeSource.includes("const RELATIONSHIP_KEY_PREFIX = 'p02'") && storeSource.includes('p02-relationship.v1'),
+    'relationship regime uses a distinct key prefix and schema tags in the existing stores');
   check(await codeOf(() => chromeState.readChromeDomainProtocolState({ objectDomain: 'studio.other.v1', objectId: OBJECT, syncStore, cryptoImplementation: webcrypto })) === 'p02-chrome-domain-protocol-state-domain-unregistered',
     'unregistered domain is a typed refusal');
   check(await codeOf(() => chromeState.readChromeDomainProtocolState({ objectDomain: BINDING_DOMAIN, objectId: ' bad', syncStore, cryptoImplementation: webcrypto })) === 'p02-chrome-domain-protocol-state-object-id-invalid',
@@ -656,7 +704,7 @@ await section('J Chrome publication-side domain-qualified protocol state', async
     'store without the required ports is a typed refusal');
   /* The module itself never opens, migrates or writes the IDB store. */
   const source = read('packages/browser-adapters/chrome/sync-p02-domain-protocol-state-chrome-v2.mjs');
-  check(!/indexedDB|createObjectStore|stageApplyIntent|commitApplyIntent|stageLocalPublicationIntent|recordObservation|DATABASE_VERSION/.test(source),
+  check(!/indexedDB|createObjectStore|stageApplyIntent|commitApplyIntent|stageLocalPublicationIntent|recordObservation|DATABASE_VERSION|stageRelationshipApplyIntent|commitRelationshipApplyIntent|recordRelationshipBranchEvidence/.test(source),
     'helper performs no IDB migration and no store write');
   check(source.includes("import { objectKeyHex } from './sync-contract-v2.mjs'"), 'helper derives objectKey from the frozen contract');
 });
@@ -715,7 +763,7 @@ console.log(JSON.stringify({
   assertions,
   sections,
   failures,
-  directionCoverage: 'RELATIONSHIP_SYNC_DIRECTION_COVERAGE=CHROME_TO_DESKTOP_ONLY',
+  directionCoverage: 'RELATIONSHIP_SYNC_DIRECTION_COVERAGE=BIDIRECTIONAL',
   liveMutation: 'none (in-memory / temporary fixtures only; no repository, IDB, runtime or canonical database touched)'
 }, null, 2));
 process.exit(failures.length === 0 ? 0 : 1);

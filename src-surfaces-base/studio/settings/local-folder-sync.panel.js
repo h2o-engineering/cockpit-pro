@@ -24,6 +24,11 @@
     "h2o.studio.syncDesktopP02ReceiveResult.v1";
   const P02_DESKTOP_APPLY_RESULT_SCHEMA =
     "h2o.studio.syncDesktopP02ApplyResult.v1";
+  /* P02 T05: one trusted Desktop -> Chrome relationship publication attempt
+   * (folder / chat-folder-binding), resolved entirely inside the Sync-owned
+   * publication module; the panel supplies no authority value. */
+  const P02_DESKTOP_RELATIONSHIP_PUBLICATION_RESULT_SCHEMA =
+    "h2o.studio.syncDesktopRelationshipPublicationResult.p02.v1";
   const P01_WRITER_STANDDOWN_RESULT_SCHEMA =
     "h2o.studio.syncP01WriterStanddownResult.v1";
   const CONFIGURED_PEER_RESULT_SCHEMA =
@@ -252,6 +257,20 @@
     return runtime;
   }
 
+  /* P02 T05. The Desktop relationship publication runtime, loaded on demand
+   * and bound by its own installer. It publishes one explicitly selected
+   * relationship candidate per trusted click and never receives or applies. */
+  async function desktopRelationshipPublicationRuntime() {
+    if (typeof W.H2O?.Studio?.sync?.p02RelationshipPublication?.publishOnce !== "function") {
+      await import("../sync/sync-relationship-publication-desktop-v2.tauri.mjs");
+    }
+    const runtime = W.H2O?.Studio?.sync?.p02RelationshipPublication;
+    if (typeof runtime?.publishOnce !== "function") {
+      throw new Error("p02-desktop-relationship-publication-runtime-unavailable");
+    }
+    return runtime;
+  }
+
   /* Fixed-purpose and sent once from the trusted click branch below. No
    * authority value is accepted from the page; the worker resolves the sole
    * configured Desktop peer, timestamp, reason and generation target. */
@@ -395,6 +414,24 @@
     if (chats.length && chats.every((chat) => chat?.status === "noop")) return "Not needed";
     const code = V.clean(detail.code || chats[0]?.code);
     return code ? `No (${code})` : "No";
+  }
+
+  function desktopRelationshipPublicationRows(result) {
+    const selected = result?.selectedObjectId
+      ? `${V.valueText(result.selectedObjectDomain, "")} ${result.selectedObjectId}`
+      : "none";
+    return Object.freeze([
+      ["Result", result?.ok === true ? "Completed" : "Blocked"],
+      ["Outcome", V.valueText(result?.outcome, "unavailable")],
+      ["Published", result?.repositoryMutated === true ? "Yes" : "No"],
+      ["Published as", V.valueText(result?.publishedAs, "n/a")],
+      ["Selected", selected],
+      ["Eligible objects", String(Number(result?.eligibleCount) || 0)],
+      ["Deferred", String(Array.isArray(result?.deferredCandidates) ? result.deferredCandidates.length : 0)],
+      ["Foreign-root blocked", String(Array.isArray(result?.foreignRootBlocked) ? result.foreignRootBlocked.length : 0)],
+      ["Relationship writes", String(Number(result?.relationshipSqliteWrites) || 0)],
+      ["WebDAV", result?.webdavReachable === false ? "Unreachable" : "Blocked"],
+    ]);
   }
 
   function desktopP02ApplyRows(result) {
@@ -585,6 +622,8 @@
       let desktopP02ReceiveBusy = false;
       let desktopP02Apply = null;
       let desktopP02ApplyBusy = false;
+      let desktopRelationshipPublication = null;
+      let desktopRelationshipPublicationBusy = false;
       let trustedPeerId = "";
       let trustedWriterKey = "";
       let trustedPeerBusy = false;
@@ -615,7 +654,7 @@
         const overview = projectOverview(snapshot, platform);
         const actions = chromeFolder
           ? `<div style="display:flex;gap:8px;flex-wrap:wrap">${V.action("connect", folderName ? "Change Folder" : "Connect Folder")}${V.action("authorize-publishing", "Authorize Chrome publishing", { disabled: !folderName })}${V.action("disconnect", "Disconnect Folder", { disabled: !folderName, danger: true })}${V.action("refresh", "Refresh live permission")}${V.action("observe-repository", "Observe repository")}${V.action("stand-down-p01-writer", "Stand Down Chrome P01 Writer", { disabled: standdownBusy || manualApplyBusy || p02PublicationBusy })}${V.action("receive-admit", "Receive / Admit", { disabled: standdownBusy || manualApplyBusy || p02PublicationBusy })}${V.action("apply-admitted-revision", "Apply admitted revision", { disabled: standdownBusy || manualApplyBusy || p02PublicationBusy })}${V.action("publish-local-revision", "Publish local revision", { disabled: standdownBusy || manualApplyBusy || p02PublicationBusy })}</div>`
-          : `<div style="display:flex;gap:8px;flex-wrap:wrap">${V.action("select", config?.folderPath ? "Change Folder" : "Select Folder")}${V.action("refresh", "Refresh")}${V.action("desktop-p02-receive", "Receive from Chrome (P02 v2)", { disabled: desktopP02ReceiveBusy || desktopP02ApplyBusy })}${V.action("desktop-p02-apply", "Apply admitted Chrome revision (P02 v2)", { disabled: desktopP02ReceiveBusy || desktopP02ApplyBusy })}</div>`;
+          : `<div style="display:flex;gap:8px;flex-wrap:wrap">${V.action("select", config?.folderPath ? "Change Folder" : "Select Folder")}${V.action("refresh", "Refresh")}${V.action("desktop-p02-receive", "Receive from Chrome (P02 v2)", { disabled: desktopP02ReceiveBusy || desktopP02ApplyBusy || desktopRelationshipPublicationBusy })}${V.action("desktop-p02-apply", "Apply admitted Chrome revision (P02 v2)", { disabled: desktopP02ReceiveBusy || desktopP02ApplyBusy || desktopRelationshipPublicationBusy })}${V.action("desktop-relationship-publish", "Publish folder relationship to Chrome (P02 T05)", { disabled: desktopP02ReceiveBusy || desktopP02ApplyBusy || desktopRelationshipPublicationBusy })}</div>`;
         const trustedPeerCard = chromeFolder
           ? V.card("Trusted Desktop peer",
               `<label style="display:grid;gap:5px;font-size:12px">Desktop Sync Peer ID<input type="text" data-trusted-peer-field="syncPeerId" autocomplete="off" spellcheck="false" value="${escapeAuthorityInput(trustedPeerId)}"></label>` +
@@ -661,6 +700,10 @@
           (desktopP02Apply
             ? V.card("Desktop P02 Apply from Chrome", V.statusRows(desktopP02ApplyRows(desktopP02Apply)) +
                 `<p style="margin:0;opacity:.68;font-size:12px">One trusted canonical Apply. It does not Receive, publish, or write the shared repository.</p>`)
+            : "") +
+          (desktopRelationshipPublication
+            ? V.card("Desktop relationship publication to Chrome (P02 T05)", V.statusRows(desktopRelationshipPublicationRows(desktopRelationshipPublication)) +
+                `<p style="margin:0;opacity:.68;font-size:12px">One trusted publication of exactly one folder or chat-folder-binding candidate (folder before binding). It never receives, applies, or writes folders locally.</p>`)
             : "") +
           (standdownResult
             ? V.card("Chrome P01 writer standdown", V.statusRows(standdownRows(standdownResult)) +
@@ -807,6 +850,40 @@
           } finally {
             if (isReceive) desktopP02ReceiveBusy = false;
             else desktopP02ApplyBusy = false;
+            await render();
+          }
+          return;
+        }
+        if (action === "desktop-relationship-publish") {
+          if (event.isTrusted !== true ||
+              W.navigator?.userActivation?.isActive !== true) {
+            desktopRelationshipPublication = Object.freeze({
+              schema: P02_DESKTOP_RELATIONSHIP_PUBLICATION_RESULT_SCHEMA,
+              ok: false,
+              outcome: "trusted-activation-required",
+            });
+            message = "Relationship publication blocked: trusted active user gesture required.";
+            await render();
+            return;
+          }
+          button.disabled = true;
+          desktopRelationshipPublicationBusy = true;
+          try {
+            const runtime = await desktopRelationshipPublicationRuntime();
+            const result = await runtime.publishOnce();
+            desktopRelationshipPublication = result;
+            message = result?.ok === true
+              ? `Relationship publication completed once: ${V.valueText(result?.outcome, "unavailable")}.`
+              : `Relationship publication blocked: ${V.valueText(result?.outcome, "unavailable")}`;
+          } catch (error) {
+            desktopRelationshipPublication = Object.freeze({
+              schema: P02_DESKTOP_RELATIONSHIP_PUBLICATION_RESULT_SCHEMA,
+              ok: false,
+              outcome: V.clean(error?.code || error?.message) || "runtime-unavailable",
+            });
+            message = `Relationship publication blocked: ${desktopRelationshipPublication.outcome}`;
+          } finally {
+            desktopRelationshipPublicationBusy = false;
             await render();
           }
           return;

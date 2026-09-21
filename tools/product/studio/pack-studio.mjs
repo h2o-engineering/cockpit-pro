@@ -69,6 +69,10 @@ export const P02_CHROME_ADAPTER_SOURCE_FILES = Object.freeze([
   // domain-qualified protocol-state derivation for the new families. Loads
   // ../../core/sync-relationship-domains-v2.mjs from the packed surfaces tree.
   "sync-p02-domain-protocol-state-chrome-v2.mjs",
+  // P02 T05 (Build lease EXT-P02-T05-BUILD-RELATIONSHIP-PAIR-PACKAGING): the
+  // relationship revision adapter, imported by the Desktop relationship
+  // publication module as ../browser-adapters/chrome/ from the packed tree.
+  "sync-revision-domain-relationship-v2.mjs",
 ]);
 export const P02_CORE_SOURCE_FILES = Object.freeze([
   // O1-T05: the amended anchor contract. sync-branch-evidence-v2.mjs and
@@ -1026,6 +1030,7 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   "sync/sync-p02-revision-proof.tauri.mjs",
   "sync/sync-relationship-materialization-desktop-v2.tauri.mjs",
   "sync/sync-reverse-desktop-v2.tauri.mjs",
+  "sync/sync-relationship-publication-desktop-v2.tauri.mjs",
   // F3: outbound export log. Mints exportId / sequenceNumber on every
   // disk-writing export and tracks previousExportId. Single persistent
   // key 'h2o:sync:export-log:v1'. Only mutated by exportLatestSyncBundle.
@@ -1775,6 +1780,7 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   "sync/sync-p02-revision-proof.tauri.mjs",
   "sync/sync-relationship-materialization-desktop-v2.tauri.mjs",
   "sync/sync-reverse-desktop-v2.tauri.mjs",
+  "sync/sync-relationship-publication-desktop-v2.tauri.mjs",
   "sync/export-log.js",
   "sync/peer-transport.js",
   "sync/webdav-transport-gates.js",

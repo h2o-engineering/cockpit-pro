@@ -235,7 +235,8 @@ function chatPayload(objectId, snapshotId, text) {
     chromeStorageLocal: {}, libraryKv: []
   };
 }
-const folderPayload = (folderId, name) => ({ schema: 'h2o.studio.folderCatalogState.v1', folderId, name, createdAt: SOURCE_AT });
+/* T05 D1 (RC-P02-T05-D1-01): the folder payload is exactly schema/folderId/name. */
+const folderPayload = (folderId, name) => ({ schema: 'h2o.studio.folderCatalogState.v1', folderId, name });
 const bindingPayload = (chatId, folderId) => ({ schema: 'h2o.studio.chatFolderBinding.v1', chatId, folderId });
 
 /* ---------------------------------------------------------------------- */

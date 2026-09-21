@@ -1,27 +1,28 @@
 /*
- * P02 Chrome publication-side DOMAIN-QUALIFIED protocol-state derivation
- * (Mission p02-folder-relationship-synchronization, T01; R12 / C10).
+ * P02 Chrome DOMAIN-QUALIFIED protocol-state derivation
+ * (Mission p02-folder-relationship-synchronization, T01 R12 / C10; T05 D3).
  *
  * The Chrome sync-object store predates object families. Its publication
  * ledger is keyed by objectKey - SHA-256(objectDomain || 0x00 || objectId) -
- * and is therefore already domain-qualified, but its observation / apply
- * state is keyed by objectId ALONE (identityKeys() hashes the bare objectId).
- * A chat-folder-binding object shares the saved chat's objectId string, so a
- * descriptor for the binding that read `readApplySnapshot(objectId)` would
- * inherit the CHAT object's applied anchor, pending Apply and retained
- * observations, and could publish a "descendant" of a revision the binding
- * family never had.
+ * and is therefore already domain-qualified, but its accepted observation /
+ * apply state is keyed by objectId ALONE (identityKeys() hashes the bare
+ * objectId). A chat-folder-binding object shares the saved chat's objectId
+ * string, so a descriptor for the binding that read `readApplySnapshot(
+ * objectId)` would inherit the CHAT object's applied anchor, pending Apply and
+ * retained observations, and could publish a "descendant" of a revision the
+ * binding family never had.
  *
- * This module is the single seam every NEW-domain publication descriptor
- * reads protocol state through:
+ * This module is the single seam every domain descriptor reads protocol state
+ * through:
  *
  *   chat domain      -> exactly the reads the accepted chat enumerator makes
  *                       (readApplySnapshot(objectId) + objectKey-keyed ledger);
- *   folder / binding -> objectKey-keyed publication ledger ONLY. The
- *                       objectId-keyed apply store is NEVER consulted. Apply
- *                       state is reported as absent with a typed source, and
- *                       Chrome RECEIVE/APPLY of these families stays disabled
- *                       until domain-qualified IDB state lands (T05).
+ *                       UNCHANGED since T01.
+ *   folder / binding -> objectKey-keyed publication ledger, plus (T05) the
+ *                       store's DOMAIN-QUALIFIED relationship apply state
+ *                       (readRelationshipApplyState({objectDomain, objectId}),
+ *                       keyed p02:<peer>:<objectKey>). The objectId-keyed
+ *                       chat apply store is still NEVER consulted for them.
  *
  * It migrates nothing, opens no IDB upgrade, and writes nothing.
  */
@@ -41,11 +42,15 @@ export const P02_CHROME_DOMAIN_PROTOCOL_STATE_V2 = Object.freeze({
   APPLY_STATE_SOURCE: Object.freeze({
     /* The accepted objectId-keyed IDB apply/observation store; chat only. */
     CHAT_OBJECT_ID_STORE: 'chat-object-id-apply-store',
-    /* Non-chat families: no apply state exists and none is read. */
-    NONE_UNTIL_DOMAIN_QUALIFIED_IDB: 'none-until-domain-qualified-idb'
+    /* T05 / D3: relationship families read the domain-qualified regime in
+     * the existing apply-state / branch-evidence stores. */
+    RELATIONSHIP_DOMAIN_QUALIFIED_STORE: 'relationship-domain-qualified-apply-store'
   }),
-  NON_CHAT_RECEIVE: 'disabled-until-domain-qualified-idb-state',
-  DIRECTION_COVERAGE: 'RELATIONSHIP_SYNC_DIRECTION_COVERAGE=CHROME_TO_DESKTOP_ONLY'
+  /* T05: Chrome Receive/Apply of the relationship families is composed
+   * through the domain-qualified counterpart (sync-relationship-counterpart-
+   * chrome-v2.mjs); this is the posture the receive side reports. */
+  NON_CHAT_RECEIVE: 'domain-qualified-idb-state',
+  DIRECTION_COVERAGE: 'RELATIONSHIP_SYNC_DIRECTION_COVERAGE=BIDIRECTIONAL'
 });
 
 export const P02_CHROME_DOMAIN_PROTOCOL_STATE_ERROR = Object.freeze({
@@ -82,11 +87,18 @@ function reference(value) {
   return Object.freeze({ revisionId: value.revisionId, revisionBlobSha256 });
 }
 
-function requireStore(syncStore) {
+function requireStore(syncStore, objectDomain) {
   if (!syncStore ||
       typeof syncStore.readApplySnapshot !== 'function' ||
       typeof syncStore.readLocalPublicationTip !== 'function' ||
       typeof syncStore.resolveLocalPublicationPending !== 'function') {
+    fail(P02_CHROME_DOMAIN_PROTOCOL_STATE_ERROR.STORE_INVALID);
+  }
+  /* A relationship family without the domain-qualified port cannot know its
+   * applied anchor; guessing "none" would let a converged object publish an
+   * echo, so the absent port is a typed refusal, never an empty read. */
+  if (objectDomain !== CHAT_OBJECT_DOMAIN &&
+      typeof syncStore.readRelationshipApplyState !== 'function') {
     fail(P02_CHROME_DOMAIN_PROTOCOL_STATE_ERROR.STORE_INVALID);
   }
 }
@@ -156,16 +168,45 @@ async function readChatApplySide(syncStore, objectId) {
   });
 }
 
-/* Apply-side for NON-chat families: nothing is read, nothing is inherited. */
-function emptyApplySide() {
+/*
+ * Apply-side reads for the RELATIONSHIP families (T05 / D3): the store's
+ * domain-qualified regime, keyed by (objectDomain, objectId). Nothing from the
+ * objectId-keyed chat store is read or inherited. The applied anchor carries
+ * its payload identity so the anchor set can decide content equality; the
+ * retained relationship branch evidence is reported by revisionId only, in the
+ * same field the chat side uses for its observations.
+ */
+async function readRelationshipApplySide(syncStore, objectDomain, objectId, objectKey) {
+  const state = await syncStore.readRelationshipApplyState({ objectDomain, objectId });
+  if (!state || state.objectKey !== objectKey || !Array.isArray(state.branchEvidence)) {
+    fail(P02_CHROME_DOMAIN_PROTOCOL_STATE_ERROR.PROTOCOL_READ_INVALID);
+  }
+  const applyState = state.applyState || null;
+  const applied = applyState?.lastApplied || null;
+  const lastApplied = reference(applied);
+  const pending = applyState?.pending || null;
   return Object.freeze({
     applyStateSource:
-      P02_CHROME_DOMAIN_PROTOCOL_STATE_V2.APPLY_STATE_SOURCE.NONE_UNTIL_DOMAIN_QUALIFIED_IDB,
-    lastApplied: null,
-    appliedPayloadSha256: null,
-    applyPending: false,
-    pendingApply: null,
-    retainedObservationRevisionIds: Object.freeze([])
+      P02_CHROME_DOMAIN_PROTOCOL_STATE_V2.APPLY_STATE_SOURCE.RELATIONSHIP_DOMAIN_QUALIFIED_STORE,
+    lastApplied: lastApplied && SHA256_RE.test(applied?.payloadSha256Hex || '')
+      ? Object.freeze({ ...lastApplied, payloadSha256: applied.payloadSha256Hex })
+      : lastApplied,
+    appliedPayloadSha256: SHA256_RE.test(applied?.payloadSha256Hex || '')
+      ? applied.payloadSha256Hex
+      : null,
+    applyPending: pending !== null,
+    pendingApply: pending?.referenceKind === 'branch-evidence-v2'
+      ? Object.freeze({
+        referenceKind: 'branch-evidence-v2',
+        revisionId: pending.revisionId,
+        revisionBlobSha256: pending.revisionBlobSha256Hex,
+        selectedLeafRevisionId: pending.selectedLeafRevisionId,
+        selectedLeafRevisionBlobSha256: pending.selectedLeafRevisionBlobSha256Hex
+      })
+      : null,
+    retainedObservationRevisionIds: Object.freeze(
+      state.branchEvidence.map((record) => record.revisionId)
+    )
   });
 }
 
@@ -188,12 +229,12 @@ export async function readChromeDomainProtocolState({
   if (!strictIdentifier(objectId)) {
     fail(P02_CHROME_DOMAIN_PROTOCOL_STATE_ERROR.OBJECT_ID_INVALID);
   }
-  requireStore(syncStore);
+  requireStore(syncStore, objectDomain);
   const objectKey = await objectKeyHex(objectDomain, objectId, cryptoImplementation);
   const publication = await readPublicationSide(syncStore, objectKey);
   const apply = objectDomain === CHAT_OBJECT_DOMAIN
     ? await readChatApplySide(syncStore, objectId)
-    : emptyApplySide();
+    : await readRelationshipApplySide(syncStore, objectDomain, objectId, objectKey);
   const pendingOperation = apply.applyPending
     ? 'apply'
     : (publication.publicationPendingState === 'Clean' ? null : 'publish');

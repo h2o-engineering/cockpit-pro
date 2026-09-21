@@ -916,10 +916,15 @@ const publish = (w) => w.publication.publishObject({
    */
   const GOVERNED_COMPOSITIONS = [
     'packages/browser-adapters/chrome/sync-p02-publication-chrome-v2.mjs',
+    /* P02 T05 (HDA 18->20 validator correction, 2026-09-21): the Desktop
+     * relationship publication composer reuses the SAME steady core and
+     * lease; it is the third governed, operator-triggered composer and is
+     * held to the same D4b/D4c non-autonomy checks below. */
+    'src-surfaces-base/studio/sync/sync-relationship-publication-desktop-v2.tauri.mjs',
     'src-surfaces-base/studio/sync/sync-steady-activation-desktop-v2.tauri.mjs'
   ];
   equal(JSON.stringify(productionRefs.sort()), JSON.stringify(GOVERNED_COMPOSITIONS),
-    `D4 only the governed Desktop activation and confined Chrome publication owner construct steady drivers (${productionRefs.join(',')})`);
+    `D4 only the governed Desktop activation, the governed Desktop relationship publication and the confined Chrome publication owner construct steady drivers (${productionRefs.join(',')})`);
 
   /*
    * And that one constructor must not be able to start itself. A composition

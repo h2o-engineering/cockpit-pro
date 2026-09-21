@@ -18,10 +18,17 @@
  * ineligibility, never a guessed winner.
  *
  * DETERMINISM. Same authoritative source state -> byte-identical canonical
- * payload (canonical JSON of an exact-key set). Timestamps never enter the
- * payload except folder `createdAt` (provenance only, derived from the
- * authoritative source epoch); the head's sourceUpdatedAtIso is derived from
- * durable source data, never a wall clock.
+ * payload (canonical JSON of an exact-key set). Timestamps NEVER enter a
+ * payload (T05 D1, RC-P02-T05-D1-01): the folder payload is exactly
+ * schema/folderId/name. The authoritative source `updatedAt`, with the
+ * authoritative `createdAt` as fallback, feeds ONLY the head's
+ * sourceUpdatedAtIso, which is derived from durable source data and never a
+ * wall clock.
+ *
+ * DIRECTION. Since T05 the relationship families are bidirectional: Chrome
+ * publishes them from this projection AND receives/applies them through the
+ * domain-qualified counterpart (sync-relationship-counterpart-chrome-v2.mjs).
+ * Publication here still reads the strict source only.
  *
  * COLOR_ADMISSION=DEFERRED_PENDING_SHARED_COLOR_VOCABULARY: colour is never
  * projected. Nothing here writes anything.
@@ -68,7 +75,11 @@ export const P02_RELATIONSHIP_DOMAIN_V2 = Object.freeze({
    * same way and never collides with an engine mint (`p02-…`). */
   LOCAL_SOURCE_REVISION_PREFIX: 'relstate-',
   COLOR_ADMISSION: P02_RELATIONSHIP_DOMAINS_V2.COLOR_ADMISSION,
-  DIRECTION_COVERAGE: 'RELATIONSHIP_SYNC_DIRECTION_COVERAGE=CHROME_TO_DESKTOP_ONLY'
+  /* T05: Chrome -> Desktop (T02/T03/T04) and Desktop -> Chrome (T05) are
+   * both composed; the counterpart module owns the receiving half. */
+  DIRECTION_COVERAGE: 'RELATIONSHIP_SYNC_DIRECTION_COVERAGE=BIDIRECTIONAL',
+  /* D1: source time reaches the head only. */
+  SOURCE_TIMESTAMP_RULE: P02_RELATIONSHIP_DOMAINS_V2.FOLDER.SOURCE_TIMESTAMP_RULE
 });
 
 export const P02_RELATIONSHIP_ELIGIBILITY = Object.freeze({
@@ -194,13 +205,13 @@ export async function projectFolderCatalogState(record, {
   if (!isFolderObjectId(objectId)) {
     return ineligible(domain, objectId, E.CONTRACT_INVALID, 'p02-rel-folder-id-invalid');
   }
+  /* Head metadata ONLY: updatedAt, then the authoritative createdAt as the
+   * fallback. Neither ever becomes a payload key (T05 D1). */
   const sourceUpdatedAtIso = isoFromSourceEpoch(record.updatedAt) ?? isoFromSourceEpoch(record.createdAt);
   if (!sourceUpdatedAtIso) {
     return ineligible(domain, objectId, E.INVALID_SOURCE_RECORD, 'source-timestamp-missing');
   }
-  const createdAt = isoFromSourceEpoch(record.createdAt);
   const payload = { schema: FOLDER.PAYLOAD_SCHEMA, folderId: objectId, name };
-  if (createdAt) payload.createdAt = createdAt;
   try {
     validateFolderCatalogStatePayload(payload, objectId);
   } catch (error) {

@@ -31,6 +31,7 @@ export const P02_PACKED_LAYOUT = Object.freeze({
     'src-surfaces-base/studio/sync/sync-writer-generation-desktop-v2.tauri.mjs',
     'src-surfaces-base/studio/sync/sync-relationship-materialization-desktop-v2.tauri.mjs',
     'src-surfaces-base/studio/sync/sync-reverse-desktop-v2.tauri.mjs',
+    'src-surfaces-base/studio/sync/sync-relationship-publication-desktop-v2.tauri.mjs',
   ]),
   'core': Object.freeze([
     'packages/core/sync-p02-anchor-set-v2.mjs',
@@ -69,6 +70,7 @@ export const P02_PACKED_LAYOUT = Object.freeze({
     'packages/browser-adapters/chrome/sync-writer-generation-chrome-v2.mjs',
     'packages/browser-adapters/chrome/sync-revision-apply-v2.mjs',
     'packages/browser-adapters/chrome/sync-p02-domain-protocol-state-chrome-v2.mjs',
+    'packages/browser-adapters/chrome/sync-revision-domain-relationship-v2.mjs',
   ]),
 });
 

@@ -46,6 +46,11 @@ pub(crate) const LAYOUT_EPOCH_V2: u64 = 1;
  * would fabricate a revision. Colour is deferred
  * (COLOR_ADMISSION=DEFERRED_PENDING_SHARED_COLOR_VOCABULARY) and is rejected
  * like any other unknown key.
+ *
+ * T05 (RC-P02-T05-D1-01): the folder payload is EXACTLY schema/folderId/name.
+ * `createdAt` is prohibited from canonical payload bytes and is refused as an
+ * unknown key; source time may reach only the head's sourceUpdatedAtIso, and
+ * receiver-local created_at/updated_at are local persistence metadata only.
  */
 pub(crate) const CHAT_OBJECT_DOMAIN_V1: &str = "studio.chat.saved-state.v1";
 pub(crate) const FOLDER_OBJECT_DOMAIN_V1: &str = "studio.folder.v1";
@@ -62,7 +67,6 @@ pub(crate) const REL_ERR_FOLDER_SCHEMA_MISMATCH: &str = "p02-rel-folder-schema-m
 pub(crate) const REL_ERR_FOLDER_ID_INVALID: &str = "p02-rel-folder-id-invalid";
 pub(crate) const REL_ERR_FOLDER_ID_OBJECT_ID_MISMATCH: &str = "p02-rel-folder-id-object-id-mismatch";
 pub(crate) const REL_ERR_FOLDER_NAME_INVALID: &str = "p02-rel-folder-name-invalid";
-pub(crate) const REL_ERR_FOLDER_CREATED_AT_INVALID: &str = "p02-rel-folder-created-at-invalid";
 pub(crate) const REL_ERR_BINDING_PAYLOAD_SHAPE_INVALID: &str = "p02-rel-binding-payload-shape-invalid";
 pub(crate) const REL_ERR_BINDING_PAYLOAD_KEY_REJECTED: &str = "p02-rel-binding-payload-key-rejected";
 pub(crate) const REL_ERR_BINDING_SCHEMA_MISMATCH: &str = "p02-rel-binding-schema-mismatch";
@@ -74,7 +78,6 @@ pub(crate) const REL_ERR_BINDING_FOLDER_ID_INVALID: &str = "p02-rel-binding-fold
 pub(crate) struct FolderCatalogStatePayloadV1 {
     pub(crate) folder_id: String,
     pub(crate) name: String,
-    pub(crate) created_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -151,33 +154,6 @@ pub(crate) fn is_canonical_folder_name(value: &str) -> bool {
         && value.chars().count() <= FOLDER_NAME_MAX_CODE_POINTS
 }
 
-/// ISO-8601 UTC milliseconds that is also a real calendar instant.
-pub(crate) fn is_utc_millisecond_timestamp(value: &str) -> bool {
-    if !timestamp(value) {
-        return false;
-    }
-    let digits = |range: std::ops::Range<usize>| value[range].parse::<u32>().ok();
-    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
-        digits(0..4),
-        digits(5..7),
-        digits(8..10),
-        digits(11..13),
-        digits(14..16),
-        digits(17..19),
-    ) else {
-        return false;
-    };
-    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-    let days_in_month = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => return false,
-    };
-    (1..=days_in_month).contains(&day) && hour < 24 && minute < 60 && second < 60
-}
-
 fn require_exact_keys<'a>(
     payload: &'a Value,
     required: &[&str],
@@ -205,10 +181,11 @@ pub(crate) fn validate_folder_catalog_state_payload(
     payload: &Value,
     object_id: &str,
 ) -> Result<FolderCatalogStatePayloadV1, RelationshipPayloadError> {
+    /* T05 D1: no optional keys. `createdAt` is refused as an unknown key. */
     let object = require_exact_keys(
         payload,
         &["schema", "folderId", "name"],
-        &["createdAt"],
+        &[],
         REL_ERR_FOLDER_PAYLOAD_SHAPE_INVALID,
         REL_ERR_FOLDER_PAYLOAD_KEY_REJECTED,
     )?;
@@ -230,19 +207,9 @@ pub(crate) fn validate_folder_catalog_state_payload(
         .and_then(Value::as_str)
         .filter(|value| is_canonical_folder_name(value))
         .ok_or_else(|| RelationshipPayloadError::code(REL_ERR_FOLDER_NAME_INVALID))?;
-    let created_at = match object.get("createdAt") {
-        None => None,
-        Some(Value::String(value)) if is_utc_millisecond_timestamp(value.as_str()) => Some(value.clone()),
-        Some(_) => {
-            return Err(RelationshipPayloadError::code(
-                REL_ERR_FOLDER_CREATED_AT_INVALID,
-            ))
-        }
-    };
     Ok(FolderCatalogStatePayloadV1 {
         folder_id: folder_id.to_string(),
         name: name.to_string(),
-        created_at,
     })
 }
 
@@ -1104,12 +1071,22 @@ mod tests {
             let result = validate_folder_catalog_state_payload(&vector["payload"], object_id)
                 .unwrap_or_else(|error| panic!("folder positive {id}: {}", error.code));
             assert_eq!(result.folder_id, object_id, "folder positive {id}");
-            assert_eq!(
-                result.created_at.is_some(),
-                vector["payload"].get("createdAt").is_some(),
-                "folder positive {id}"
+            assert!(
+                vector["payload"].get("createdAt").is_none(),
+                "folder positive {id}: createdAt is prohibited from canonical payload bytes"
             );
         }
+        /* T05 D1 negative control, independent of the vector file: a folder
+         * payload carrying createdAt is an exact-key refusal naming the key. */
+        let with_created_at = serde_json::json!({
+            "schema": FOLDER_PAYLOAD_SCHEMA_V1,
+            "folderId": "f_abc123",
+            "name": "Study",
+            "createdAt": "2026-09-14T10:15:30.123Z"
+        });
+        let refused = validate_folder_catalog_state_payload(&with_created_at, "f_abc123").unwrap_err();
+        assert_eq!(refused.code, REL_ERR_FOLDER_PAYLOAD_KEY_REJECTED);
+        assert_eq!(refused.key.as_deref(), Some("createdAt"));
         for vector in vectors["folder"]["negative"].as_array().unwrap() {
             let id = vector["id"].as_str().unwrap();
             let object_id = vector["objectId"].as_str().unwrap();

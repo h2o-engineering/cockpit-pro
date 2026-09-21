@@ -1,7 +1,7 @@
 {
   "schema": "h2o.studio.syncRelationshipContractVectors.p02.v1",
   "mission": "p02-folder-relationship-synchronization",
-  "task": "T01",
+  "task": "T01+T05",
   "contract": {
     "objectKeyDomainSeparator": "objectDomain + 0x00 + objectId",
     "chatObjectDomainUnchanged": "studio.chat.saved-state.v1",
@@ -11,7 +11,14 @@
     "folderNameMaxCodePoints": 200,
     "bindingObjectDomain": "studio.chat-folder-binding.v1",
     "bindingPayloadSchema": "h2o.studio.chatFolderBinding.v1",
-    "colorAdmission": "DEFERRED_PENDING_SHARED_COLOR_VOCABULARY"
+    "colorAdmission": "DEFERRED_PENDING_SHARED_COLOR_VOCABULARY",
+    "folderCanonicalPayloadKeys": [
+      "schema",
+      "folderId",
+      "name"
+    ],
+    "folderCreatedAt": "PROHIBITED_FROM_CANONICAL_PAYLOAD",
+    "sourceTimestampRule": "updatedAt-then-createdAt-to-sourceUpdatedAtIso-head-metadata-only"
   },
   "objectKeySeparation": {
     "objectId": "p02-rel-shared-object-id",
@@ -33,14 +40,14 @@
         }
       },
       {
-        "id": "folder-with-created-at",
+        "id": "folder-chrome-minted-id",
         "objectId": "fold_chrome_0f3a9c1d",
         "payload": {
           "schema": "h2o.studio.folderCatalogState.v1",
           "folderId": "fold_chrome_0f3a9c1d",
-          "name": "Study",
-          "createdAt": "2026-09-14T10:15:30.123Z"
-        }
+          "name": "Study"
+        },
+        "note": "T05 D1: the former folder-with-created-at vector with createdAt removed; source time reaches the head only"
       },
       {
         "id": "folder-uuid-style-id",
@@ -267,7 +274,9 @@
           "name": "Study",
           "createdAt": null
         },
-        "expected": "p02-rel-folder-created-at-invalid"
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "createdAt",
+        "note": "T05 D1 (RC-P02-T05-D1-01): createdAt is prohibited from canonical folder payload bytes; any value shape is an exact-key refusal"
       },
       {
         "id": "folder-created-at-no-millis",
@@ -278,7 +287,9 @@
           "name": "Study",
           "createdAt": "2026-09-14T10:15:30Z"
         },
-        "expected": "p02-rel-folder-created-at-invalid"
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "createdAt",
+        "note": "T05 D1 (RC-P02-T05-D1-01): createdAt is prohibited from canonical folder payload bytes; any value shape is an exact-key refusal"
       },
       {
         "id": "folder-created-at-invalid-calendar",
@@ -289,7 +300,9 @@
           "name": "Study",
           "createdAt": "2026-13-45T10:15:30.123Z"
         },
-        "expected": "p02-rel-folder-created-at-invalid"
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "createdAt",
+        "note": "T05 D1 (RC-P02-T05-D1-01): createdAt is prohibited from canonical folder payload bytes; any value shape is an exact-key refusal"
       },
       {
         "id": "folder-created-at-offset-not-utc",
@@ -300,7 +313,9 @@
           "name": "Study",
           "createdAt": "2026-09-14T10:15:30.123+02:00"
         },
-        "expected": "p02-rel-folder-created-at-invalid"
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "createdAt",
+        "note": "T05 D1 (RC-P02-T05-D1-01): createdAt is prohibited from canonical folder payload bytes; any value shape is an exact-key refusal"
       },
       {
         "id": "folder-created-at-number",
@@ -311,7 +326,9 @@
           "name": "Study",
           "createdAt": 1757844930123
         },
-        "expected": "p02-rel-folder-created-at-invalid"
+        "expected": "p02-rel-folder-payload-key-rejected",
+        "rejectedKey": "createdAt",
+        "note": "T05 D1 (RC-P02-T05-D1-01): createdAt is prohibited from canonical folder payload bytes; any value shape is an exact-key refusal"
       },
       {
         "id": "folder-color-present",

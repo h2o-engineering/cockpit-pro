@@ -27,6 +27,16 @@
  * to PROJECTORS (the source side) so they can emit the canonical form; the
  * validators require that form and refuse anything else.
  *
+ * TIMESTAMPS NEVER ENTER A CANONICAL PAYLOAD (T05, RC-P02-T05-D1-01, Library
+ * owner decision 2026-09-21). The folder payload is exactly
+ * schema/folderId/name; `createdAt` is PROHIBITED and refused like any other
+ * unknown key. Authoritative source `updatedAt` (with the authoritative
+ * `createdAt` as fallback) may contribute ONLY to the head's
+ * sourceUpdatedAtIso metadata, and receiver-local created_at/updated_at are
+ * local persistence metadata that must never become payload bytes: a payload
+ * carrying a timestamp would give byte-identical relationship state a new
+ * digest after every Apply and produce a false echo.
+ *
  * COLOR_ADMISSION=DEFERRED_PENDING_SHARED_COLOR_VOCABULARY: colour is not a
  * payload key in this slice and is rejected like any other unknown key.
  *
@@ -48,6 +58,11 @@ const FOLDER_NAME_MAX_CODE_POINTS = 200;
 const CHAT_ID_MAX_LENGTH = 512;
 const CONTROL_RE = /\p{Cc}/u;
 const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+/* Keys that are timestamps or provenance on some source surface and are
+ * therefore the most likely to be projected into a payload by mistake. They
+ * are refused exactly like any other unknown key; the list exists only so the
+ * contract can NAME the prohibition (D1) rather than rely on omission. */
+const FOLDER_PROHIBITED_KEYS = Object.freeze(['createdAt', 'updatedAt', 'created_at', 'updated_at']);
 
 export const P02_RELATIONSHIP_DOMAINS_V2 = Object.freeze({
   SCHEMA: 'h2o.studio.syncRelationshipDomains.p02.v1',
@@ -56,7 +71,11 @@ export const P02_RELATIONSHIP_DOMAINS_V2 = Object.freeze({
     OBJECT_DOMAIN: FOLDER_OBJECT_DOMAIN,
     PAYLOAD_SCHEMA: FOLDER_PAYLOAD_SCHEMA,
     REQUIRED_KEYS: Object.freeze(['schema', 'folderId', 'name']),
-    OPTIONAL_KEYS: Object.freeze(['createdAt']),
+    /* T05 D1: the exact key set IS the required set. Nothing is optional. */
+    OPTIONAL_KEYS: Object.freeze([]),
+    PROHIBITED_KEYS: FOLDER_PROHIBITED_KEYS,
+    /* Where source time may go: the head, never the payload. */
+    SOURCE_TIMESTAMP_RULE: 'updatedAt-then-createdAt-to-sourceUpdatedAtIso-head-metadata-only',
     ID_GRAMMAR: FOLDER_ID_RE.source,
     ID_MAX_LENGTH: FOLDER_ID_MAX_LENGTH,
     NAME_MAX_CODE_POINTS: FOLDER_NAME_MAX_CODE_POINTS
@@ -81,7 +100,6 @@ export const P02_RELATIONSHIP_DOMAIN_ERROR = Object.freeze({
   FOLDER_ID_INVALID: 'p02-rel-folder-id-invalid',
   FOLDER_ID_OBJECT_ID_MISMATCH: 'p02-rel-folder-id-object-id-mismatch',
   FOLDER_NAME_INVALID: 'p02-rel-folder-name-invalid',
-  FOLDER_CREATED_AT_INVALID: 'p02-rel-folder-created-at-invalid',
   BINDING_PAYLOAD_SHAPE_INVALID: 'p02-rel-binding-payload-shape-invalid',
   BINDING_PAYLOAD_KEY_REJECTED: 'p02-rel-binding-payload-key-rejected',
   BINDING_SCHEMA_MISMATCH: 'p02-rel-binding-schema-mismatch',
@@ -175,15 +193,11 @@ export function validateFolderCatalogStatePayload(payload, objectId) {
   if (!isFolderObjectId(payload.folderId)) fail(E.FOLDER_ID_INVALID);
   if (payload.folderId !== objectId) fail(E.FOLDER_ID_OBJECT_ID_MISMATCH);
   if (!isCanonicalFolderName(payload.name)) fail(E.FOLDER_NAME_INVALID);
-  if (own(payload, 'createdAt') && !isUtcMillisecondTimestamp(payload.createdAt)) {
-    fail(E.FOLDER_CREATED_AT_INVALID);
-  }
   return Object.freeze({
     objectDomain: FOLDER_OBJECT_DOMAIN,
     objectId,
     folderId: payload.folderId,
-    name: payload.name,
-    createdAt: own(payload, 'createdAt') ? payload.createdAt : null
+    name: payload.name
   });
 }
 

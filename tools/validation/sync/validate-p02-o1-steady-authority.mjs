@@ -167,8 +167,14 @@ const transport = rust('sync_object_transport.rs');
     if (fs.existsSync(full)) scanForLease(full);
   }
   deepEqual(productionCallers.sort(),
-    ['src-surfaces-base/studio/sync/sync-steady-activation-desktop-v2.tauri.mjs'],
-    'D5 the ONLY production composer of the steady lease is the governed operator composition');
+    [
+      /* P02 T05 (HDA 18->20 validator correction, 2026-09-21): the Desktop
+       * relationship publication composer is the second governed,
+       * operator-triggered caller of the accepted steady lease commands. */
+      'src-surfaces-base/studio/sync/sync-relationship-publication-desktop-v2.tauri.mjs',
+      'src-surfaces-base/studio/sync/sync-steady-activation-desktop-v2.tauri.mjs'
+    ],
+    'D5 the ONLY production composers of the steady lease are the two governed operator compositions');
   /* That composition must not schedule itself - checked in full by the steady
    * publication suite; asserted here too because this is where reachability
    * was granted. */
