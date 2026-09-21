@@ -179,8 +179,21 @@ function makeLedger(events, { chatApplyState = null } = {}) {
   };
   const applyReads = [];
   const relationshipApplyReads = [];
+  /* F-T05-A: a relationship object whose latest accepted convergence came
+   * from APPLY - the domain-qualified applied anchor (revision pair + payload
+   * identity) beside the ledger direction cell, exactly what the real store
+   * records in one lockstep commit. Seeded by the test, never by publication. */
+  const appliedAnchors = new Map(); // objectKey -> branch-evidence-v2 reference
+  const seedAppliedAnchor = async ({ objectDomain, objectId, revisionId, revisionBlobSha256, payloadSha256 }) => {
+    const objectKey = await objectKeyHex(objectDomain, objectId, webcrypto);
+    appliedAnchors.set(objectKey, { referenceKind: 'branch-evidence-v2', objectDomain, objectKey, revisionId,
+      revisionBlobSha256Hex: revisionBlobSha256, payloadSha256Hex: payloadSha256 });
+    row(objectKey).direction = 'applied';
+    events.push(`ledger:applied-anchor:${objectKey.slice(0, 8)}`);
+    return objectKey;
+  };
   return {
-    rows, applyReads, relationshipApplyReads,
+    rows, applyReads, relationshipApplyReads, seedAppliedAnchor,
     listReadOnlyObjectIds: async () => [],
     async readApplySnapshot(objectId) {
       applyReads.push(objectId);
@@ -188,11 +201,16 @@ function makeLedger(events, { chatApplyState = null } = {}) {
     },
     /* T05 / D3: the domain-qualified relationship apply-state port the
      * protocol-state helper now requires for the relationship families. This
-     * publication world never applies, so the state is always empty; the
-     * chat objectId-keyed snapshot above is never consulted for them. */
+     * publication world never applies; the state is empty unless the test
+     * seeded an applied anchor (F-T05-A). The chat objectId-keyed snapshot
+     * above is never consulted for them. */
     async readRelationshipApplyState({ objectDomain, objectId }) {
       relationshipApplyReads.push(`${objectDomain}:${objectId}`);
-      return { ok: true, objectDomain, objectId, objectKey: await objectKeyHex(objectDomain, objectId, webcrypto), applyState: null, branchEvidence: [] };
+      const objectKey = await objectKeyHex(objectDomain, objectId, webcrypto);
+      const applied = appliedAnchors.get(objectKey) ?? null;
+      return { ok: true, objectDomain, objectId, objectKey,
+        applyState: applied ? { lastApplied: applied, pending: null } : null,
+        branchEvidence: applied ? [{ revisionId: applied.revisionId }] : [] };
     },
     readLocalPublicationTip: async (objectKey) => row(objectKey).tip,
     readLocalPublicationConvergence: async (objectKey) => ({ tip: row(objectKey).tip, convergedDirection: row(objectKey).direction }),
@@ -776,6 +794,76 @@ await section('T no live repository mutation by these tests', async () => {
   const pubSource = read('packages/browser-adapters/chrome/sync-p02-publication-chrome-v2.mjs');
   check(!pubSource.includes('setTimeout') && !pubSource.includes('setInterval') && !pubSource.includes('chrome.alarms'), 'the owner arms no automatic loop of its own');
   check(pubSource.includes("FIRST_PUBLICATION: 'trusted-human-manual-only'") && pubSource.includes("if (!manual && !descriptor.protocolState?.lastPublished) continue;"), 'first publications of every family remain trusted-human-manual; automatic wakes advance committed chains only');
+});
+
+/* ================================================================== */
+/* F-T05-A: a relationship object whose latest convergence came from    */
+/* APPLY (Desktop-origin revision applied on Chrome) must (A) never echo */
+/* while byte-identical and (B) publish a later Chrome-local change as a */
+/* DESCENDANT of the applied anchor through the real publication owner. */
+/* ================================================================== */
+async function desktopOriginRevision(fsa, { objectDomain, objectId, payload, mint }) {
+  const record = await produceRelationshipRevisionV2({
+    objectDomain, canonicalObject: { objectId, revisionId: `p02-${mint.padStart(32, '0').slice(-32)}`, payload },
+    writerSyncPeerId: REMOTE, p02Parent: null, cryptoImplementation: webcrypto
+  });
+  /* The immutable Desktop-written revision at its content address; Chrome
+   * received/applied it, so the repository holds it and the ledger anchors it. */
+  fsa.put(`${REPOSITORY}/objects/${record.objectKey}/revisions/${record.revisionBlobSha256}.json`, record.canonicalBytes);
+  return record;
+}
+
+await section('U F-T05-A applied anchor + identical local state -> no echo', async () => {
+  const w = await makeWorld();
+  const R1 = await desktopOriginRevision(w.fsa, { objectDomain: FOLDER_DOMAIN, objectId: 'f_applied', payload: { schema: 'h2o.studio.folderCatalogState.v1', folderId: 'f_applied', name: 'Applied' }, mint: 'ff01' });
+  await w.ledger.seedAppliedAnchor({ objectDomain: FOLDER_DOMAIN, objectId: 'f_applied', revisionId: R1.revisionId, revisionBlobSha256: R1.revisionBlobSha256, payloadSha256: R1.payloadSha256 });
+  /* Authoritative Chrome state byte-identical to the applied payload. */
+  w.source.state.folders.push(folderRecord('f_applied', 'Applied'));
+  const enumerated = await w.enumerator().enumerate();
+  const descriptor = enumerated.descriptors.find((d) => d.objectId === 'f_applied');
+  check(descriptor?.dirty === false && descriptor.publishable === false && descriptor.protocolState.lastApplied?.revisionId === R1.revisionId,
+    'applied anchor + identical page state: descriptor converged / not publishable');
+  const before = w.revisionsFor(R1.objectKey).length;
+  const result = await w.publication.publishManual();
+  check(result.outcome === 'no-eligible-local-change' && result.eligibleCount === 0 && result.repositoryMutated === false,
+    `publishManual publishes nothing for the applied, byte-identical object (${result.outcome}/${result.eligibleCount})`);
+  check(w.revisionsFor(R1.objectKey).length === before && before === 1 && w.currentHeads() === null,
+    'zero echo: the repository still holds exactly the one Desktop-origin revision and Chrome wrote no root');
+  check(w.ledger.rows.get(R1.objectKey)?.direction === 'applied' && w.ledger.rows.get(R1.objectKey)?.tip === null, 'the applied direction and the empty publication tip are untouched');
+});
+
+await section('V F-T05-A applied anchor + later Chrome-local change -> one DESCENDANT', async () => {
+  const w = await makeWorld();
+  const R1 = await desktopOriginRevision(w.fsa, { objectDomain: FOLDER_DOMAIN, objectId: 'f_applied', payload: { schema: 'h2o.studio.folderCatalogState.v1', folderId: 'f_applied', name: 'Applied' }, mint: 'ff02' });
+  await w.ledger.seedAppliedAnchor({ objectDomain: FOLDER_DOMAIN, objectId: 'f_applied', revisionId: R1.revisionId, revisionBlobSha256: R1.revisionBlobSha256, payloadSha256: R1.payloadSha256 });
+  /* The user renames the applied folder on Chrome. */
+  w.source.state.folders.push(folderRecord('f_applied', 'Applied Renamed', { updatedAt: Date.parse(RENAME_AT) }));
+  const enumerated = await w.enumerator().enumerate();
+  const descriptor = enumerated.descriptors.find((d) => d.objectId === 'f_applied');
+  check(descriptor?.dirty === true && descriptor.publishable === true && descriptor.p02AnchorSet?.pairs.some((pair) => pair.revisionId === R1.revisionId),
+    'applied anchor + local change: descriptor local-ahead / publishable with the applied pair as its anchor');
+  const result = await w.publication.publishManual();
+  results.push(result);
+  check(result.outcome === 'published' && result.selectedObjectId === 'f_applied' && result.repositoryMutated === true && MINT_RE.test(result.mintedRevisionId || ''),
+    `the later local change publishes through the real owner (${result.outcome}/${result.selectedObjectId})`);
+  const steady = result.report?.dispatched?.[0]?.result?.steady;
+  check(steady?.parentSelection === 'descendant' && steady?.lane === 'local-change', `steady core selected DESCENDANT on the local-change lane (${steady?.parentSelection}/${steady?.lane})`);
+  const blobs = w.revisionsFor(R1.objectKey).map((name) => path.basename(name, '.json'));
+  check(blobs.length === 2, `exactly one new revision beside the applied anchor (${blobs.length})`);
+  const child = blobs.map((blob) => w.readRevision(R1.objectKey, blob)).find((r) => r.revisionId === result.mintedRevisionId);
+  check(child?.previousRevisionId === R1.revisionId && child?.previousRevisionBlobSha256 === R1.revisionBlobSha256 && child.writerSyncPeerId === LOCAL,
+    'the new revision is a DESCENDANT whose parent pair is exactly the applied anchor (no second root, no fabricated parent)');
+  check(child.payload.name === 'Applied Renamed' && child.payload.folderId === 'f_applied' && Object.keys(child.payload).sort().join(',') === 'folderId,name,schema', 'the descendant carries the renamed D1 payload');
+  const head = w.currentHeads().heads.find((h) => h.objectKey === R1.objectKey);
+  check(head?.revisionId === result.mintedRevisionId && head.previousRevisionId === R1.revisionId && head.sourceUpdatedAtIso === RENAME_AT, 'Chrome\'s head advertises the descendant with the source timestamp');
+  check(w.ledger.rows.get(R1.objectKey)?.direction === 'published' && w.ledger.rows.get(R1.objectKey)?.tip?.revisionId === result.mintedRevisionId, 'the ledger now anchors the published descendant');
+  /* No echo regression afterwards: byte-identical state publishes nothing more. */
+  const again = await w.publication.publishManual();
+  check(again.outcome === 'no-eligible-local-change' && w.revisionsFor(R1.objectKey).length === 2, 'a second attempt publishes nothing (converged on the descendant)');
+  /* The correction is exactly the owner forwarding the domain-qualified applied identity. */
+  const owner = read('packages/browser-adapters/chrome/sync-p02-publication-chrome-v2.mjs');
+  check(owner.includes('appliedPayloadSha256: domainState.identity.appliedPayloadSha256,') && !owner.includes('appliedPayloadSha256: null,'),
+    'the relationship readProtocolState branch forwards domainState.identity.appliedPayloadSha256 (F-T05-A)');
 });
 
 /* ------------------------------------------------------------------ */

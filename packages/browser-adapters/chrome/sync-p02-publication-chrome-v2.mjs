@@ -512,7 +512,10 @@ export function createChromeP02PublicationOwner({
           /* Relationship families read protocol state through the T01
            * domain-qualified derivation: ledger by objectKey, never the
            * objectId-keyed apply store, so a binding never inherits the chat
-           * object's applied anchor or pending Apply. */
+           * object's applied anchor or pending Apply. Since T05 (F-T05-A)
+           * that reader also carries the family's OWN applied payload
+           * identity, which the steady core needs as the convergence anchor
+           * once the latest direction is `applied`. */
           const [pending, domainState] = await Promise.all([
             syncStore.resolveLocalPublicationPending(scope.objectKey),
             readChromeDomainProtocolState({
@@ -525,7 +528,7 @@ export function createChromeP02PublicationOwner({
             ...(descriptor?.protocolState ?? domainState.protocolState),
             convergedDirection: domainState.identity.direction,
             publishedPayloadSha256: domainState.identity.publishedPayloadSha256,
-            appliedPayloadSha256: null,
+            appliedPayloadSha256: domainState.identity.appliedPayloadSha256,
             intendedRevisionId: request?.revisionId ?? null,
             intendedRevisionBlobSha256: request?.revisionBlobSha256Hex ?? null,
             intendedPayloadSha256: request?.payloadSha256Hex ?? null,
