@@ -92,6 +92,11 @@ pub mod p02_publication_authority;
  * dormancy proofs run; no command is exposed, because nothing may begin a
  * steady window until the T19 standdown ceremony has run. */
 pub mod p02_steady_authority;
+/* O1-T19: the governed Desktop writer-generation standdown executor - the
+ * admitted WRITE side of the record `p02_steady_authority` already reads. One
+ * command, operator-gated, create-only, and verified through that same
+ * reader; nothing calls it on its own. */
+pub mod p01_standdown_executor;
 pub mod p02_writer_storage;
 // P02 folder relationship synchronization, T01: the ONE fixed-statement
 // relationship command (Host Integration lease, one module, one mod
@@ -3185,6 +3190,7 @@ macro_rules! h2o_studio_invoke_handler {
             p02_steady_authority::h2o_p02_read_writer_generation_authority,
             p02_steady_authority::h2o_p02_steady_begin,
             p02_steady_authority::h2o_p02_steady_finish,
+            p01_standdown_executor::h2o_p01_execute_writer_generation_standdown,
             p02_activation::h2o_p02_read_library_authority,
             item11_delivery_destination::h2o_item11_prepare_delivery,
             item11_delivery_destination::h2o_item11_prepare_local_delivery,
@@ -3289,6 +3295,7 @@ macro_rules! h2o_studio_invoke_handler {
             p02_steady_authority::h2o_p02_read_writer_generation_authority,
             p02_steady_authority::h2o_p02_steady_begin,
             p02_steady_authority::h2o_p02_steady_finish,
+            p01_standdown_executor::h2o_p01_execute_writer_generation_standdown,
             p02_activation::h2o_p02_read_library_authority,
             item11_delivery_destination::h2o_item11_prepare_delivery,
             item11_delivery_destination::h2o_item11_prepare_local_delivery,

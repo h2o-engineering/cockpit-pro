@@ -545,6 +545,199 @@ const store = (mode, value = null) => ({
   ) === false, 'A3 no migration references the generation record');
 }
 
+/* ===== 7b. TWO fixed-purpose generation owners, and no third =====
+ *
+ * Section 7 governs the LOCAL record - the kv key that decides whether P01 may
+ * still mutate on this installation - and its single Chrome owner is unchanged.
+ * The REPOSITORY record `writers/<writerKey>/generation.json` is a different
+ * durable fact: it is what `require_p02_generation` consults before a steady
+ * window may open. Chrome has always had a fixed-purpose writer for it; the
+ * Desktop had none, so a Desktop-first installation could not complete the
+ * handover at all. The admitted model is therefore exactly two fixed-purpose
+ * owners of that record, and the assertions below are about keeping it at two.
+ */
+{
+  const EXECUTOR_REL = 'apps/studio/desktop/src-tauri/src/p01_standdown_executor.rs';
+  const CHROME_REPOSITORY_OWNER_REL =
+    'packages/browser-adapters/chrome/sync-fsa-write-transport-v2.mjs';
+  const REPOSITORY_GENERATION_SCHEMA = 'h2o.studio.syncWriterGeneration.p02.v1';
+
+  /* Comments describe intent; only code can carry it. Every assertion below
+   * reads the comment-stripped source so prose cannot satisfy a check. */
+  const codeOnly = (text) => text
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+  const productionHalf = (text) => {
+    const testAt = text.indexOf('#[cfg(test)]');
+    return testAt > 0 ? text.slice(0, testAt) : text;
+  };
+
+  const executorSource = read(EXECUTOR_REL);
+  const executor = codeOnly(productionHalf(executorSource));
+  const executorTests = executorSource.slice(executorSource.indexOf('#[cfg(test)]'));
+
+  /* --- the owner set --- */
+  const repositoryOwners = [];
+  const looksLikeRepositoryGenerationWriter = (text) =>
+    (text.includes(REPOSITORY_GENERATION_SCHEMA) ||
+      text.includes('WRITER_GENERATION_SCHEMA') ||
+      text.includes('GENERATION_SCHEMA')) &&
+    /generation\.json|WRITER_GENERATION_FILE/.test(text) &&
+    /writeTemporary|promoteTemporary|fs::write|create_new|hard_link|\.write_all\(/.test(text);
+  const scanRepositoryOwners = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (['node_modules', 'dist', 'prod', 'target', '.git'].includes(entry.name)) continue;
+        scanRepositoryOwners(full);
+        continue;
+      }
+      if (!/\.(mjs|js|rs)$/.test(entry.name)) continue;
+      const rel = path.relative(root, full);
+      if (rel.startsWith('tools/validation/')) continue;
+      if (looksLikeRepositoryGenerationWriter(codeOnly(productionHalf(fs.readFileSync(full, 'utf8'))))) {
+        repositoryOwners.push(rel);
+      }
+    }
+  };
+  for (const dir of ['packages', 'src-surfaces-base', 'apps/studio/desktop/src-tauri/src']) {
+    const full = path.join(root, dir);
+    if (fs.existsSync(full)) scanRepositoryOwners(full);
+  }
+  repositoryOwners.sort();
+  equal(repositoryOwners.length, 2,
+    `B1 exactly two production files write the repository generation record (${repositoryOwners.join(',')})`);
+  check(repositoryOwners.includes(CHROME_REPOSITORY_OWNER_REL),
+    'B1 owner 1 is the unchanged Chrome fixed-purpose repository transport');
+  check(repositoryOwners.includes(EXECUTOR_REL),
+    'B1 owner 2 is the Desktop O1-T19 standdown executor');
+  check(looksLikeRepositoryGenerationWriter(`
+    const GENERATION_SCHEMA = '${REPOSITORY_GENERATION_SCHEMA}';
+    export async function forbiddenThirdOwner(storage, writerKey, record) {
+      await storage.writeTemporary(\`writers/\${writerKey}/generation.json\`, record);
+    }
+  `), 'B1 negative control REDs on a third repository-generation writer');
+
+  /* --- the Chrome owner is untouched by this admission --- */
+  const chromeRepositoryOwner = read(CHROME_REPOSITORY_OWNER_REL);
+  check(/ensureWriterGeneration/.test(chromeRepositoryOwner),
+    'B2 the Chrome repository owner still exposes only its fixed-purpose ceremony');
+  check(/replaceExisting:\s*false/.test(chromeRepositoryOwner),
+    'B2 and still promotes create-only');
+  check(!/export\s+(async\s+)?function\s+(write|set)WriterGeneration/.test(chromeRepositoryOwner),
+    'B2 and still exposes no generic generation setter');
+
+  /* --- the Desktop executor is fixed-purpose --- */
+  check(executor.includes('T19_GOVERNED_CAMPAIGN_TOKEN') &&
+    executor.includes('T19_OPERATOR_AUTHORIZATION_TOKEN'),
+    'B3 the executor defines both governed tokens');
+  check(/request\.governed_campaign\s*!=\s*T19_GOVERNED_CAMPAIGN_TOKEN[\s\S]{0,160}request\.operator_authorization\s*!=\s*T19_OPERATOR_AUTHORIZATION_TOKEN/
+    .test(executor), 'B3 and refuses unless BOTH match');
+  check(/p02_foundation_verified[\s\S]{0,200}p01_mutation_drained[\s\S]{0,200}retained_p02_intents_reconciled/
+    .test(executor), 'B3 and requires all three T19 ceremony attestations');
+  for (const forbidden of [
+    'pub fn set_generation', 'pub fn write_generation', 'fn write_repository_file'
+  ]) {
+    check(!executor.includes(forbidden), `B3 no generic setter: ${forbidden}`);
+  }
+
+  /* --- no caller-supplied repository, path or document --- */
+  const requestStruct = executor.slice(
+    executor.indexOf('pub struct P01StanddownRequest'),
+    executor.indexOf('pub struct P01StanddownReceipt')
+  );
+  const requestFields = requestStruct.split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('pub ') && !line.startsWith('pub struct'))
+    .map((line) => line.slice(4).split(':')[0]);
+  equal(requestFields.join(','), [
+    'governed_campaign', 'operator_authorization', 'writer_key', 'writer_sync_peer_id',
+    'expected_container_path_sha256_hex', 'standdown_at', 'p02_foundation_verified',
+    'p01_mutation_drained', 'retained_p02_intents_reconciled'
+  ].join(','), 'B4 the request field list is closed and names no repository, path or record');
+  check(executor.includes('crate::p02_activation::resolve_target_core') &&
+    executor.includes('app_data_dir') && executor.includes('item11-delivery'),
+    'B4 the repository is resolved through the governed Item-11 binding');
+  check(/expected_container_path_sha256_hex\s*!=\s*container_path_sha256_hex/.test(executor),
+    'B4 and the request is bound to the expected container identity');
+  check(executor.includes('is_lower_hex_64(&request.writer_key)'),
+    'B5 the writer key must be lower-hex-64, so traversal cannot reach writers/<key>');
+  check(/derive_writer_key\(&request\.writer_sync_peer_id\)\s*!=\s*request\.writer_key/.test(executor),
+    'B5 and must be derived from the declared writer identity');
+  check(executor.includes('b"h2o.studio.sync-writer.v1"'),
+    'B5 using the canonical writerKeyHex domain');
+
+  /* --- create-only, and the readback is the verdict --- */
+  check(executor.includes('.create_new(true)') && executor.includes('fs::hard_link'),
+    'B6 persistence is create-only (create_new + hard_link, never a replacing rename)');
+  check(!/fs::rename\(/.test(executor), 'B6 and performs no rename');
+  check(!/\.truncate\(true\)|OpenOptions::new\(\)\s*\.\s*write\(true\)\s*\.\s*create\(true\)/.test(executor),
+    'B6 and never truncates an existing record');
+  equal((executor.match(/require_p02_generation\(/g) || []).length, 2,
+    'B7 both the replay and the fresh write verify through require_p02_generation');
+  check(executor.includes('read_p02_generation_record('),
+    'B7 and the existing record is read through the same canonical reader');
+  check(executor.includes('STANDDOWN_EXISTING_RECORD_UNSAFE') &&
+    executor.includes('STANDDOWN_EXISTING_RECORD_CONFLICT') &&
+    executor.includes('STANDDOWN_READBACK_REJECTED'),
+    'B7 and malformed, divergent and readback-rejected states have their own refusals');
+  check(/Ok\(record\)[\s\S]{0,400}document_writer_key[\s\S]{0,200}STANDDOWN_EXISTING_RECORD_CONFLICT/
+    .test(executor), 'B8 a p02 record naming another writer is a conflict, not a replay');
+  check(/created:\s*false/.test(executor),
+    'B8 and the idempotent replay reports that nothing was written');
+
+  /* --- reachable, but never autonomous --- */
+  equal((executor.match(/#\[tauri::command\]/g) || []).length, 1,
+    'B9 the executor exposes exactly one command');
+  for (const forbidden of [
+    'std::thread', 'tokio::spawn', 'thread::spawn', 'on_page_load', 'Builder::default',
+    'steady_begin', 'publication_begin', 'relationship', 'receive', 'apply_'
+  ]) {
+    check(!executor.includes(forbidden),
+      `B9 and arms no autonomous or publishing route: ${forbidden}`);
+  }
+  const crateFiles = fs.readdirSync(path.join(root, 'apps/studio/desktop/src-tauri/src'))
+    .filter((name) => name.endsWith('.rs') && name !== 'p01_standdown_executor.rs');
+  for (const name of crateFiles) {
+    const text = codeOnly(read(`apps/studio/desktop/src-tauri/src/${name}`));
+    const calls = (text.match(/h2o_p01_execute_writer_generation_standdown/g) || []).length;
+    if (name === 'lib.rs') {
+      equal(calls, 2, 'B10 lib.rs registers the command in both handler variants and nowhere else');
+      check(text.includes('pub mod p01_standdown_executor;'), 'B10 and admits the module once');
+      continue;
+    }
+    equal(calls, 0, `B10 ${name} does not reach the standdown command`);
+    check(!text.includes('p01_standdown_executor::execute_core'),
+      `B10 ${name} does not call the executor core`);
+  }
+
+  /* --- the negatives are proven by executable tests, not by prose --- */
+  for (const [needle, label] of [
+    ['STANDDOWN_NOT_AUTHORIZED', 'wrong campaign/operator token'],
+    ['STANDDOWN_ATTESTATION_MISSING', 'missing attestation'],
+    ['STANDDOWN_REQUEST_INVALID', 'malformed key/timestamp and traversal'],
+    ['STANDDOWN_WRITER_IDENTITY_MISMATCH', 'writer key not derived from the identity'],
+    ['STANDDOWN_CONTAINER_MISMATCH', 'container mismatch'],
+    ['STANDDOWN_NOT_ACTIVATED', 'unactivated repository'],
+    ['STANDDOWN_EXISTING_RECORD_CONFLICT', 'divergent existing record'],
+    ['STANDDOWN_EXISTING_RECORD_UNSAFE', 'malformed existing record'],
+    ['STANDDOWN_PERSISTENCE_FAILED', 'persistence failure']
+  ]) {
+    /* Either the direct `Err(CONSTANT)` expectation or the table-driven form
+     * that feeds the same constant into one. Both are executable; prose is
+     * not, and a bare mention in a comment cannot match. */
+    check(new RegExp(`\\b${needle}\\s*[,)]`).test(executorTests),
+      `B11 an executable negative exists for ${label}`);
+  }
+  check(/\.\.\/\.\.\/\.\.\/\.\.\/etc\/passwd/.test(executorTests),
+    'B11 including an explicit writer-path traversal attempt');
+
+  /* --- the Desktop read port is still write-incapable --- */
+  const desktopObserver = read('src-surfaces-base/studio/sync/sync-writer-generation-desktop-v2.tauri.mjs');
+  check(!/async write\(|function write\(|\.set\(|INSERT INTO|UPDATE /.test(desktopObserver),
+    'B12 the Desktop generation observer remains read-only');
+}
+
 /* ===== 8. The ceremony and rollback are SPECIFIED, not executable ===== */
 {
   equal(P02_STANDDOWN_CEREMONY.executable, false, 'P1 the standdown spec is not executable');
@@ -1705,6 +1898,11 @@ console.log(JSON.stringify({
   ownershipRulings: P01_OWNERSHIP_RULINGS.map((r) => `${r.symbol}: ${r.classification}`),
   genericSharedTransportRuling: 'GENERIC_SHARED_TRANSPORT - P01 GATE AT FEATURE ENTRY POINT',
   generationPersistenceOwners: 1,
+  repositoryGenerationPersistenceOwners: 2,
+  repositoryGenerationOwnerModel: [
+    'packages/browser-adapters/chrome/sync-fsa-write-transport-v2.mjs',
+    'apps/studio/desktop/src-tauri/src/p01_standdown_executor.rs'
+  ],
   generatedStanddownChecked,
   ceremonyExecutedAgainstDisposableState: true,
   ceremonyExecutedAgainstRealState: false, rollbackExecuted: false,
