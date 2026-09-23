@@ -10,8 +10,33 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
 
 // Phase 4B-1b: CWD-relative path string for an extension build artifact.
 // Byte-identical to legacy "build/chrome-ext-<variant>/<segments>" form.
+//
+// THIS ONE FOLLOWS THE ENVIRONMENT, AND MUST. `extensionBuildDir()` honours
+// H2O_EXT_BUILD_ROOT so a source-safe run can send build output to a per-run
+// temporary root; artifact READS below have to look where the current
+// execution actually built, so they keep using this helper.
 function extBuildRel(variant, ...segments) {
   return path.relative(REPO_ROOT, path.join(extensionBuildDir(variant), ...segments));
+}
+
+// THIS ONE MUST NOT. A documented build command is a fact about the Extension's
+// canonical layout, not about where one run happened to put its output, so a
+// relocated build root cannot be allowed to redefine what static documentation
+// is required to advertise - that is how the release gate came to demand an
+// ephemeral per-run path from a correct document.
+//
+// The canonical layout is still read from the one authority that owns it
+// (`extensionBuildDir`), with the relocation input neutralised for the length
+// of the call, rather than restated here: a second copy of the layout would
+// drift the day the Extension moves again, exactly as it moved in Phase 4C-B.
+function canonicalExtBuildRel(variant, ...segments) {
+  const relocated = process.env.H2O_EXT_BUILD_ROOT;
+  if (relocated !== undefined) delete process.env.H2O_EXT_BUILD_ROOT;
+  try {
+    return path.relative(REPO_ROOT, path.join(extensionBuildDir(variant), ...segments));
+  } finally {
+    if (relocated !== undefined) process.env.H2O_EXT_BUILD_ROOT = relocated;
+  }
 }
 
 const DOC_REL = "docs/identity/IDENTITY_PHASE_3_0_SUPABASE_PREP.md";
@@ -55,10 +80,10 @@ const ACTIVE_VALIDATORS = [
 
 const ACTIVE_BUILDS = [
   "node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs",
-  `env H2O_EXT_DEV_VARIANT=lean H2O_EXT_OUT_DIR=${extBuildRel("dev-lean")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
-  `env H2O_EXT_DEV_VARIANT=production H2O_EXT_OUT_DIR=${extBuildRel("prod")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
-  `env H2O_IDENTITY_PHASE_NETWORK=request_otp H2O_EXT_OUT_DIR=${extBuildRel("dev-controls-armed")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
-  `env H2O_IDENTITY_PHASE_NETWORK=request_otp H2O_IDENTITY_OAUTH_PROVIDER=google H2O_EXT_OUT_DIR=${extBuildRel("dev-controls-oauth-google")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
+  `env H2O_EXT_DEV_VARIANT=lean H2O_EXT_OUT_DIR=${canonicalExtBuildRel("dev-lean")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
+  `env H2O_EXT_DEV_VARIANT=production H2O_EXT_OUT_DIR=${canonicalExtBuildRel("prod")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
+  `env H2O_IDENTITY_PHASE_NETWORK=request_otp H2O_EXT_OUT_DIR=${canonicalExtBuildRel("dev-controls-armed")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
+  `env H2O_IDENTITY_PHASE_NETWORK=request_otp H2O_IDENTITY_OAUTH_PROVIDER=google H2O_EXT_OUT_DIR=${canonicalExtBuildRel("dev-controls-oauth-google")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
   "node tools/product/extensions/chatgpt/chrome/pack-ops-panel.mjs",
 ];
 
