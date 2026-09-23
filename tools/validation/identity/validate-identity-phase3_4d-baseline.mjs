@@ -14,6 +14,20 @@ function extBuildRel(variant, ...segments) {
   return path.relative(REPO_ROOT, path.join(extensionBuildDir(variant), ...segments));
 }
 
+// Canonical documented Extension output identity.
+//
+// Deliberately NOT derived from extBuildRel()/extensionBuildDir(): those honour
+// H2O_EXT_BUILD_ROOT so the source-safe release gate can relocate build OUTPUT
+// into a per-run temporary root. Relocating where artifacts are written must not
+// redefine the canonical command that static documentation is required to
+// advertise, so the documented-command expectations below are fixed by layout
+// and never by environment. extBuildRel() stays in use for reading the artifacts
+// actually produced by the current validation execution.
+const CANONICAL_EXTENSION_BUILD_REL = "apps/extensions/chatgpt/chrome";
+function canonicalBuildRel(variant) {
+  return `${CANONICAL_EXTENSION_BUILD_REL}/${variant}`;
+}
+
 const DOC_REL = "docs/identity/IDENTITY_PHASE_3_0_SUPABASE_PREP.md";
 const GITIGNORE_REL = ".gitignore";
 const BACKGROUND_REL = "tools/product/extensions/chatgpt/chrome/chrome-live-background.mjs";
@@ -55,10 +69,10 @@ const ACTIVE_VALIDATORS = [
 
 const ACTIVE_BUILDS = [
   "node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs",
-  `env H2O_EXT_DEV_VARIANT=lean H2O_EXT_OUT_DIR=${extBuildRel("dev-lean")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
-  `env H2O_EXT_DEV_VARIANT=production H2O_EXT_OUT_DIR=${extBuildRel("prod")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
-  `env H2O_IDENTITY_PHASE_NETWORK=request_otp H2O_EXT_OUT_DIR=${extBuildRel("dev-controls-armed")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
-  `env H2O_IDENTITY_PHASE_NETWORK=request_otp H2O_IDENTITY_OAUTH_PROVIDER=google H2O_EXT_OUT_DIR=${extBuildRel("dev-controls-oauth-google")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
+  `env H2O_EXT_DEV_VARIANT=lean H2O_EXT_OUT_DIR=${canonicalBuildRel("dev-lean")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
+  `env H2O_EXT_DEV_VARIANT=production H2O_EXT_OUT_DIR=${canonicalBuildRel("prod")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
+  `env H2O_IDENTITY_PHASE_NETWORK=request_otp H2O_EXT_OUT_DIR=${canonicalBuildRel("dev-controls-armed")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
+  `env H2O_IDENTITY_PHASE_NETWORK=request_otp H2O_IDENTITY_OAUTH_PROVIDER=google H2O_EXT_OUT_DIR=${canonicalBuildRel("dev-controls-oauth-google")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
   "node tools/product/extensions/chatgpt/chrome/pack-ops-panel.mjs",
 ];
 
