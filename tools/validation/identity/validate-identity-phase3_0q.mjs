@@ -1079,6 +1079,71 @@ function assertConditionalProviderBundleLoadingGate() {
     "background must not load the provider bundle unconditionally at service-worker boot");
 }
 
+// Closed two-owner model for chrome.permissions in the generated background.
+// Factored so the identical rule can be replayed against a synthetic background
+// below; it asserts rather than returns, so a violation is a hard failure in
+// both the real and the synthetic run.
+const PERMISSION_CONTAINS_OWNERS_3_0Q = Object.freeze([
+  "pageMetadataPermissionContains",
+  "identityProviderPermission_containsExactHost",
+]);
+const PERMISSION_REQUEST_OWNERS_3_0Q = Object.freeze([
+  "identityProviderPermission_requestExactHost",
+]);
+
+function assertPermissionOwnership3_0Q(source) {
+  const containsOwnerBodies = PERMISSION_CONTAINS_OWNERS_3_0Q.map((name) => {
+    const body = extractFunction(source, name);
+    assert(body.includes("chrome.permissions.contains"),
+      `chrome.permissions.contains must appear in its legitimate owner ${name}`);
+    return body;
+  });
+  const requestOwnerBodies = PERMISSION_REQUEST_OWNERS_3_0Q.map((name) => {
+    const body = extractFunction(source, name);
+    assert(body.includes("chrome.permissions.request"),
+      `chrome.permissions.request must appear in its legitimate owner ${name}`);
+    return body;
+  });
+  let withoutContainsOwners = source;
+  for (const body of containsOwnerBodies) {
+    withoutContainsOwners = withoutContainsOwners.replace(body, "");
+  }
+  assert(!withoutContainsOwners.includes("chrome.permissions.contains"),
+    "chrome.permissions.contains must not appear outside its two legitimate owner helpers");
+  let withoutRequestOwners = source;
+  for (const body of requestOwnerBodies) {
+    withoutRequestOwners = withoutRequestOwners.replace(body, "");
+  }
+  assert(!withoutRequestOwners.includes("chrome.permissions.request"),
+    "chrome.permissions.request must not appear outside internal exact-host request helper");
+}
+
+// Durable negative control. A synthetic THIRD chrome.permissions.contains owner
+// must be rejected by the very same rule that admits the real source. In-memory
+// only: no fixture is written and no background source is touched.
+function assertThirdPermissionOwnerRejected3_0Q(source) {
+  const syntheticThirdContainsOwner = [
+    "function syntheticUnauthorizedPermissionContains(originPattern) {",
+    "  return new Promise((resolve) => {",
+    "    chrome.permissions.contains({ origins: [originPattern] }, (granted) => {",
+    "      resolve(granted === true);",
+    "    });",
+    "  });",
+    "}",
+    "",
+  ].join("\n") + source;
+  let rejected = false;
+  try {
+    assertPermissionOwnership3_0Q(syntheticThirdContainsOwner);
+  } catch (err) {
+    rejected = /chrome\.permissions\.contains must not appear outside/.test(
+      String(err && err.message),
+    );
+  }
+  assert(rejected,
+    "negative control: a third unauthorized chrome.permissions.contains owner must fail the ownership check");
+}
+
 function assertBackgroundPermissionReadinessSafe() {
   const source = read(BACKGROUND_SOURCE_REL);
   assert(source.includes("IDENTITY_PROVIDER_PERMISSION_READINESS_DEFERRED"),
@@ -1113,17 +1178,16 @@ function assertBackgroundPermissionReadinessSafe() {
     "background must check exact optional host permission through a named helper");
   assert(source.includes("function identityProviderPermission_requestExactHost("),
     "background must define the internal exact-host request helper");
-  const containsFn = extractFunction(source, "identityProviderPermission_containsExactHost");
-  const requestFn = extractFunction(source, "identityProviderPermission_requestExactHost");
-  assert(containsFn.includes("chrome.permissions.contains"),
-    "chrome.permissions.contains must appear in the exact-host readiness helper");
-  assert(requestFn.includes("chrome.permissions.request"),
-    "chrome.permissions.request must appear only in the internal request helper");
-  const withoutPermissionHelpers = source.replace(containsFn, "").replace(requestFn, "");
-  assert(!withoutPermissionHelpers.includes("chrome.permissions.contains"),
-    "chrome.permissions.contains must not appear outside exact-host readiness helper");
-  assert(!withoutPermissionHelpers.includes("chrome.permissions.request"),
-    "chrome.permissions.request must not appear outside internal request helper");
+  // The background legitimately owns TWO chrome.permissions.contains callers:
+  //   1. pageMetadataPermissionContains               — page-metadata origin probe
+  //   2. identityProviderPermission_containsExactHost — identity exact-host readiness
+  // and exactly ONE chrome.permissions.request caller:
+  //   3. identityProviderPermission_requestExactHost  — internal exact-host request
+  // The allowlist is explicit and closed: owner helpers are enumerated by name,
+  // never wildcarded, so a THIRD unauthorized caller still fails this gate.
+  assert(source.includes("function pageMetadataPermissionContains("),
+    "background must probe page-metadata origins through a named helper");
+  assertPermissionOwnership3_0Q(source);
   assert(source.includes("function identityProviderPermission_isPopupSender("),
     "background must sender-gate the dev-only provider permission action");
   assert(source.includes('chrome.runtime.getURL("popup.html")'),
@@ -1137,6 +1201,7 @@ function assertBackgroundPermissionReadinessSafe() {
   assert(!/\bverifyOtp\s*\(/.test(source),
     "background source must not contain a direct verifyOtp call");
   assertNoPatterns(BACKGROUND_SOURCE_REL, source, PROVIDER_PROBE_AUTH_CALL_PATTERNS);
+  assertThirdPermissionOwnerRejected3_0Q(source);
 }
 
 function assertPopupProviderPermissionActionScoped() {

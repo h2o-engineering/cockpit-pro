@@ -330,6 +330,10 @@ function writeSourceSafeValidatorCopy(relativePath, transform) {
   SOURCE_SAFE_VALIDATOR_OVERRIDES.set(relativePath, destination);
 }
 
+// The single src-runtime-base input the canonical validators actually read
+// inside the source-safe validation repository.
+const IDENTITY_CORE_SOURCE_REL = "src-runtime-base/0D4a.\u2b1b\ufe0f\ud83d\udd10 Identity Core \ud83d\udd10.js";
+
 function createSourceSafeLegacyValidatorFixtures() {
   fs.mkdirSync(SOURCE_SAFE_VALIDATION_REPOSITORY, { recursive: true });
   for (const input of [
@@ -339,6 +343,11 @@ function createSourceSafeLegacyValidatorFixtures() {
     "config",
     "tools/product",
     "tools/paths.mjs",
+    // Phase 3.0Q legitimately reads the Identity Core runtime source. Link that
+    // exact file rather than the whole src-runtime-base tree: the source-safe
+    // repository stays a closed, enumerated input set instead of a window onto
+    // arbitrary repository content.
+    IDENTITY_CORE_SOURCE_REL,
   ]) {
     linkSourceSafeValidationInput(
       input,

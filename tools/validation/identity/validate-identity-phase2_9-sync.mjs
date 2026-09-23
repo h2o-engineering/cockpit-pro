@@ -343,19 +343,76 @@ assert(bgSrc.includes('chrome.runtime.getURL("popup.html")'),
   "provider permission action must require popup.html sender URL");
 assert(!loaderSrc.includes("identity:request-provider-permission"),
   "loader must not allow-list a provider permission bridge action");
-const containsExactHostFnA2 = extractFunction(bgSrc, "identityProviderPermission_containsExactHost");
-const requestExactHostFnA2 = extractFunction(bgSrc, "identityProviderPermission_requestExactHost");
-assert(containsExactHostFnA2.includes("chrome.permissions.contains"),
-  "chrome.permissions.contains must be confined to exact-host readiness helper");
-assert(requestExactHostFnA2.includes("chrome.permissions.request"),
-  "chrome.permissions.request must be confined to internal exact-host request helper");
-const bgWithoutPermissionHelpersA2 = bgSrc
-  .replace(containsExactHostFnA2, "")
-  .replace(requestExactHostFnA2, "");
-assert(!bgWithoutPermissionHelpersA2.includes("chrome.permissions.contains"),
-  "chrome.permissions.contains must not appear outside exact-host readiness helper");
-assert(!bgWithoutPermissionHelpersA2.includes("chrome.permissions.request"),
-  "chrome.permissions.request must not appear outside internal exact-host request helper");
+// The background legitimately owns TWO chrome.permissions.contains callers:
+//   1. pageMetadataPermissionContains               — page-metadata origin probe
+//   2. identityProviderPermission_containsExactHost — identity exact-host readiness
+// and exactly ONE chrome.permissions.request caller:
+//   3. identityProviderPermission_requestExactHost  — internal exact-host request
+// The allowlist is explicit and closed: helper names are enumerated, never
+// wildcarded, and any further caller fails the gate.
+const PERMISSION_CONTAINS_OWNERS_A2 = Object.freeze([
+  "pageMetadataPermissionContains",
+  "identityProviderPermission_containsExactHost",
+]);
+const PERMISSION_REQUEST_OWNERS_A2 = Object.freeze([
+  "identityProviderPermission_requestExactHost",
+]);
+
+// Factored so the identical ownership rule can be replayed against a synthetic
+// background below. It asserts rather than returns, so any violation is a hard
+// failure in both the real and the synthetic run.
+function assertPermissionOwnershipA2(source) {
+  const containsOwnerBodies = PERMISSION_CONTAINS_OWNERS_A2.map((name) => {
+    const body = extractFunction(source, name);
+    assert(body.includes("chrome.permissions.contains"),
+      `chrome.permissions.contains must appear in its legitimate owner ${name}`);
+    return body;
+  });
+  const requestOwnerBodies = PERMISSION_REQUEST_OWNERS_A2.map((name) => {
+    const body = extractFunction(source, name);
+    assert(body.includes("chrome.permissions.request"),
+      `chrome.permissions.request must appear in its legitimate owner ${name}`);
+    return body;
+  });
+  let withoutContainsOwners = source;
+  for (const body of containsOwnerBodies) {
+    withoutContainsOwners = withoutContainsOwners.replace(body, "");
+  }
+  assert(!withoutContainsOwners.includes("chrome.permissions.contains"),
+    "chrome.permissions.contains must not appear outside its two legitimate owner helpers");
+  let withoutRequestOwners = source;
+  for (const body of requestOwnerBodies) {
+    withoutRequestOwners = withoutRequestOwners.replace(body, "");
+  }
+  assert(!withoutRequestOwners.includes("chrome.permissions.request"),
+    "chrome.permissions.request must not appear outside internal exact-host request helper");
+}
+
+assertPermissionOwnershipA2(bgSrc);
+
+// Durable negative control. A synthetic THIRD chrome.permissions.contains owner
+// must be rejected by the very same rule that just admitted the real source.
+// In-memory only: no fixture is written and the background source is untouched.
+const syntheticThirdContainsOwnerA2 = [
+  "function syntheticUnauthorizedPermissionContains(originPattern) {",
+  "  return new Promise((resolve) => {",
+  "    chrome.permissions.contains({ origins: [originPattern] }, (granted) => {",
+  "      resolve(granted === true);",
+  "    });",
+  "  });",
+  "}",
+  "",
+].join("\n") + bgSrc;
+let syntheticThirdOwnerRejectedA2 = false;
+try {
+  assertPermissionOwnershipA2(syntheticThirdContainsOwnerA2);
+} catch (err) {
+  syntheticThirdOwnerRejectedA2 =
+    /chrome\.permissions\.contains must not appear outside/.test(String(err && err.message));
+}
+assert(syntheticThirdOwnerRejectedA2,
+  "negative control: a third unauthorized chrome.permissions.contains owner must fail the ownership check");
+pass("negative control: synthetic third chrome.permissions.contains owner is rejected fail-closed");
 pass("page-facing provider config stays blocked and provider permission action is popup-gated");
 
 const publicSnapshotBlockA2 = bgSrc.slice(
