@@ -10,8 +10,31 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
 
 // Phase 4B-1b: CWD-relative path string for an extension build artifact.
 // Byte-identical to legacy "build/chrome-ext-<variant>/<segments>" form.
+//
+// THIS ONE FOLLOWS THE ENVIRONMENT, AND MUST: `extensionBuildDir()` honours
+// H2O_EXT_BUILD_ROOT so the source-safe release gate can send build OUTPUT to a
+// per-run temporary root, and the manifest reads below have to inspect what the
+// current execution actually built.
 function extBuildRel(variant, ...segments) {
   return path.relative(REPO_ROOT, path.join(extensionBuildDir(variant), ...segments));
+}
+
+// THIS ONE MUST NOT. A documented build command states the Extension's canonical
+// layout, not where one run happened to write, so a relocated build root cannot
+// be allowed to redefine what static documentation is required to advertise -
+// that is how this gate came to demand an ephemeral per-run path from a correct
+// document. The canonical answer still comes from the one authority that owns
+// the layout, with the relocation input neutralised for the length of the call,
+// rather than restated here where it would drift the next time the Extension
+// moves.
+function canonicalExtBuildRel(variant, ...segments) {
+  const relocated = process.env.H2O_EXT_BUILD_ROOT;
+  if (relocated !== undefined) delete process.env.H2O_EXT_BUILD_ROOT;
+  try {
+    return path.relative(REPO_ROOT, path.join(extensionBuildDir(variant), ...segments));
+  } finally {
+    if (relocated !== undefined) process.env.H2O_EXT_BUILD_ROOT = relocated;
+  }
 }
 
 const DOC_REL = "docs/identity/IDENTITY_PHASE_3_0_SUPABASE_PREP.md";
@@ -30,10 +53,10 @@ const PROD_MANIFEST_REL = extBuildRel("prod", "manifest.json");
 
 const ACTIVE_BUILDS = [
   "node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs",
-  `env H2O_EXT_DEV_VARIANT=lean H2O_EXT_OUT_DIR=${extBuildRel("dev-lean")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
-  `env H2O_EXT_DEV_VARIANT=production H2O_EXT_OUT_DIR=${extBuildRel("prod")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
-  `env H2O_IDENTITY_PHASE_NETWORK=request_otp H2O_EXT_OUT_DIR=${extBuildRel("dev-controls-armed")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
-  `env H2O_IDENTITY_PHASE_NETWORK=request_otp H2O_IDENTITY_OAUTH_PROVIDER=google H2O_EXT_OUT_DIR=${extBuildRel("dev-controls-oauth-google")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
+  `env H2O_EXT_DEV_VARIANT=lean H2O_EXT_OUT_DIR=${canonicalExtBuildRel("dev-lean")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
+  `env H2O_EXT_DEV_VARIANT=production H2O_EXT_OUT_DIR=${canonicalExtBuildRel("prod")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
+  `env H2O_IDENTITY_PHASE_NETWORK=request_otp H2O_EXT_OUT_DIR=${canonicalExtBuildRel("dev-controls-armed")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
+  `env H2O_IDENTITY_PHASE_NETWORK=request_otp H2O_IDENTITY_OAUTH_PROVIDER=google H2O_EXT_OUT_DIR=${canonicalExtBuildRel("dev-controls-oauth-google")} node tools/product/extensions/chatgpt/chrome/build-chrome-live-extension.mjs`,
   "node tools/product/extensions/chatgpt/chrome/pack-ops-panel.mjs",
 ];
 
@@ -79,25 +102,25 @@ const SYNTAX_COMMANDS = [
   "node --check tools/validation/identity/validate-identity-phase3_9c-google-oauth-release-gate.mjs",
   "node --check tools/validation/identity/validate-identity-phase4_0b-account-security-mvp.mjs",
   "node --check src-runtime-base/0Z1e.⚫️🔐 Account Tab (Control Hub 🔌 Plugin) 🔐.js",
-  `node --check ${extBuildRel("dev-controls", "bg.js")}`,
-  `node --check ${extBuildRel("dev-controls", "loader.js")}`,
-  `node --check ${extBuildRel("dev-controls", "popup.js")}`,
-  `node --check ${extBuildRel("dev-controls", "provider/identity-provider-supabase.js")}`,
-  `node --check ${extBuildRel("dev-lean", "bg.js")}`,
-  `node --check ${extBuildRel("dev-lean", "loader.js")}`,
-  `node --check ${extBuildRel("dev-lean", "provider/identity-provider-supabase.js")}`,
-  `node --check ${extBuildRel("prod", "bg.js")}`,
-  `node --check ${extBuildRel("prod", "loader.js")}`,
-  `node --check ${extBuildRel("prod", "provider/identity-provider-supabase.js")}`,
-  `node --check ${extBuildRel("dev-controls-armed", "bg.js")}`,
-  `node --check ${extBuildRel("dev-controls-armed", "loader.js")}`,
-  `node --check ${extBuildRel("dev-controls-armed", "popup.js")}`,
-  `node --check ${extBuildRel("dev-controls-armed", "provider/identity-provider-supabase.js")}`,
-  `node --check ${extBuildRel("dev-controls-oauth-google", "bg.js")}`,
-  `node --check ${extBuildRel("dev-controls-oauth-google", "loader.js")}`,
-  `node --check ${extBuildRel("dev-controls-oauth-google", "popup.js")}`,
-  `node --check ${extBuildRel("dev-controls-oauth-google", "provider/identity-provider-supabase.js")}`,
-  `node --check ${extBuildRel("ops-panel", "panel.js")}`,
+  `node --check ${canonicalExtBuildRel("dev-controls", "bg.js")}`,
+  `node --check ${canonicalExtBuildRel("dev-controls", "loader.js")}`,
+  `node --check ${canonicalExtBuildRel("dev-controls", "popup.js")}`,
+  `node --check ${canonicalExtBuildRel("dev-controls", "provider/identity-provider-supabase.js")}`,
+  `node --check ${canonicalExtBuildRel("dev-lean", "bg.js")}`,
+  `node --check ${canonicalExtBuildRel("dev-lean", "loader.js")}`,
+  `node --check ${canonicalExtBuildRel("dev-lean", "provider/identity-provider-supabase.js")}`,
+  `node --check ${canonicalExtBuildRel("prod", "bg.js")}`,
+  `node --check ${canonicalExtBuildRel("prod", "loader.js")}`,
+  `node --check ${canonicalExtBuildRel("prod", "provider/identity-provider-supabase.js")}`,
+  `node --check ${canonicalExtBuildRel("dev-controls-armed", "bg.js")}`,
+  `node --check ${canonicalExtBuildRel("dev-controls-armed", "loader.js")}`,
+  `node --check ${canonicalExtBuildRel("dev-controls-armed", "popup.js")}`,
+  `node --check ${canonicalExtBuildRel("dev-controls-armed", "provider/identity-provider-supabase.js")}`,
+  `node --check ${canonicalExtBuildRel("dev-controls-oauth-google", "bg.js")}`,
+  `node --check ${canonicalExtBuildRel("dev-controls-oauth-google", "loader.js")}`,
+  `node --check ${canonicalExtBuildRel("dev-controls-oauth-google", "popup.js")}`,
+  `node --check ${canonicalExtBuildRel("dev-controls-oauth-google", "provider/identity-provider-supabase.js")}`,
+  `node --check ${canonicalExtBuildRel("ops-panel", "panel.js")}`,
 ];
 
 const LIVE_RLS_ENV = [
@@ -313,8 +336,101 @@ assert(releaseRunner.includes("tools/validation/identity/validate-identity-phase
   "release runner must include the Phase 3.9C Google OAuth release-gate validator");
 assert(releaseRunner.includes("tools/validation/identity/validate-identity-phase4_0b-account-security-mvp.mjs"),
   "release runner must include the Phase 4.0B Account & Security MVP validator");
-assert(!/writeFile|appendFile|apply_patch|rm\s+-|git\s+|service_role|service-role|access_token|refresh_token/.test(releaseRunner),
-  "release runner must not write files, run git/destructive commands, or contain credential fields");
+/*
+ * The source-safe repository-safety invariant.
+ *
+ * The old form of this check rejected the runner if its source contained
+ * `writeFile` at all. That was a true statement about a runner that wrote
+ * nothing, and it stopped being a safety property the moment the runner earned a
+ * governed temporary root: it now legitimately materialises icon fixtures and
+ * transformed validator copies beneath that root, and a literal ban could only
+ * be satisfied by removing the containment machinery or by lying about it.
+ *
+ * What actually matters is not whether bytes are written but WHERE, and whether
+ * the runner can still reach the repository. So each rule below is checked
+ * against the destination of every write, the containment logic that bounds
+ * them, and the cleanup that removes them - and each one fails closed: an
+ * unrecognised write sink is a failure, not an exemption.
+ */
+{
+  const stripped = releaseRunner
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+
+  // 1. No Product/repository mutation: every write sink must resolve to a
+  //    SOURCE_SAFE_* destination, directly or through a local binding.
+  const WRITE_SINKS = [
+    "writeFileSync", "appendFileSync", "createWriteStream", "copyFileSync",
+    "renameSync", "truncateSync", "openSync", "cpSync", "writeFile", "appendFile",
+  ];
+  const sinkPattern = new RegExp(
+    `fs\\.(${WRITE_SINKS.join("|")})\\(\\s*([\\s\\S]{0,200}?)[,)]`,
+    "g",
+  );
+  const sourceSafeBindings = new Set();
+  for (const match of stripped.matchAll(
+    /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*path\.(?:join|resolve)\(\s*SOURCE_SAFE_[\w$]*/g,
+  )) {
+    sourceSafeBindings.add(match[1]);
+  }
+  // The build-destination helper is itself containment-checked below, so a
+  // destination derived from it is bounded by the same root.
+  sourceSafeBindings.add("extBuildRel");
+  const unboundedWrites = [];
+  for (const match of stripped.matchAll(sinkPattern)) {
+    const destination = match[2];
+    const bounded = /SOURCE_SAFE_[\w$]*/.test(destination) ||
+      [...sourceSafeBindings].some((name) =>
+        new RegExp(`\\b${name}\\b`).test(destination));
+    if (!bounded) unboundedWrites.push(`${match[1]}(${destination.trim().slice(0, 80)}`);
+  }
+  assert(unboundedWrites.length === 0,
+    `release runner write destinations must be source-safe rooted; unbounded: ${unboundedWrites.join(" | ")}`);
+  assert(!/fs\.(?:writeFileSync|appendFileSync|copyFileSync|createWriteStream)\(\s*path\.(?:join|resolve)\(\s*REPO_ROOT/
+    .test(stripped),
+    "release runner must not write into the repository source tree");
+
+  // 2. No temp-root escape: the governed root, and an explicit refusal when a
+  //    derived destination would leave it.
+  assert(/const\s+SOURCE_SAFE_TEMP_ROOT\s*=\s*fs\.mkdtempSync\(/.test(stripped) &&
+    /os\.tmpdir\(\)/.test(stripped),
+    "release runner must create its own governed temporary root under the OS temp directory");
+  assert(/path\.relative\(\s*SOURCE_SAFE_TEMP_ROOT[\s\S]{0,240}?relative\.startsWith\("\.\."\)[\s\S]{0,160}?throw new Error/
+    .test(stripped),
+    "release runner must refuse a source-safe destination that escapes the temporary root");
+
+  // 3. No destructive filesystem/shell commands. `fs.rmSync` is admitted only
+  //    for the runner's own governed root, and only under its own containment.
+  assert(!/rm\s+-[rf]|rmdir\s+\/s|\bunlink\s+-|shred\s+|\bdd\s+if=/.test(stripped),
+    "release runner must not execute destructive shell commands");
+  const removalTargets = [...stripped.matchAll(/fs\.(?:rmSync|rmdirSync|unlinkSync)\(\s*([^,)]+)/g)]
+    .map((match) => match[1].trim());
+  assert(removalTargets.length > 0 &&
+    removalTargets.every((target) => target === "SOURCE_SAFE_TEMP_ROOT"),
+    `release runner may remove only its own temporary root; found: ${removalTargets.join(", ") || "none"}`);
+
+  // 4. No Git/VCS invocation.
+  assert(!/spawnSync\(\s*["'`]git|execSync\(\s*["'`]git|["'`]git\s+(?:rev-parse|status|checkout|add|commit|clean|reset)/
+    .test(stripped),
+    "release runner must not invoke Git/VCS commands");
+
+  // 5. No credential-material use or capture; the live harness keeps its own
+  //    skip-by-default separation.
+  assert(!/\b(?:service_role|service-role|serviceRoleKey|access_token|refresh_token|provider_token)\b/
+    .test(stripped),
+    "release runner must not use or capture credential material");
+  assert(releaseRunner.includes("Live RLS keeps its own skip-by-default behavior"),
+    "release runner must preserve skip-by-default live-harness separation");
+
+  // 6. Required cleanup, under its own containment check, and reported.
+  assert(/function\s+cleanupSourceSafeRoot\s*\(/.test(stripped) &&
+    /path\.relative\(\s*os\.tmpdir\(\)\s*,\s*SOURCE_SAFE_TEMP_ROOT/.test(stripped) &&
+    /Refusing unsafe temporary cleanup/.test(releaseRunner),
+    "release runner must remove its temporary root only under an explicit containment check");
+  assert(/cleanupCompleted\s*=\s*!fs\.existsSync\(\s*SOURCE_SAFE_TEMP_ROOT/.test(stripped) &&
+    /ok:[\s\S]{0,120}?cleanupCompleted/.test(stripped),
+    "release-gate summary must require completed cleanup");
+}
 
 assert(gitignore.split(/\r?\n/).includes("build/**"),
   ".gitignore must ignore generated build outputs");
