@@ -127,312 +127,47 @@ export function makeChromeLivePopupViewPreludeSource() {
     return false;
   }
 
-  function replaceEnabledInTsv(textRaw, aliasIdRaw, enabledRaw) {
-    const aliasId = String(aliasIdRaw || "").trim();
-    if (!aliasId) return { found: 0, changed: false, text: String(textRaw || "") };
-    const lines = String(textRaw || "").split(/\\r?\\n/);
-    let found = 0;
-    let changed = false;
-    for (let i = 0; i < lines.length; i++) {
-      const line = String(lines[i] || "");
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const parts = line.split("\\t");
-      if (parts.length < 2) continue;
-      const file = String(parts.slice(1).join("\\t") || "").trim();
-      if (!orderFilenameMatchesAlias(file, aliasId)) continue;
-      found += 1;
-      parts[0] = enabledRaw === true ? "🟢" : "🔴";
-      const nextLine = parts.join("\\t");
-      if (nextLine !== line) {
-        lines[i] = nextLine;
-        changed = true;
-      }
-    }
-    return { found, changed, text: lines.join("\\n") };
-  }
+  // Developer Controls sends INTENT only. Canonical dev-order mutation,
+  // projection regeneration and readback all belong to the Runtime-owned
+  // command behind this endpoint: no file contents, no filesystem paths and no
+  // popup-side parsing cross this boundary.
+  const DEV_ORDER_COMMAND_URL = devServerUrl("/__h2o/dev-order/command");
 
-  function replaceEnabledInTxt(textRaw, aliasIdRaw, enabledRaw) {
-    const aliasId = String(aliasIdRaw || "").trim();
-    if (!aliasId) return { found: 0, changed: false, text: String(textRaw || "") };
-    const lines = String(textRaw || "").split(/\\r?\\n/);
-    let found = 0;
-    let changed = false;
-    for (let i = 0; i < lines.length; i++) {
-      const line = String(lines[i] || "");
-      const m = line.match(/^(\\s*)(-\\s*)?(.+?)\\s*$/);
-      if (!m) continue;
-      const indent = m[1] || "";
-      const file = String(m[3] || "").trim();
-      if (!/(\\.user)?\\.js$/i.test(file)) continue;
-      if (!orderFilenameMatchesAlias(file, aliasId)) continue;
-      found += 1;
-      const nextLine = indent + (enabledRaw === true ? "" : "- ") + file;
-      if (nextLine !== line) {
-        lines[i] = nextLine;
-        changed = true;
-      }
+  async function sendDevOrderCommand(payload) {
+    const res = await sendHttp({
+      method: "POST",
+      url: DEV_ORDER_COMMAND_URL,
+      timeoutMs: 90000,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload || {}),
+    });
+    if (!res || !res.ok) {
+      return { ok: false, code: "transport/unreachable", error: String((res && res.error) || "dev server unreachable") };
     }
-    return { found, changed, text: lines.join("\\n") };
-  }
-
-  function replaceEnabledInJson(textRaw, aliasIdRaw, enabledRaw) {
-    const aliasId = String(aliasIdRaw || "").trim();
-    if (!aliasId) return { found: 0, changed: false, text: String(textRaw || "") };
-    let obj = null;
+    let parsed = null;
     try {
-      obj = JSON.parse(String(textRaw || ""));
+      parsed = JSON.parse(String(res.responseText || ""));
     } catch {
-      return { found: 0, changed: false, text: String(textRaw || "") };
+      parsed = null;
     }
-    if (!obj || typeof obj !== "object") return { found: 0, changed: false, text: String(textRaw || "") };
-    let found = 0;
-    let changed = false;
-    const sections = Array.isArray(obj.sections) ? obj.sections : [];
-    for (const sec of sections) {
-      const items = Array.isArray(sec && sec.items) ? sec.items : [];
-      for (const row of items) {
-        if (!row || typeof row !== "object") continue;
-        const file = String(row.file || "").trim();
-        if (!orderFilenameMatchesAlias(file, aliasId)) continue;
-        found += 1;
-        if ((row.enabled === true) !== (enabledRaw === true)) {
-          row.enabled = enabledRaw === true;
-          changed = true;
-        }
-      }
+    if (!parsed || typeof parsed !== "object") {
+      return { ok: false, code: "transport/unreadable-result", error: "dev-order command returned no structured result" };
     }
-    return { found, changed, text: JSON.stringify(obj, null, 2) + "\\n" };
+    return parsed;
   }
 
-  function isSectionedOrderTitleLine(titleRaw) {
-    const title = String(titleRaw || "").trim();
-    if (!title) return false;
-    if (/^=+$/.test(title)) return false;
-    if (/^h2o dev order/i.test(title)) return false;
-    if (/^master\\b/i.test(title)) return false;
-    if (/^status<tab>filename/i.test(title)) return false;
-    if (/^on\\s*=/.test(title) || /^off\\s*=/.test(title)) return false;
-    return true;
+  function devOrderCommandFailureText(result) {
+    const raw = String((result && (result.error || result.code)) || "command failed").replace(/\s+/g, " ").trim();
+    return raw.length > 160 ? raw.slice(0, 159) + "…" : raw;
   }
 
-  function replaceSectionTitleInSectionedText(textRaw, groupKeyRaw, titleRaw, mode = "tsv") {
-    const groupKey = String(groupKeyRaw || "").trim();
-    const nextTitle = sanitizeGroupLabel(titleRaw, "");
-    if (!groupKey || !nextTitle) return { found: 0, changed: false, text: String(textRaw || "") };
-    const lines = String(textRaw || "").split(/\\r?\\n/);
-    let found = 0;
-    let changed = false;
-    let currentTitleLineIndex = -1;
-    let currentSectionFirstItemSeen = false;
-
-    const maybeReplaceForFile = (fileRaw) => {
-      if (currentSectionFirstItemSeen) return;
-      currentSectionFirstItemSeen = true;
-      const aliasId = toAliasName(String(fileRaw || "").trim());
-      if (!aliasId) return;
-      if (groupKeyForAlias(aliasId) !== groupKey) return;
-      found += 1;
-      if (currentTitleLineIndex < 0) return;
-      const nextLine = "# " + nextTitle;
-      if (lines[currentTitleLineIndex] !== nextLine) {
-        lines[currentTitleLineIndex] = nextLine;
-        changed = true;
-      }
-    };
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = String(lines[i] || "");
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      if (trimmed.startsWith("#")) {
-        const title = trimmed.replace(/^#\\s*/, "").trim();
-        if (!isSectionedOrderTitleLine(title)) continue;
-        currentTitleLineIndex = i;
-        currentSectionFirstItemSeen = false;
-        continue;
-      }
-      if (mode === "tsv") {
-        const parts = line.split("\\t");
-        if (parts.length < 2) continue;
-        maybeReplaceForFile(parts.slice(1).join("\\t"));
-        continue;
-      }
-      const m = line.match(/^(\\s*)(-\\s*)?(.+?)\\s*$/);
-      if (!m) continue;
-      const file = String(m[3] || "").trim();
-      if (!/(\\.user)?\\.js$/i.test(file)) continue;
-      maybeReplaceForFile(file);
-    }
-
-    return { found, changed, text: lines.join("\\n") };
-  }
-
-  function replaceSectionTitleInTsv(textRaw, groupKeyRaw, titleRaw) {
-    return replaceSectionTitleInSectionedText(textRaw, groupKeyRaw, titleRaw, "tsv");
-  }
-
-  function replaceSectionTitleInTxt(textRaw, groupKeyRaw, titleRaw) {
-    return replaceSectionTitleInSectionedText(textRaw, groupKeyRaw, titleRaw, "txt");
-  }
-
-  function replaceSectionTitleInJson(textRaw, groupKeyRaw, titleRaw) {
-    const groupKey = String(groupKeyRaw || "").trim();
-    const nextTitle = sanitizeGroupLabel(titleRaw, "");
-    if (!groupKey || !nextTitle) return { found: 0, changed: false, text: String(textRaw || "") };
-    let obj = null;
-    try {
-      obj = JSON.parse(String(textRaw || ""));
-    } catch {
-      return { found: 0, changed: false, text: String(textRaw || "") };
-    }
-    if (!obj || typeof obj !== "object") return { found: 0, changed: false, text: String(textRaw || "") };
-    let found = 0;
-    let changed = false;
-    const sections = Array.isArray(obj.sections) ? obj.sections : [];
-    for (const sec of sections) {
-      if (!sec || typeof sec !== "object") continue;
-      let matched = String(sec.key || "").trim() === groupKey;
-      if (!matched) {
-        const items = Array.isArray(sec.items) ? sec.items : [];
-        for (const row of items) {
-          const file = String(row && row.file || "").trim();
-          if (!file) continue;
-          if (groupKeyForAlias(file) !== groupKey) continue;
-          matched = true;
-          break;
-        }
-      }
-      if (!matched) continue;
-      found += 1;
-      if (String(sec.title || "").trim() !== nextTitle) {
-        sec.title = nextTitle;
-        changed = true;
-      }
-    }
-    return { found, changed, text: JSON.stringify(obj, null, 2) + "\\n" };
-  }
-
-  async function syncDevOrderFiles(aliasIdRaw, enabledRaw) {
-    const aliasId = String(aliasIdRaw || "").trim();
-    const enabled = enabledRaw === true;
-    if (!aliasId) return { anyOk: false, masterOk: false, updatedFiles: [], errors: ["missing alias"] };
-
-    const files = [
-      { label: "dev-order.tsv", url: DEV_ORDER_TSV_URL, contentType: "text/tab-separated-values; charset=utf-8", patch: replaceEnabledInTsv, master: true },
-      { label: "dev-order.txt", url: DEV_ORDER_TXT_URL, contentType: "text/plain; charset=utf-8", patch: replaceEnabledInTxt, master: false },
-      { label: "dev-order.json", url: DEV_ORDER_JSON_URL, contentType: "application/json; charset=utf-8", patch: replaceEnabledInJson, master: false },
-    ];
-
-    const updatedFiles = [];
-    const errors = [];
-    let anyOk = false;
-    let masterOk = false;
-
-    for (const f of files) {
-      const getRes = await sendHttp({ method: "GET", url: f.url, timeoutMs: 12000 });
-      if (!getRes || !getRes.ok || !isHttpOk(getRes)) {
-        errors.push(f.label + " GET failed (" + String(getRes && getRes.status || 0) + ")");
-        continue;
-      }
-
-      const currentText = String(getRes.responseText || "");
-      const patched = f.patch(currentText, aliasId, enabled);
-      if (!patched || typeof patched.text !== "string") {
-        errors.push(f.label + " patch failed");
-        continue;
-      }
-      const found = Number.isFinite(Number(patched.found)) ? Number(patched.found) : 0;
-      if (found <= 0) {
-        errors.push(f.label + " alias not found (" + aliasId + ")");
-        continue;
-      }
-
-      if (!patched.changed) {
-        anyOk = true;
-        if (f.master) masterOk = true;
-        continue;
-      }
-
-      const putRes = await sendHttp({
-        method: "PUT",
-        url: f.url,
-        timeoutMs: 12000,
-        headers: { "content-type": f.contentType },
-        body: patched.text,
-      });
-      if (putRes && putRes.ok && isHttpOk(putRes)) {
-        anyOk = true;
-        if (f.master) masterOk = true;
-        updatedFiles.push(f.label);
-      } else {
-        errors.push(f.label + " PUT failed (" + String(putRes && putRes.status || 0) + ")");
-      }
-    }
-
-    return { anyOk, masterOk, updatedFiles, errors };
-  }
-
-  async function syncDevOrderSectionTitleFiles(groupKeyRaw, titleRaw) {
-    const groupKey = String(groupKeyRaw || "").trim();
-    const nextTitle = sanitizeGroupLabel(titleRaw, "");
-    if (!groupKey || !nextTitle) {
-      return { anyOk: false, masterOk: false, updatedFiles: [], errors: ["missing group title"] };
-    }
-
-    const files = [
-      { label: "dev-order.tsv", url: DEV_ORDER_TSV_URL, contentType: "text/tab-separated-values; charset=utf-8", patch: replaceSectionTitleInTsv, master: true },
-      { label: "dev-order.txt", url: DEV_ORDER_TXT_URL, contentType: "text/plain; charset=utf-8", patch: replaceSectionTitleInTxt, master: false },
-      { label: "dev-order.json", url: DEV_ORDER_JSON_URL, contentType: "application/json; charset=utf-8", patch: replaceSectionTitleInJson, master: false },
-    ];
-
-    const updatedFiles = [];
-    const errors = [];
-    let anyOk = false;
-    let masterOk = false;
-
-    for (const f of files) {
-      const getRes = await sendHttp({ method: "GET", url: f.url, timeoutMs: 12000 });
-      if (!getRes || !getRes.ok || !isHttpOk(getRes)) {
-        errors.push(f.label + " GET failed (" + String(getRes && getRes.status || 0) + ")");
-        continue;
-      }
-
-      const currentText = String(getRes.responseText || "");
-      const patched = f.patch(currentText, groupKey, nextTitle);
-      if (!patched || typeof patched.text !== "string") {
-        errors.push(f.label + " patch failed");
-        continue;
-      }
-      const found = Number.isFinite(Number(patched.found)) ? Number(patched.found) : 0;
-      if (found <= 0) {
-        errors.push(f.label + " section not found (" + groupKey + ")");
-        continue;
-      }
-
-      if (!patched.changed) {
-        anyOk = true;
-        if (f.master) masterOk = true;
-        continue;
-      }
-
-      const putRes = await sendHttp({
-        method: "PUT",
-        url: f.url,
-        timeoutMs: 12000,
-        headers: { "content-type": f.contentType },
-        body: patched.text,
-      });
-      if (putRes && putRes.ok && isHttpOk(putRes)) {
-        anyOk = true;
-        if (f.master) masterOk = true;
-        updatedFiles.push(f.label);
-      } else {
-        errors.push(f.label + " PUT failed (" + String(putRes && putRes.status || 0) + ")");
-      }
-    }
-
-    return { anyOk, masterOk, updatedFiles, errors };
+  // Source-side synchronization is NOT an artifact rebuild. Say so plainly
+  // instead of implying a page reload is enough.
+  function devOrderSuccessText(prefix, result) {
+    const base = prefix + " Canonical dev-order updated and projections synchronized.";
+    return (result && result.needsRebuild)
+      ? base + " Rebuild the extension to apply it; reloading alone will not."
+      : base;
   }
 
   async function fetchLiveDevOrderSections() {
@@ -472,28 +207,27 @@ export function makeChromeLivePopupViewPreludeSource() {
     ]);
 
     render();
-    elHint.textContent = (enabled ? "Marked visible: " : "Marked hidden: ") + aliasId + ". Syncing files...";
+    elHint.textContent = (enabled ? "Marked visible: " : "Marked hidden: ") + aliasId + ". Requesting dev-order update...";
 
-    const syncRes = await syncDevOrderFiles(aliasId, enabled);
-    if (syncRes.masterOk) {
+    const result = await sendDevOrderCommand({ operation: "set-enabled", sourceFile: aliasId, enabled });
+    if (result && result.ok === true) {
+      // Canonical state now matches, so the extension-local override is dropped.
       const nextOverrides = { ...orderOverrideMap };
       delete nextOverrides[aliasId];
       orderOverrideMap = normalizeOrderOverrideMap(nextOverrides);
       applyCurrentOrderOverrides();
       await storageSetOrderOverrideMap(orderOverrideMap);
       render();
-      elHint.textContent = (enabled ? "Visible" : "Hidden") + " and synced to dev-order files.";
+      elHint.textContent = devOrderSuccessText((enabled ? "Visible." : "Hidden."), result);
       return;
     }
 
-    if (syncRes.anyOk) {
-      const filesLabel = syncRes.updatedFiles.length ? (" (" + syncRes.updatedFiles.join(", ") + ")") : "";
-      elHint.textContent = (enabled ? "Visible" : "Hidden") + " in extension. Partial sync" + filesLabel + ".";
-      return;
-    }
-
-    const errMsg = Array.isArray(syncRes.errors) && syncRes.errors.length ? syncRes.errors[0] : "write failed";
-    elHint.textContent = (enabled ? "Visible" : "Hidden") + " in extension only. Dev-order sync failed: " + errMsg;
+    // Runtime refused. The override stays, which is exactly what keeps the row
+    // presentation-only, and the text must not claim canonical state changed.
+    render();
+    elHint.textContent = (enabled ? "Visible" : "Hidden")
+      + " in this extension only \u2014 canonical dev-order unchanged: "
+      + devOrderCommandFailureText(result);
   }
 
   function normalizeSetMap(rawMap) {
@@ -2050,9 +1784,9 @@ export function makeChromeLivePopupViewRenderSource() {
     const currentTitle = sanitizeGroupLabel(groupTitleFromOrder(key, fallbackTitle), "");
     if (!nextTitle || nextTitle === currentTitle) return;
 
-    elHint.textContent = "Saving group title...";
-    const syncRes = await syncDevOrderSectionTitleFiles(key, nextTitle);
-    if (syncRes.masterOk) {
+    elHint.textContent = "Requesting group title update...";
+    const result = await sendDevOrderCommand({ operation: "set-section-title", sectionKey: key, title: nextTitle });
+    if (result && result.ok === true) {
       const liveOrderSections = await fetchLiveDevOrderSections();
       if (Array.isArray(liveOrderSections) && liveOrderSections.length) {
         orderSectionsBase = cloneDevOrderSections(liveOrderSections);
@@ -2061,18 +1795,13 @@ export function makeChromeLivePopupViewRenderSource() {
       }
       applyCurrentOrderOverrides();
       render();
-      elHint.textContent = "Group title saved.";
+      elHint.textContent = devOrderSuccessText("Group title saved.", result);
       return;
     }
 
-    if (syncRes.anyOk) {
-      render();
-      const filesLabel = syncRes.updatedFiles.length ? (" (" + syncRes.updatedFiles.join(", ") + ")") : "";
-      throw new Error("dev-order.tsv not updated" + filesLabel);
-    }
-
+    // Do not leave the label looking saved when Runtime refused it.
     render();
-    throw new Error(Array.isArray(syncRes.errors) && syncRes.errors.length ? syncRes.errors[0] : "write failed");
+    throw new Error(devOrderCommandFailureText(result));
   }
 
 `;

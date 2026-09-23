@@ -262,9 +262,19 @@ export function makeChromeLivePopupDataSource() {
     return fallback;
   }
 
+  // Same origin as the config reads, for the Developer Controls command
+  // endpoint. dev-order.txt/.json are generated projections owned by the
+  // Runtime command, so the popup no longer addresses them at all.
+  function devServerUrl(pathName) {
+    const suffix = String(pathName || "");
+    const fallback = "http://127.0.0.1:5500" + suffix;
+    try {
+      return new URL(PROXY_PACK_URL).origin + suffix;
+    } catch {}
+    return fallback;
+  }
+
   const DEV_ORDER_TSV_URL = devConfigUrl("dev-order.tsv");
-  const DEV_ORDER_TXT_URL = devConfigUrl("dev-order.txt");
-  const DEV_ORDER_JSON_URL = devConfigUrl("dev-order.json");
 
   function parseDevOrderEnabledToken(tokenRaw) {
     const raw = String(tokenRaw || "").trim();

@@ -815,6 +815,186 @@ for (const entry of fs.readdirSync(SCRIPT_SRC_DIR, { withFileTypes: true })) {
 }
 logDebug(`scan done: sourceFiles=${foundSourceNames.size} aliases=${aliasToSource.size}`);
 
+/* -----------------------------
+   BOUNDED DEV-ORDER COMMAND (owner: L-RUNTIME-KERNEL-SCOPE-EXT)
+------------------------------
+   Two semantic operations only. A command carries INTENT, never a filesystem
+   path and never file contents: the canonical master is always this module's
+   own ORDER_FILE. With no command the module behaves exactly as before.
+
+   Flow: validate the whole command -> mutate only the intended TSV row or
+   section header -> fall through to the established full synchronization
+   below -> read the canonical TSV back and prove the change -> emit one
+   bounded JSON result line. Any contradiction fails closed before mutation.
+------------------------------ */
+const DEV_ORDER_COMMAND_MARKER = "[H2O][dev-order-command]";
+const DEV_ORDER_COMMAND_MAX_BYTES = 8192;
+const DEV_ORDER_SECTION_TITLE_MAX = 64;
+const DEV_ORDER_PROJECTIONS = [
+  "dev-order.txt", "dev-order.json", "scripts-list.tsv",
+  "userscript-headers.tsv", "userscript-headers.html",
+];
+
+function devOrderEmit(payload) {
+  process.stdout.write(DEV_ORDER_COMMAND_MARKER + " " + JSON.stringify(payload) + "\n");
+}
+
+function devOrderFail(operation, code, message) {
+  devOrderEmit({ ok: false, operation: operation || "unknown", changed: false, code, error: String(message || code) });
+  process.exit(2);
+}
+
+function readDevOrderCommand() {
+  if (!process.argv.includes("--command-stdin")) return null;
+  let raw = "";
+  try {
+    raw = fs.readFileSync(0, "utf8");
+  } catch {
+    devOrderFail("unknown", "command/unreadable", "command envelope could not be read from stdin");
+  }
+  if (Buffer.byteLength(raw, "utf8") > DEV_ORDER_COMMAND_MAX_BYTES) {
+    devOrderFail("unknown", "command/too-large", "command envelope exceeds " + DEV_ORDER_COMMAND_MAX_BYTES + " bytes");
+  }
+  let parsed = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    devOrderFail("unknown", "command/malformed", "command envelope is not valid JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    devOrderFail("unknown", "command/malformed", "command envelope must be a JSON object");
+  }
+  const operation = typeof parsed.operation === "string" ? parsed.operation.trim() : "";
+  if (operation !== "set-enabled" && operation !== "set-section-title") {
+    devOrderFail(operation || "unknown", "command/unsupported-operation", "unsupported operation");
+  }
+  return { operation, command: parsed };
+}
+
+function devOrderTsvRowFile(line) {
+  const parts = String(line).split("\t");
+  if (parts.length < 2) return "";
+  return parts.slice(1).join("\t").replace(/\s+#.*$/, "").trim();
+}
+
+function devOrderIsReservedTitle(title) {
+  const t = String(title || "").trim();
+  return /^=+$/.test(t) || /^h2o dev order/i.test(t) || /^master:/i.test(t) || /^status<tab>filename/i.test(t);
+}
+
+// A dev-order identity is a bare source filename as it already appears in the
+// master. Anything path-like is refused outright rather than normalized.
+function devOrderRequireBareFilename(operation, value) {
+  const name = typeof value === "string" ? value.trim() : "";
+  if (!name) devOrderFail(operation, "command/invalid-source", "sourceFile is required");
+  if (name !== path.basename(name) || /[\\/]/.test(name) || name.includes("..") || /[\u0000-\u001f]/.test(name)) {
+    devOrderFail(operation, "command/path-like-identifier", "sourceFile must be a bare dev-order filename");
+  }
+  return name;
+}
+
+function devOrderApplySetEnabled(command) {
+  const operation = "set-enabled";
+  const sourceFile = devOrderRequireBareFilename(operation, command.sourceFile);
+  if (typeof command.enabled !== "boolean") {
+    devOrderFail(operation, "command/invalid-enabled", "enabled must be a JSON boolean");
+  }
+  if (!fs.existsSync(OUT_TSV)) devOrderFail(operation, "command/master-missing", "canonical dev-order master is missing");
+
+  // Identity resolution stays Runtime-side. The caller may name the row by its
+  // exact source filename or by the alias this module itself derives; alias
+  // matching is only consulted when no exact filename matched, and either way
+  // the identifier must land on exactly one row.
+  const lines = fs.readFileSync(OUT_TSV, "utf8").split(/\r?\n/);
+  const exact = [];
+  const byAlias = [];
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = String(lines[i]).trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const rowFile = devOrderTsvRowFile(lines[i]);
+    if (!rowFile) continue;
+    if (rowFile === sourceFile) exact.push(i);
+    else if (toAliasName(rowFile) === sourceFile) byAlias.push(i);
+  }
+  const matches = exact.length ? exact : byAlias;
+  if (matches.length === 0) devOrderFail(operation, "command/row-not-found", "no dev-order row matches that source file");
+  if (matches.length > 1) devOrderFail(operation, "command/row-ambiguous", "source file matches " + matches.length + " dev-order rows");
+
+  const index = matches[0];
+  const resolvedFile = devOrderTsvRowFile(lines[index]);
+  const parts = String(lines[index]).split("\t");
+  const wanted = command.enabled ? "ON" : "OFF";
+  const nextLine = statusToEmoji(wanted) + "\t" + parts.slice(1).join("\t");
+  const changed = lines[index] !== nextLine;
+  if (changed) {
+    lines[index] = nextLine;
+    writeTextFileAtomic(OUT_TSV, lines.join("\n"));
+  }
+  return { operation, changed, canonicalId: resolvedFile, wanted };
+}
+
+function devOrderApplySetSectionTitle(command) {
+  const operation = "set-section-title";
+  const sectionKey = typeof command.sectionKey === "string" ? command.sectionKey.trim() : "";
+  if (!sectionKey || !/^[A-Za-z0-9_]{1,48}$/.test(sectionKey)) {
+    devOrderFail(operation, "command/invalid-section", "sectionKey must be an existing dev-order section identifier");
+  }
+  const rawTitle = typeof command.title === "string" ? command.title : "";
+  // Control characters are refused outright rather than stripped: silently
+  // storing a different title than the caller asked for is not a safe success.
+  if (/[\u0000-\u001f\u007f]/.test(rawTitle)) {
+    devOrderFail(operation, "command/invalid-title", "title must not contain control characters");
+  }
+  const title = rawTitle.replace(/\s+/g, " ").trim();
+  if (!title) devOrderFail(operation, "command/invalid-title", "title is required");
+  if (title.length > DEV_ORDER_SECTION_TITLE_MAX) {
+    devOrderFail(operation, "command/invalid-title", "title exceeds " + DEV_ORDER_SECTION_TITLE_MAX + " characters");
+  }
+  if (title.startsWith("#") || title.includes("\t") || devOrderIsReservedTitle(title)) {
+    devOrderFail(operation, "command/invalid-title", "title is not a usable dev-order section title");
+  }
+  if (!fs.existsSync(OUT_TSV)) devOrderFail(operation, "command/master-missing", "canonical dev-order master is missing");
+
+  const lines = fs.readFileSync(OUT_TSV, "utf8").split(/\r?\n/);
+  let titleLineIndex = -1;
+  let sawFirstRow = false;
+  let targetTitleLine = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = String(lines[i]).trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith("#")) {
+      const headerTitle = trimmed.replace(/^#\s*/, "").trim();
+      if (!headerTitle || devOrderIsReservedTitle(headerTitle)) continue;
+      titleLineIndex = i;
+      sawFirstRow = false;
+      continue;
+    }
+    if (sawFirstRow) continue;
+    sawFirstRow = true;
+    const file = devOrderTsvRowFile(lines[i]);
+    if (!file || groupOf(file) !== sectionKey) continue;
+    targetTitleLine = titleLineIndex;
+    break;
+  }
+  if (targetTitleLine < 0) devOrderFail(operation, "command/section-not-found", "no existing dev-order section matches that identifier");
+
+  const nextLine = "# " + title;
+  const changed = lines[targetTitleLine] !== nextLine;
+  if (changed) {
+    lines[targetTitleLine] = nextLine;
+    writeTextFileAtomic(OUT_TSV, lines.join("\n"));
+  }
+  return { operation, changed, canonicalId: sectionKey, wanted: title };
+}
+
+const DEV_ORDER_COMMAND = readDevOrderCommand();
+let DEV_ORDER_COMMAND_APPLIED = null;
+if (DEV_ORDER_COMMAND) {
+  DEV_ORDER_COMMAND_APPLIED = DEV_ORDER_COMMAND.operation === "set-enabled"
+    ? devOrderApplySetEnabled(DEV_ORDER_COMMAND.command)
+    : devOrderApplySetSectionTitle(DEV_ORDER_COMMAND.command);
+}
+
 // 2) Read prior statuses + section order from existing TSV (master)
 const priorState = readExistingTSV(OUT_TSV, foundSourceNames, aliasToSource);
 const priorStatus = priorState.statusMap;
@@ -898,3 +1078,56 @@ if (headerHTML.missingCount > 0) {
 }
 console.log("[H2O] entries:", sorted.length);
 logDebug("complete");
+
+// Canonical readback: success is only reported once the regenerated master
+// actually proves the requested change. A contradiction here fails closed.
+if (DEV_ORDER_COMMAND_APPLIED) {
+  const applied = DEV_ORDER_COMMAND_APPLIED;
+  const finalLines = fs.readFileSync(OUT_TSV, "utf8").split(/\r?\n/);
+  let proven = false;
+  if (applied.operation === "set-enabled") {
+    for (const line of finalLines) {
+      const trimmed = String(line).trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      if (devOrderTsvRowFile(line) !== applied.canonicalId) continue;
+      proven = parseStatusToken(String(line).split("\t")[0]) === applied.wanted;
+      break;
+    }
+  } else {
+    let headerTitle = "";
+    let sawFirstRow = false;
+    for (const line of finalLines) {
+      const trimmed = String(line).trim();
+      if (!trimmed) continue;
+      if (trimmed.startsWith("#")) {
+        const candidate = trimmed.replace(/^#\s*/, "").trim();
+        if (!candidate || devOrderIsReservedTitle(candidate)) continue;
+        headerTitle = candidate;
+        sawFirstRow = false;
+        continue;
+      }
+      if (sawFirstRow) continue;
+      sawFirstRow = true;
+      const file = devOrderTsvRowFile(line);
+      if (!file || groupOf(file) !== applied.canonicalId) continue;
+      proven = headerTitle === applied.wanted;
+      break;
+    }
+  }
+  if (!proven) {
+    devOrderEmit({
+      ok: false, operation: applied.operation, changed: applied.changed,
+      code: "command/readback-contradiction",
+      error: "canonical dev-order readback did not prove the requested change",
+    });
+    process.exit(3);
+  }
+  devOrderEmit({
+    ok: true,
+    operation: applied.operation,
+    changed: applied.changed,
+    canonicalId: applied.canonicalId,
+    regenerated: DEV_ORDER_PROJECTIONS,
+    needsRebuild: applied.operation === "set-enabled",
+  });
+}
