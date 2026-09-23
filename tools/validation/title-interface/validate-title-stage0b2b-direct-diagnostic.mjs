@@ -21,6 +21,7 @@ import { makeChromeLiveManifest } from "../../product/extensions/chatgpt/chrome/
 import { getExtensionId, getExtensionKey } from "../../product/extensions/chatgpt/chrome/chrome-extension-keys.mjs";
 import { makeChromeLivePopupCss } from "../../product/extensions/chatgpt/chrome/popup/chrome-live-popup-css.mjs";
 import { makeChromeLivePopupHtml } from "../../product/extensions/chatgpt/chrome/popup/chrome-live-popup-html.mjs";
+import { makeChromeLivePopupJs } from "../../product/extensions/chatgpt/chrome/popup/chrome-live-popup-js.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const GENERATED = process.argv.includes("--generated");
@@ -169,6 +170,98 @@ function assertVariantIsolation() {
   assert(htmlOn.includes("Title navigation diagnostic") && htmlOn.includes(TITLE_DIAGNOSTIC_FILES.popup), "enabled popup controls missing");
   assert(!/<script(?![^>]*src=)[^>]*>/i.test(htmlOn), "inline popup JavaScript is forbidden");
   assert.equal(getExtensionId(TARGET_VARIANT), EXPECTED_ID, "stable extension ID changed");
+}
+
+const GUARDED_CONTROL_ACTIONS = [
+  "All On", "All Off", "This Page Off", "Reset", "Reset Layout", "Reload Tab",
+  "Save", "Clear", "This Chat binding", "Global binding", "All-off reload toggle",
+];
+
+function emittedPopupJs() {
+  return makeChromeLivePopupJs({
+    PROXY_PACK_URL: "http://127.0.0.1:5500/dev_output/proxy/_paste-pack.ext.txt",
+    STORAGE_KEY: "h2oExtDevToggles",
+    STORAGE_ORDER_OVERRIDES_KEY: "h2oExtDevOrderOverrides",
+    DEV_ORDER_SECTIONS_SNAPSHOT: [],
+    DEV_ALIAS_FILENAME_MAP: {},
+  });
+}
+
+// Developer-facing async controls once launched floating promises: a rejection was
+// silent and a rapid second click could race the first. They now go through one
+// shared presentation guard. This proves the wiring AND executes the emitted guard.
+async function assertControlActionGuard() {
+  const popupJs = emittedPopupJs();
+  for (const label of GUARDED_CONTROL_ACTIONS) {
+    const needle = 'runControlAction("' + label + '"';
+    assert.equal(popupJs.split(needle).length - 1, 1,
+      "developer control action " + label + " must reach the shared guard exactly once");
+  }
+  const start = popupJs.indexOf("  const controlActionsInFlight = new Set();");
+  const end = popupJs.indexOf("  async function saveCurrentToSlot(");
+  assert(start > 0 && end > start, "emitted control-action guard not found");
+
+  class FakeControl {
+    constructor() { this.disabled = false; this.attrs = {}; }
+    setAttribute(key, value) { this.attrs[key] = value; }
+    removeAttribute(key) { delete this.attrs[key]; }
+  }
+  const elHint = { textContent: "" };
+  const context = {
+    elHint, Promise, Set, String, console,
+    HTMLButtonElement: FakeControl, HTMLInputElement: FakeControl, HTMLSelectElement: FakeControl,
+  };
+  vm.runInNewContext(
+    popupJs.slice(start, end) + "\nglobalThis.__runControlAction = runControlAction;",
+    context,
+    { filename: "generated-dev-controls-action-guard.js" },
+  );
+  const runControlAction = context.__runControlAction;
+  assert.equal(typeof runControlAction, "function", "emitted guard did not expose runControlAction");
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // a rejecting operation must surface bounded feedback, not fail silently
+  const failButton = new FakeControl();
+  elHint.textContent = "";
+  const failed = await runControlAction("All Off", failButton, async () => { throw new Error("storage write denied"); });
+  assert.equal(failed, false, "a rejected control action must report failure");
+  assert.equal(elHint.textContent, "All Off failed: storage write denied",
+    "a rejected control action must surface bounded developer feedback");
+  assert.equal(failButton.disabled, false, "the initiating control must be restored after a rejection");
+
+  // the failure text stays bounded and single-lined
+  elHint.textContent = "";
+  await runControlAction("Clear", new FakeControl(), async () => { throw new Error("a\nb " + "x".repeat(500)); });
+  assert(!elHint.textContent.includes("\n") && elHint.textContent.length <= 220,
+    "control action failure text must stay bounded and single-lined");
+
+  // a rapid repeat cannot launch the same action twice
+  const busyButton = new FakeControl();
+  let runs = 0;
+  const op = async () => { runs += 1; await sleep(20); };
+  const outcomes = await Promise.all([
+    runControlAction("All On", busyButton, op),
+    runControlAction("All On", busyButton, op),
+    runControlAction("All On", busyButton, op),
+  ]);
+  assert.equal(runs, 1, "a repeated control action must execute exactly once while in flight");
+  assert.deepEqual(outcomes, [true, false, false], "duplicate invocations must report as not-run");
+  assert.equal(busyButton.disabled, false, "the initiating control must be re-enabled in finally");
+
+  // an existing success message is never replaced, and the guard releases
+  elHint.textContent = "Toggles reset to default (all on). Reload the page to apply.";
+  assert.equal(await runControlAction("Reset", new FakeControl(), async () => {}), true, "guard must release after completion");
+  assert.equal(elHint.textContent, "Toggles reset to default (all on). Reload the page to apply.",
+    "the guard must preserve an operation's own success message");
+
+  // independent actions stay usable: the guard is per-action, not a popup-wide lock
+  let first = 0;
+  let second = 0;
+  await Promise.all([
+    runControlAction("All On", new FakeControl(), async () => { first += 1; await sleep(20); }),
+    runControlAction("Reset Layout", new FakeControl(), async () => { second += 1; }),
+  ]);
+  assert(first === 1 && second === 1, "independent control actions must not block each other");
 }
 
 function assertWorkspaceContract() {
@@ -1089,6 +1182,7 @@ assertTitleState();
 assertVariantIsolation();
 assertWorkspaceContract();
 assertTitleClickTimingContract();
+await assertControlActionGuard();
 await assertMainCollectorChangeDriven();
 await assertIsolatedDomSuppression();
 await assertEvidenceAndNavigationStateMachine();

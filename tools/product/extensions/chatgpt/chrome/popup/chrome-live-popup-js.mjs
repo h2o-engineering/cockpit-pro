@@ -428,6 +428,51 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
     return map;
   }
 
+  // Developer Controls presentation guard (L-DEVELOPER-CONTROLS). Keeps one run of a
+  // given control action in flight, parks a temporary busy state on the initiating
+  // control, and reports a bounded failure on the existing hint surface. It does not
+  // change what a wrapped operation does, and it never replaces its success message.
+  const controlActionsInFlight = new Set();
+
+  function boundedActionFailure(error) {
+    const raw = String((error && (error.message || error)) || "").replace(/\\s+/g, " ").trim();
+    if (!raw) return "unknown error";
+    return raw.length > 200 ? raw.slice(0, 199) + "\\u2026" : raw;
+  }
+
+  function runControlAction(actionLabel, control, operation) {
+    const label = String(actionLabel || "Action");
+    if (controlActionsInFlight.has(label)) return Promise.resolve(false);
+    controlActionsInFlight.add(label);
+    const target = (control instanceof HTMLButtonElement
+      || control instanceof HTMLInputElement
+      || control instanceof HTMLSelectElement) ? control : null;
+    const wasDisabled = target ? !!target.disabled : false;
+    if (target) {
+      target.setAttribute("data-h2o-action-busy", "1");
+      if (!wasDisabled) target.disabled = true;
+    }
+    let pending;
+    try {
+      pending = Promise.resolve(operation());
+    } catch (error) {
+      pending = Promise.reject(error);
+    }
+    return pending.then(
+      () => true,
+      (error) => {
+        elHint.textContent = label + " failed: " + boundedActionFailure(error);
+        return false;
+      },
+    ).finally(() => {
+      controlActionsInFlight.delete(label);
+      if (target) {
+        target.removeAttribute("data-h2o-action-busy");
+        if (!wasDisabled) target.disabled = false;
+      }
+    });
+  }
+
   async function saveCurrentToSlot(slotNum) {
     if (!scripts.length) return;
     const slot = normalizeSetSlot(slotNum) || normalizeSetSlot(selectedSetSlot) || 1;
@@ -859,12 +904,12 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
     }
   });
 
-  document.getElementById("all-on").addEventListener("click", () => setAll(true));
-  document.getElementById("all-off").addEventListener("click", () => setAll(false));
-  document.getElementById("page-off").addEventListener("click", () => disableCurrentPageOnce());
-  document.getElementById("reset").addEventListener("click", () => resetToggles());
-  document.getElementById("reset-layout").addEventListener("click", () => resetTableLayout());
-  document.getElementById("reload").addEventListener("click", () => reloadActiveTab());
+  document.getElementById("all-on").addEventListener("click", (ev) => runControlAction("All On", ev.currentTarget, () => setAll(true)));
+  document.getElementById("all-off").addEventListener("click", (ev) => runControlAction("All Off", ev.currentTarget, () => setAll(false)));
+  document.getElementById("page-off").addEventListener("click", (ev) => runControlAction("This Page Off", ev.currentTarget, () => disableCurrentPageOnce()));
+  document.getElementById("reset").addEventListener("click", (ev) => runControlAction("Reset", ev.currentTarget, () => resetToggles()));
+  document.getElementById("reset-layout").addEventListener("click", (ev) => runControlAction("Reset Layout", ev.currentTarget, () => resetTableLayout()));
+  document.getElementById("reload").addEventListener("click", (ev) => runControlAction("Reload Tab", ev.currentTarget, () => reloadActiveTab()));
   if (elProviderPermissionButton instanceof HTMLButtonElement) {
     elProviderPermissionButton.addEventListener("click", () => {
       requestProviderPermissionFromPopup().catch(() => {
@@ -976,7 +1021,7 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
   }
   if (elSetSave instanceof HTMLButtonElement) {
     elSetSave.addEventListener("click", () => {
-      saveCurrentToSlot(selectedSetSlot);
+      runControlAction("Save", elSetSave, () => saveCurrentToSlot(selectedSetSlot));
     });
   }
   if (elSetEdit instanceof HTMLButtonElement) {
@@ -986,7 +1031,7 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
   }
   if (elSetClear instanceof HTMLButtonElement) {
     elSetClear.addEventListener("click", () => {
-      clearSlot(selectedSetSlot);
+      runControlAction("Clear", elSetClear, () => clearSlot(selectedSetSlot));
     });
   }
   if (elSetClickReload instanceof HTMLInputElement) {
@@ -998,17 +1043,17 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
   }
   if (elPageSetChat instanceof HTMLSelectElement) {
     elPageSetChat.addEventListener("change", () => {
-      setChatBinding(elPageSetChat.value);
+      runControlAction("This Chat binding", elPageSetChat, () => setChatBinding(elPageSetChat.value));
     });
   }
   if (elPageSetGlobal instanceof HTMLSelectElement) {
     elPageSetGlobal.addEventListener("change", () => {
-      setGlobalDefaultBinding(elPageSetGlobal.value);
+      runControlAction("Global binding", elPageSetGlobal, () => setGlobalDefaultBinding(elPageSetGlobal.value));
     });
   }
   if (elPageSetBypass instanceof HTMLInputElement) {
     elPageSetBypass.addEventListener("change", () => {
-      setChatBypass(!!elPageSetBypass.checked);
+      runControlAction("All-off reload toggle", elPageSetBypass, () => setChatBypass(!!elPageSetBypass.checked));
     });
   }
   document.addEventListener("click", () => {
