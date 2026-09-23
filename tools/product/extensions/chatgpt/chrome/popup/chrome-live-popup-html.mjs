@@ -105,7 +105,7 @@ export function makeChromeLivePopupHtml({
               <button type="button" class="project-color-dot is-blue" title="Project blue"></button>
               <button type="button" class="project-color-dot is-red" title="Project red"></button>
               <button type="button" class="project-color-dot is-green" title="Project green"></button>
-              <button type="button" class="project-color-dot is-yellow" title="Open Diagnostics Workspace" aria-label="Open Diagnostics Workspace" data-popup-action="open-diagnostics"${q("yellow-action")}></button>
+              ${titleDiagnosticEnabled ? `<button type="button" class="project-color-dot is-yellow" title="Open Diagnostics Workspace" aria-label="Open Diagnostics Workspace" data-popup-action="open-diagnostics"${q("yellow-action")}></button>` : ""}
             </div>${envBadge}
           </div>
         </div>

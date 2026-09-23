@@ -146,6 +146,26 @@ function assertVariantIsolation() {
   const htmlOff = makeChromeLivePopupHtml({ titleDiagnosticEnabled: false });
   const htmlOn = makeChromeLivePopupHtml({ titleDiagnosticEnabled: true });
   assert(!htmlOff.includes("title-navigation-diagnostic"), "diagnostic popup controls leaked into disabled output");
+  // The yellow Diagnostics control must share the gate that emits its workspace and
+  // binding script. It once rendered unconditionally, so a build without the
+  // diagnostic shipped a dead button: present in markup, bound by nothing.
+  assert(!htmlOff.includes('data-popup-action="open-diagnostics"') && !htmlOff.includes("project-color-dot is-yellow"),
+    "yellow Diagnostics control must not render when the diagnostic is disabled");
+  assert(!htmlOff.includes('id="diagnostics-workspace"'),
+    "diagnostics workspace must not render when the diagnostic is disabled");
+  assert.equal((htmlOn.match(/data-popup-action="open-diagnostics"/g) || []).length, 1,
+    "enabled popup must emit exactly one yellow Diagnostics action");
+  assert.equal((htmlOn.match(/project-color-dot is-yellow/g) || []).length, 1,
+    "enabled popup must emit exactly one yellow control");
+  assert(htmlOn.includes('id="diagnostics-workspace"'),
+    "enabled popup must emit the yellow control together with its diagnostics workspace target");
+  for (const dot of ["is-blue", "is-red", "is-green"]) {
+    const dotPattern = new RegExp("project-color-dot " + dot, "g");
+    assert.equal((htmlOff.match(dotPattern) || []).length, 1,
+      `unrelated project colour dot ${dot} must remain exactly once in the disabled build`);
+    assert.equal((htmlOn.match(dotPattern) || []).length, 1,
+      `unrelated project colour dot ${dot} must remain exactly once in the enabled build`);
+  }
   assert(htmlOn.includes("Title navigation diagnostic") && htmlOn.includes(TITLE_DIAGNOSTIC_FILES.popup), "enabled popup controls missing");
   assert(!/<script(?![^>]*src=)[^>]*>/i.test(htmlOn), "inline popup JavaScript is forbidden");
   assert.equal(getExtensionId(TARGET_VARIANT), EXPECTED_ID, "stable extension ID changed");
