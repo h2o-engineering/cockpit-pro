@@ -6773,7 +6773,7 @@ async function renderRoute(opts = {}){
     state.renderToken += 1;
     setStudioRouteScope("migrate", { clearReader: true });
     studioHostUnmountPreservingRouteHash("studio:route-migrate");
-    renderMigrateRoute(route.action);
+    await renderMigrateRoute(route.action);
     return;
   }
   if (route.name === "settings") {
@@ -6877,16 +6877,22 @@ function migrateRouteHideOtherPanels(){
   if (readerEl) readerEl.hidden = true;
 }
 
-function migrateDownloadJson(filename, obj){
+async function migrateDownloadJson(filename, obj){
+  const files = W.H2O?.Studio?.platform?.files;
+  if (!files || typeof files.exportBlob !== "function") {
+    throw new Error("platform.files.exportBlob unavailable");
+  }
+  const suggestedName = String(filename || "h2o-studio-bundle.json");
   const json = JSON.stringify(obj, null, 2);
   const blob = new Blob([json], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = String(filename || "h2o-studio-bundle.json");
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => { try { document.body.removeChild(a); } catch {} try { URL.revokeObjectURL(url); } catch {} }, 200);
+  const result = await files.exportBlob({ suggestedName, blob });
+  if (result?.ok === false && result?.reason === "cancelled") {
+    return result;
+  }
+  if (!result || result.ok !== true) {
+    throw new Error("platform.files.exportBlob returned unsuccessful result");
+  }
+  return result;
 }
 
 // Studio talks to the SW directly through callArchive (it's the established
@@ -6903,14 +6909,30 @@ function migrateGetArchiveBoot(){
   };
 }
 
-function migrateExtensionLabel(){
+async function migrateExtensionLabel(){
+  const runtime = W.H2O?.Studio?.platform?.runtime;
+  if (!runtime || typeof runtime.getLoadedRuntimeIdentity !== "function") {
+    return { id: "", name: "", version: "", versionName: "", label: "(runtime info unavailable)" };
+  }
   try {
-    const id = chrome?.runtime?.id || "(unknown id)";
-    const name = chrome?.runtime?.getManifest?.().name || "(unknown name)";
-    const version = chrome?.runtime?.getManifest?.().version || "";
-    return { id, name, version, label: `${name} · ${id}${version ? " · v" + version : ""}` };
+    const loaded = await runtime.getLoadedRuntimeIdentity();
+    if (!loaded || loaded.available !== true) {
+      return { id: "", name: "", version: "", versionName: "", label: "(runtime info unavailable)" };
+    }
+    const id = String(loaded.runtimeId || "");
+    const name = String(loaded.displayName || "");
+    const version = String(loaded.version || "");
+    const versionName = String(loaded.versionName || "");
+    const parts = [name, id, version ? "v" + version : ""].filter(Boolean);
+    return {
+      id,
+      name,
+      version,
+      versionName,
+      label: parts.length ? parts.join(" · ") : "(runtime info unavailable)",
+    };
   } catch {
-    return { id: "", name: "", version: "", label: "(extension info unavailable)" };
+    return { id: "", name: "", version: "", versionName: "", label: "(runtime info unavailable)" };
   }
 }
 
@@ -7563,7 +7585,7 @@ function settingsStorageDiagnosticsHtml(meta, cardStyle){
         <div style="opacity:.6">Extension name</div>         <div id="wbSettingsDiagName">${esc(meta.name || "(unavailable)")}</div>
         <div style="opacity:.6">Version</div>                <div id="wbSettingsDiagVersion">${esc(meta.version || "(unavailable)")}</div>
         <div style="opacity:.6">Saved chats</div>            <div id="wbSettingsDiagChats">(loading...)</div>
-        <div style="opacity:.6">Build channel</div>          <div id="wbSettingsDiagBuild">(loading...)</div>
+        <div style="opacity:.6">Runtime version name</div>   <div id="wbSettingsDiagBuild">(loading...)</div>
       </div>
       <div id="wbSettingsDiagWarn" style="margin-top:8px;font-size:12px;opacity:.75" hidden></div>
     </div>
@@ -8174,10 +8196,10 @@ function mountSettingsArchiveRequestDeliveryCard(panel){
   } catch (_) { /* manual delivery utility card must never break Settings */ }
 }
 
-function renderSettingsSectionShell(panel, section){
+async function renderSettingsSectionShell(panel, section){
   const key = SETTINGS_TOP_LEVEL_ROUTES[section] ? section : "account";
   const meta = settingsTopLevelMeta(key);
-  const extensionMeta = migrateExtensionLabel();
+  const extensionMeta = await migrateExtensionLabel();
   const cardStyle = "display:flex;flex-direction:column;gap:8px;padding:16px;border:1px solid rgba(255,255,255,.08);border-radius:10px;background:rgba(255,255,255,.02)";
   const btnStyle = "padding:8px 14px;border-radius:6px;cursor:pointer;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:inherit;font:inherit;text-decoration:none;display:inline-block";
   panel.innerHTML = `
@@ -8236,7 +8258,7 @@ async function renderSettingsTopLevelRoute(panel, route){
   panel.dataset.settingsRendered = "1";
   panel.dataset.settingsRenderedKey = routeKey;
   delete panel.dataset.syncControlsBound;
-  renderSettingsSectionShell(panel, section);
+  await renderSettingsSectionShell(panel, section);
 }
 
 function settingsWrapFolderParityRoute(panel, parityNode){
@@ -8420,7 +8442,7 @@ async function renderSettingsRoute(route = { section: "account", subsection: "" 
   delete panel.dataset.syncControlsBound;
   panel.innerHTML = "";
 
-  const meta = migrateExtensionLabel();
+  const meta = await migrateExtensionLabel();
   const cardStyle = "display:flex;flex-direction:column;gap:8px;padding:16px;border:1px solid rgba(255,255,255,.08);border-radius:10px;background:rgba(255,255,255,.02)";
   const sectionTitleStyle = "margin:0 0 12px;font-size:13px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;opacity:.65";
   const btnStyle = "padding:8px 14px;border-radius:6px;cursor:pointer;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:inherit;font:inherit;text-decoration:none;display:inline-block";
@@ -8966,7 +8988,7 @@ async function renderSettingsRoute(route = { section: "account", subsection: "" 
 async function refreshSettingsDiagnostics(panel){
   if (!panel) return;
   syncFolderOperatorModeDiagnosticsUi(panel);
-  const meta = migrateExtensionLabel();
+  const meta = await migrateExtensionLabel();
   const elId = panel.querySelector("#wbSettingsDiagId");
   const elName = panel.querySelector("#wbSettingsDiagName");
   const elVer = panel.querySelector("#wbSettingsDiagVersion");
@@ -8977,14 +8999,9 @@ async function refreshSettingsDiagnostics(panel){
   if (elName) elName.textContent = meta.name || "(unavailable)";
   if (elVer) elVer.textContent = meta.version || "(unavailable)";
 
-  // Build channel inferred from manifest name. Cheap heuristic; aligns with
-  // the names emitted by chrome-live-build-context.mjs.
-  let channel = "unknown";
-  const nm = String(meta.name || "");
-  if (/Cockpit Pro/i.test(nm)) channel = "production (chrome-ext-prod)";
-  else if (/Dev Controls/i.test(nm)) channel = "dev-controls";
-  else if (/Lean/i.test(nm)) channel = "dev-lean";
-  if (elBuild) elBuild.textContent = channel;
+  // C5-A1: loaded runtime versionName is an opaque owner-provided fact.
+  // Never infer build channel, variant, Lane or provenance from display names.
+  if (elBuild) elBuild.textContent = meta.versionName || "(unavailable)";
 
   if (elChats) {
     try {
@@ -14905,7 +14922,7 @@ function bindSettingsSyncControls(panel){
   }));
 }
 
-function renderMigrateRoute(actionRaw){
+async function renderMigrateRoute(actionRaw){
   const action = String(actionRaw || "").toLowerCase();
   migrateRouteHideOtherPanels();
   setRouteMeta("Migrate", action === "export" ? "Export Bundle" : "Import Bundle",
@@ -14915,21 +14932,17 @@ function renderMigrateRoute(actionRaw){
   panel.hidden = false;
   // Idempotency guard: renderRoute fires on hashchange AND on every window
   // focus / visibilitychange (refreshFromForeground). Opening the OS file
-  // picker steals focus, so when the user picks a file the Studio window
-  // re-focuses and renderRoute runs again — re-entering this function. Without
-  // this guard, we would wipe the file <input> element and its change
-  // listener (plus the closure that holds `parsedBundle`) BEFORE the browser
-  // delivers the change event. The user's pick would vanish silently.
-  // Solution: track the currently rendered action on the panel itself; bail
-  // out early when re-entering for the same action. The DOM + closures stay
-  // intact so the file picker's change event lands on the live listener.
+  // picker can steal focus, so returning to Studio may re-enter this function
+  // while the Platform picker Promise still owns the in-flight migration
+  // closure. Preserve the current DOM/closures for the same action so
+  // parsedBundle / dryRun / backupSaved state survives picker focus changes.
   if (panel.dataset.migrateActiveAction === action && panel.firstChild) {
     return;
   }
   panel.dataset.migrateActiveAction = action;
   panel.innerHTML = "";
 
-  const meta = migrateExtensionLabel();
+  const meta = await migrateExtensionLabel();
   const header = document.createElement("div");
   header.innerHTML = `
     <h2 style="margin:0 0 4px;font-size:20px;font-weight:600">Studio Migration · ${esc(action === "export" ? "Export" : "Import")}</h2>
@@ -14981,7 +14994,11 @@ function renderMigrateExport(panel){
         `Downloading…`,
       ].join("\n");
       const filename = `h2o-studio-full-bundle__${(bundle?.exportedFromExtensionId || "unknown").slice(0,8)}__${migrateBuildTimestamp()}.json`;
-      migrateDownloadJson(filename, bundle);
+      const delivery = await migrateDownloadJson(filename, bundle);
+      if (delivery?.ok === false && delivery?.reason === "cancelled") {
+        log.textContent += "\nDownload cancelled.";
+        return;
+      }
       log.textContent += `\nSaved as ${filename}`;
     } catch (err) {
       log.textContent = "Export FAILED.\n" + String(err && (err.stack || err.message || err));
@@ -15004,13 +15021,10 @@ function renderMigrateImport(panel){
   log.style.cssText = "white-space:pre-wrap;background:rgba(0,0,0,.18);padding:12px;border-radius:6px;max-height:360px;overflow:auto;font-size:12px;line-height:1.45;margin:12px 0";
   log.textContent = "Step 1: pick a bundle file.";
 
-  const fileWrap = document.createElement("div");
-  fileWrap.style.cssText = "display:flex;gap:8px;align-items:center;margin:8px 0";
-  const fileInput = document.createElement("input");
-  fileInput.type = "file";
-  fileInput.accept = "application/json,.json";
-  fileWrap.appendChild(fileInput);
-  panel.appendChild(fileWrap);
+  const btnPick = document.createElement("button");
+  btnPick.className = "wbBtn";
+  btnPick.textContent = "1. Pick bundle file";
+  btnPick.style.cssText = "margin:0 8px 0 0;padding:8px 16px;cursor:pointer";
 
   const btnDry = document.createElement("button");
   btnDry.className = "wbBtn";
@@ -15030,30 +15044,43 @@ function renderMigrateImport(panel){
   btnImport.disabled = true;
   btnImport.style.cssText = "padding:8px 16px;font-weight:600;cursor:pointer;background:rgba(13,148,136,.18);border-color:rgba(13,148,136,.6)";
 
+  panel.appendChild(btnPick);
   panel.appendChild(btnDry);
   panel.appendChild(btnBackup);
   panel.appendChild(btnImport);
   panel.appendChild(log);
 
-  const onFilePicked = async (ev) => {
-    // Diagnostic: log to console too so any silent-failure case surfaces in
-    // DevTools regardless of whether the UI log is intact.
-    try { console.log("[H2O/Migrate] file change event fired", { hasFiles: !!(fileInput.files && fileInput.files.length) }); } catch {}
-    const file = fileInput.files && fileInput.files[0];
-    if (!file) {
-      log.textContent = "No file picked (file input cleared or selection cancelled).";
-      return;
-    }
-    log.textContent = `File selected: ${file.name} (${(file.size || 0).toLocaleString()} bytes). Parsing…`;
-    bundleFilename = file.name;
+  const pickBundleFile = async () => {
+    btnPick.disabled = true;
     parsedBundle = null;
+    bundleFilename = "";
     dryRun = null;
     backupSaved = false;
     btnDry.disabled = true;
     btnBackup.disabled = true;
     btnImport.disabled = true;
     try {
-      const text = await file.text();
+      const files = W.H2O?.Studio?.platform?.files;
+      if (!files || typeof files.importFile !== "function") {
+        throw new Error("platform.files.importFile unavailable");
+      }
+      const file = await files.importFile({
+        mimeTypes: ["application/json"],
+        extensions: ["json"],
+        filterName: "JSON",
+        title: "Select Studio bundle",
+      });
+      if (!file) {
+        log.textContent = "File selection cancelled.";
+        return;
+      }
+
+      const fileName = String(file.name || "");
+      const fileSize = Number(file.size || 0);
+      const text = String(file.text ?? "");
+      log.textContent = `File selected: ${fileName || "(unnamed)"} (${fileSize.toLocaleString()} bytes). Parsing…`;
+      bundleFilename = fileName;
+
       let obj;
       try {
         obj = JSON.parse(text);
@@ -15069,8 +15096,8 @@ function renderMigrateImport(panel){
       log.textContent = [
         `File parsed successfully.`,
         ``,
-        `  filename:           ${file.name}`,
-        `  bytes:              ${(file.size || 0).toLocaleString()}`,
+        `  filename:           ${fileName || "(unnamed)"}`,
+        `  bytes:              ${fileSize.toLocaleString()}`,
         `  schema:             ${schema}`,
         `  exportedAt:         ${obj.exportedAt || "(missing)"}`,
         `  fromExtensionId:    ${obj.exportedFromExtensionId || "(legacy v1 bundle — no extension id)"}`,
@@ -15094,12 +15121,11 @@ function renderMigrateImport(panel){
       const msg = String(err && (err.stack || err.message || err));
       log.textContent = `Bundle rejected.\n${msg}\n\nTry a different file. (No data was written; this is the file-select step.)`;
       try { console.warn("[H2O/Migrate] bundle parse/validate failed", err); } catch {}
+    } finally {
+      btnPick.disabled = false;
     }
   };
-  fileInput.addEventListener("change", onFilePicked);
-  // Defense in depth for some Chromium edge cases where re-picking the same
-  // filename doesn't refire "change" — also listen to "input".
-  fileInput.addEventListener("input", onFilePicked);
+  btnPick.addEventListener("click", pickBundleFile);
 
   btnDry.addEventListener("click", async () => {
     if (!parsedBundle) return;
@@ -15150,7 +15176,13 @@ function renderMigrateImport(panel){
       const ab = migrateGetArchiveBoot();
       const bundle = await ab.exportFullBundle({});
       const filename = `h2o-studio-PROD-pre-import-backup__${(bundle?.exportedFromExtensionId || "unknown").slice(0,8)}__${migrateBuildTimestamp()}.json`;
-      migrateDownloadJson(filename, bundle);
+      const delivery = await migrateDownloadJson(filename, bundle);
+      if (delivery?.ok === false && delivery?.reason === "cancelled") {
+        backupSaved = false;
+        log.textContent += "\nBackup cancelled — import remains disabled.";
+        btnBackup.disabled = false;
+        return;
+      }
       backupSaved = true;
       log.textContent += `\nBackup saved as ${filename}.`;
       log.textContent += `\n\nStep 4: click "Confirm import" to merge incoming data.`;
