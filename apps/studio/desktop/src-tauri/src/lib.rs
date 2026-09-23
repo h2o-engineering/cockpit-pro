@@ -247,6 +247,15 @@ pub mod saved_chat_local_backup;
 /// overwrite mode; owns no file or CAS authority.
 pub mod saved_chat_asset_recovery;
 
+/// B2B v1 (`establish-operating-space-archive-physical-delivery-v1`, T02) —
+/// minimum private immutable Operating-Space Archive physical delivery:
+/// publisher, verified resolver, create-only protection mapping and
+/// recovery-only secondary copy for ONE governed Archive inventory evidence
+/// object at a time. Composes the incumbent Saved-Chats archive durability,
+/// confinement and hashing primitives; establishes no second CAS, no AssetRef,
+/// no reference counting, and no delete/GC/repair authority.
+pub mod operating_space_archive_delivery;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum F5g4ProofFailure {
     TombstoneInsert,
@@ -3233,6 +3242,10 @@ macro_rules! h2o_studio_invoke_handler {
             archive_residue_probe::h2o_archive_durable_temp_residue,
             archive_reclamation_preview::h2o_archive_reclamation_preview,
             archive_reclaim_execute::h2o_archive_reclamation_execute,
+            operating_space_archive_delivery::h2o_operating_space_archive_publish_object,
+            operating_space_archive_delivery::h2o_operating_space_archive_resolve_object,
+            operating_space_archive_delivery::h2o_operating_space_archive_record_protection,
+            operating_space_archive_delivery::h2o_operating_space_archive_verify_delivery,
             saved_chat_backup_root_policy::h2o_saved_chat_backup_root_policy,
             saved_chat_local_backup::h2o_saved_chat_backup_begin,
             saved_chat_local_backup::h2o_saved_chat_backup_package_begin,
@@ -3338,6 +3351,10 @@ macro_rules! h2o_studio_invoke_handler {
             archive_residue_probe::h2o_archive_durable_temp_residue,
             archive_reclamation_preview::h2o_archive_reclamation_preview,
             archive_reclaim_execute::h2o_archive_reclamation_execute,
+            operating_space_archive_delivery::h2o_operating_space_archive_publish_object,
+            operating_space_archive_delivery::h2o_operating_space_archive_resolve_object,
+            operating_space_archive_delivery::h2o_operating_space_archive_record_protection,
+            operating_space_archive_delivery::h2o_operating_space_archive_verify_delivery,
             saved_chat_backup_root_policy::h2o_saved_chat_backup_root_policy,
             saved_chat_local_backup::h2o_saved_chat_backup_begin,
             saved_chat_local_backup::h2o_saved_chat_backup_package_begin,
