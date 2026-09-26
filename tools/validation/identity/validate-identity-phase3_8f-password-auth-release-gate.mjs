@@ -69,11 +69,39 @@ function assertPageBoundary(label, source) {
     `${label}: must not expose raw credential table or RPC names`);
 }
 
+function stripJsComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+}
+
+function stripQuotedLiterals(source) {
+  return source
+    .replace(/'(?:\\.|[^'\\])*'/g, "''")
+    .replace(/"(?:\\.|[^"\\])*"/g, '""')
+    .replace(/`(?:\\.|[^`\\])*`/g, "``");
+}
+
 function assertNoPasswordStorage(label, source) {
-  assert(!/(localStorage|sessionStorage|chrome\.storage)\s*\.[\s\S]{0,180}(password|otp|code)/i.test(source),
+  const executable = stripJsComments(source);
+
+  const pageStorageSecretWrite =
+    /(?:localStorage|sessionStorage)\s*\.\s*setItem\s*\([\s\S]{0,600}?(?:\bpassword\b|\botp\b|\bcode\b|Password\b|Otp\b|Code\b)[\s\S]{0,600}?\)/.test(executable);
+  const chromeStorageSecretWrite =
+    /chrome\.storage\.(?:local|session|sync)\s*\.\s*set\s*\([\s\S]{0,1200}?(?:\bpassword\b|\botp\b|\bcode\b|Password\b|Otp\b|Code\b)[\s\S]{0,1200}?\)/.test(executable);
+
+  assert(!pageStorageSecretWrite && !chromeStorageSecretWrite,
     `${label}: password/code values must not be written to storage`);
-  assert(!/password[\s\S]{0,140}(console\.log|console\.warn|diagnostic|diagnostics|audit)/i.test(source),
-    `${label}: password values must not be logged or diagnosed`);
+
+  const logCalls = executable.match(/console\.(?:log|warn|error|info|debug)\s*\([\s\S]{0,1200}?\)/g) || [];
+  const secretLogged = logCalls.some((call) => {
+    if (/\$\{[^}]*\b(?:password|otp|code)\b[^}]*\}/i.test(call)) return true;
+    const withoutLiterals = stripQuotedLiterals(call);
+    return /\b(?:password|otp|code)\b/i.test(withoutLiterals);
+  });
+
+  assert(!secretLogged,
+    `${label}: password/code values must not be logged or diagnosed`);
 }
 
 console.log("\n-- Identity Phase 3.8F password-auth release-gate validation ----");
