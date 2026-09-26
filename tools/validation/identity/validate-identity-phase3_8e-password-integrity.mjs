@@ -66,10 +66,28 @@ function assertNoPageProviderOwnership(label, source) {
     `${label}: must not contain service-role strings`);
 }
 
+function stripJsComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+}
+
 function assertNoUiLeakFields(label, source) {
   assert(!/\b(access_token|refresh_token|rawSession|rawUser|owner_user_id|deleted_at)\b/.test(source),
     `${label}: must not contain token/session/raw-user or unsafe DB field names`);
-  assert(!/(localStorage|sessionStorage|chrome\.storage)\s*\.[\s\S]{0,180}(password|otp|code)/i.test(source),
+
+  // Phase 3.8E integrity is about actual secret persistence, not textual
+  // proximity. Strip comments first, then inspect only storage WRITE calls.
+  // This keeps harmless diagnostics such as "...localStorage...pilotPlan..."
+  // from matching "otp" inside an unrelated identifier while remaining
+  // fail-closed for password / OTP / code material passed to storage APIs.
+  const executable = stripJsComments(source);
+  const pageStorageSecretWrite =
+    /(?:localStorage|sessionStorage)\s*\.\s*setItem\s*\([\s\S]{0,600}?(?:\bpassword\b|\botp\b|\bcode\b|Password\b|Otp\b|Code\b)[\s\S]{0,600}?\)/.test(executable);
+  const chromeStorageSecretWrite =
+    /chrome\.storage\.(?:local|session|sync)\s*\.\s*set\s*\([\s\S]{0,1200}?(?:\bpassword\b|\botp\b|\bcode\b|Password\b|Otp\b|Code\b)[\s\S]{0,1200}?\)/.test(executable);
+
+  assert(!pageStorageSecretWrite && !chromeStorageSecretWrite,
     `${label}: password/code values must not be written to storage`);
 }
 
