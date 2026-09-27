@@ -1134,7 +1134,6 @@ button.mini {
   top: 0;
   z-index: 6;
   margin-bottom: 2px;
-  display: none;
 }
 .metrics-slider-spacer {
   min-width: 0;
