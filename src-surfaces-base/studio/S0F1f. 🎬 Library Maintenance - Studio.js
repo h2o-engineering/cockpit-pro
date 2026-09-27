@@ -42,6 +42,111 @@
   function getWorkspace() { return H2O.LibraryWorkspace || null; }
   function getCmdBar() { return getCore()?.getService?.('command-bar') || null; }
 
+  // Candidate 3 — Library-owned Folder Operator semantic controller.
+  // Shell and sidebar surfaces may present/compose this state, but they do not
+  // own its meaning, persistence, migration, transition, or subscriptions.
+  const FOLDER_OPERATOR_MODE_CONTRACT = 'h2o.library.folder-operator-mode.v1';
+  const FOLDER_OPERATOR_MODE_OWNER = 'L-COCKPIT-LIBRARY';
+  const FOLDER_OPERATOR_MODE_STORAGE_KEY = 'h2o:studio:folder-local-review:operator-mode:v1';
+  let folderOperatorModeValue = false;
+  let folderOperatorModeHydrationSequence = 0;
+  const folderOperatorModeSubscribers = new Set();
+
+  function normalizeFolderOperatorModeValue(value) {
+    if (value === true || value === '1' || value === 'true') return true;
+    if (value === false || value === '0' || value === 'false') return false;
+    return null;
+  }
+
+  function folderOperatorModeSnapshot(source = 'memory') {
+    return Object.freeze({
+      contract: FOLDER_OPERATOR_MODE_CONTRACT,
+      owner: FOLDER_OPERATOR_MODE_OWNER,
+      storageKey: FOLDER_OPERATOR_MODE_STORAGE_KEY,
+      enabled: folderOperatorModeValue === true,
+      source: String(source || 'memory'),
+    });
+  }
+
+  function notifyFolderOperatorModeSubscribers(source) {
+    const snapshot = folderOperatorModeSnapshot(source);
+    for (const listener of Array.from(folderOperatorModeSubscribers)) {
+      try { listener(snapshot); } catch (e) { err('folderOperatorMode.subscribe', e); }
+    }
+    return snapshot;
+  }
+
+  function applyFolderOperatorModeValue(value, source) {
+    const next = value === true;
+    const changed = folderOperatorModeValue !== next;
+    folderOperatorModeValue = next;
+    return changed
+      ? notifyFolderOperatorModeSubscribers(source)
+      : folderOperatorModeSnapshot(source);
+  }
+
+  async function persistFolderOperatorModeValue(value) {
+    const store = getStore();
+    if (!store || typeof store.set !== 'function') return false;
+    try {
+      await store.set(FOLDER_OPERATOR_MODE_STORAGE_KEY, value === true);
+      return true;
+    } catch (e) {
+      err('folderOperatorMode.persist', e);
+      return false;
+    }
+  }
+
+  async function hydrateFolderOperatorMode() {
+    const sequence = ++folderOperatorModeHydrationSequence;
+    const store = getStore();
+    if (!store || typeof store.get !== 'function') return folderOperatorModeSnapshot('store-unavailable');
+    try {
+      const stored = await store.get(FOLDER_OPERATOR_MODE_STORAGE_KEY);
+      if (sequence !== folderOperatorModeHydrationSequence) return folderOperatorModeSnapshot('stale-hydration');
+      const durableValue = normalizeFolderOperatorModeValue(stored);
+      if (durableValue !== null) return applyFolderOperatorModeValue(durableValue, 'library-store');
+
+      let legacyValue = null;
+      try {
+        legacyValue = normalizeFolderOperatorModeValue(W.localStorage?.getItem?.(FOLDER_OPERATOR_MODE_STORAGE_KEY));
+      } catch {}
+      if (legacyValue === null) return applyFolderOperatorModeValue(false, 'default');
+
+      const snapshot = applyFolderOperatorModeValue(legacyValue, 'legacy-localStorage');
+      await persistFolderOperatorModeValue(legacyValue);
+      return snapshot;
+    } catch (e) {
+      err('folderOperatorMode.hydrate', e);
+      return folderOperatorModeSnapshot('hydrate-error');
+    }
+  }
+
+  async function setFolderOperatorModeEnabled(value) {
+    const normalized = normalizeFolderOperatorModeValue(value);
+    if (normalized === null) throw new TypeError('folderOperatorMode.setEnabled requires a boolean-like value');
+    folderOperatorModeHydrationSequence += 1;
+    const snapshot = applyFolderOperatorModeValue(normalized, 'set');
+    await persistFolderOperatorModeValue(normalized);
+    return snapshot;
+  }
+
+  const folderOperatorMode = Object.freeze({
+    contract: FOLDER_OPERATOR_MODE_CONTRACT,
+    owner: FOLDER_OPERATOR_MODE_OWNER,
+    storageKey: FOLDER_OPERATOR_MODE_STORAGE_KEY,
+    isEnabled: () => folderOperatorModeValue === true,
+    get: () => folderOperatorModeSnapshot('read'),
+    setEnabled: setFolderOperatorModeEnabled,
+    hydrate: hydrateFolderOperatorMode,
+    subscribe(listener) {
+      if (typeof listener !== 'function') return () => {};
+      folderOperatorModeSubscribers.add(listener);
+      try { listener(folderOperatorModeSnapshot('subscribe')); } catch (e) { err('folderOperatorMode.subscribe.initial', e); }
+      return () => folderOperatorModeSubscribers.delete(listener);
+    },
+  });
+
   // ── Inspections (read-only) ────────────────────────────────────────────────
   async function inspectStore() {
     const store = getStore();
@@ -379,6 +484,7 @@
   // ── Public API ─────────────────────────────────────────────────────────────
   const Maintenance = {
     surface: 'studio',
+    folderOperatorMode,
     inspectStore, inspectRegistry, inspectIndex, inspectWorkspace, inspectCore,
     exportSnapshot, importSnapshot,
     rebuildIndex, cleanupStaleRegistryEntries,
@@ -399,6 +505,13 @@
   };
 
   H2O.Library.Maintenance = Maintenance;
+
+  try {
+    W.addEventListener('evt:h2o:library:store:tier-promoted', () => {
+      folderOperatorMode.hydrate().catch((e) => err('folderOperatorMode.hydrate.promoted', e));
+    });
+  } catch {}
+  folderOperatorMode.hydrate().catch((e) => err('folderOperatorMode.hydrate.boot', e));
 
   // Register a Command Bar group via the surface command-bar service so a future
   // Studio Command Bar can pick this up without code changes here.

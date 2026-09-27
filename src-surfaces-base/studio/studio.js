@@ -159,8 +159,6 @@ const state = {
 };
 
 let activeRailPopoverButton = null;
-let folderOperatorModeMemoryValue = false;
-let folderOperatorModeHydrationSequence = 0;
 const editOverrideCompatibilityBySnapshot = new Map();
 
 // D2 blocker: expose a read-only accessor for the current reader chat
@@ -276,68 +274,20 @@ function localReviewBadgesHtml(item = {}){
   )).join("")}</span>`;
 }
 
+function folderOperatorModeOwner(){
+  try {
+    const api = W.H2O?.Library?.Maintenance?.folderOperatorMode;
+    if (!api || api.contract !== "h2o.library.folder-operator-mode.v1") return null;
+    if (api.owner !== "L-COCKPIT-LIBRARY") return null;
+    return api;
+  } catch {
+    return null;
+  }
+}
+
 function folderOperatorModeEnabled(){
-  try {
-    const explicit = W.H2O?.Studio?.folderLocalReviewOperatorMode;
-    if (explicit === true) return true;
-    if (explicit === false) return false;
-  } catch {}
-  return folderOperatorModeMemoryValue;
-}
-
-function normalizeFolderOperatorModeValue(value){
-  if (value === true || value === "1" || value === "true") return true;
-  if (value === false || value === "0" || value === "false") return false;
-  return null;
-}
-
-function persistFolderOperatorModeValue(value){
-  try {
-    const store = W.H2O?.Library?.Store;
-    if (!store || typeof store.set !== "function") return Promise.resolve(false);
-    return Promise.resolve(store.set(FOLDER_LOCAL_REVIEW_OPERATOR_MODE_KEY, value === true))
-      .then(() => true, () => false);
-  } catch {
-    return Promise.resolve(false);
-  }
-}
-
-function applyHydratedFolderOperatorModeValue(value){
-  const next = value === true;
-  const changed = folderOperatorModeMemoryValue !== next;
-  folderOperatorModeMemoryValue = next;
-  applyFolderOperatorModeMarker();
-  syncFolderOperatorModeDiagnosticsUi(document);
-  if (changed) {
-    rerenderFolderOperatorModeSurfaces();
-    rerenderSettingsFolderOperatorModeRoute();
-  }
-  return next;
-}
-
-async function hydrateFolderOperatorModeFromStore(){
-  const sequence = ++folderOperatorModeHydrationSequence;
-  try {
-    const store = W.H2O?.Library?.Store;
-    if (!store || typeof store.get !== "function") return folderOperatorModeEnabled();
-    const stored = await store.get(FOLDER_LOCAL_REVIEW_OPERATOR_MODE_KEY);
-    if (sequence !== folderOperatorModeHydrationSequence) return folderOperatorModeEnabled();
-    const durableValue = normalizeFolderOperatorModeValue(stored);
-    if (durableValue !== null) return applyHydratedFolderOperatorModeValue(durableValue);
-
-    let legacyValue = null;
-    try {
-      legacyValue = normalizeFolderOperatorModeValue(
-        W.localStorage?.getItem?.(FOLDER_LOCAL_REVIEW_OPERATOR_MODE_KEY)
-      );
-    } catch {}
-    if (legacyValue === null) return applyHydratedFolderOperatorModeValue(false);
-    applyHydratedFolderOperatorModeValue(legacyValue);
-    await persistFolderOperatorModeValue(legacyValue);
-    return legacyValue;
-  } catch {
-    return folderOperatorModeEnabled();
-  }
+  const api = folderOperatorModeOwner();
+  return !!(api && typeof api.isEnabled === "function" && api.isEnabled() === true);
 }
 
 function folderLocalReviewAppearanceAllowed(){
@@ -365,21 +315,33 @@ function rerenderFolderOperatorModeSurfaces(){
   } catch {}
 }
 
-function setFolderOperatorModeEnabled(enabled){
-  const next = enabled === true;
-  folderOperatorModeHydrationSequence += 1;
-  folderOperatorModeMemoryValue = next;
-  try {
-    W.H2O = W.H2O || {};
-    W.H2O.Studio = W.H2O.Studio || {};
-    W.H2O.Studio.folderLocalReviewOperatorMode = next;
-  } catch {}
-  persistFolderOperatorModeValue(next);
+function syncFolderOperatorModePresentation(){
   applyFolderOperatorModeMarker();
   syncFolderOperatorModeDiagnosticsUi(document);
-  try { W.dispatchEvent(new CustomEvent("evt:h2o:studio:folder-operator-mode-changed", { detail: { enabled: next } })); } catch {}
+  try {
+    W.dispatchEvent(new CustomEvent("evt:h2o:studio:folder-operator-mode-changed", {
+      detail: { enabled: folderOperatorModeEnabled() },
+    }));
+  } catch {}
   rerenderFolderOperatorModeSurfaces();
   rerenderSettingsFolderOperatorModeRoute();
+}
+
+function setFolderOperatorModeEnabled(enabled){
+  const api = folderOperatorModeOwner();
+  if (!api || typeof api.setEnabled !== "function") return false;
+  const next = enabled === true;
+  try {
+    const result = api.setEnabled(next);
+    if (result && typeof result.catch === "function") {
+      result.catch((error) => {
+        try { console.warn("[H2O.Studio] Library folderOperatorMode set failed", error); } catch {}
+      });
+    }
+  } catch (error) {
+    try { console.warn("[H2O.Studio] Library folderOperatorMode unavailable", error); } catch {}
+    return false;
+  }
   return next;
 }
 
@@ -387,23 +349,24 @@ function installFolderOperatorModeApi(){
   try {
     W.H2O = W.H2O || {};
     W.H2O.Studio = W.H2O.Studio || {};
-    W.H2O.Studio.folderOperatorMode = {
-      storageKey: FOLDER_LOCAL_REVIEW_OPERATOR_MODE_KEY,
+    W.H2O.Studio.folderOperatorMode = Object.freeze({
+      get storageKey() {
+        return folderOperatorModeOwner()?.storageKey || FOLDER_LOCAL_REVIEW_OPERATOR_MODE_KEY;
+      },
       isEnabled: folderOperatorModeEnabled,
       setEnabled: setFolderOperatorModeEnabled,
       localReviewVisible: folderLocalReviewUiEnabled,
-    };
+    });
   } catch {}
-  applyFolderOperatorModeMarker();
+  const owner = folderOperatorModeOwner();
+  if (owner && typeof owner.subscribe === "function") {
+    owner.subscribe(() => syncFolderOperatorModePresentation());
+  } else {
+    syncFolderOperatorModePresentation();
+  }
 }
 
 installFolderOperatorModeApi();
-try {
-  W.addEventListener("evt:h2o:library:store:tier-promoted", () => {
-    hydrateFolderOperatorModeFromStore().catch(() => {});
-  });
-} catch {}
-hydrateFolderOperatorModeFromStore().catch(() => {});
 
 function studioHostUnmount(reason = "studio:unmount") {
   try { state.readerResume?.remember?.(reason); } catch {}

@@ -25,7 +25,6 @@
   // Default landing route for the Library page. Dashboard is the canonical
   // overview view; users can switch to Explorer/Analytics from page-level tabs.
   const LIBRARY_DEFAULT_HASH = '#/library/dashboard';
-  const FOLDER_LOCAL_REVIEW_OPERATOR_MODE_KEY = 'h2o:studio:folder-local-review:operator-mode:v1';
 
   // The injected DOM lives inside a section we own. We re-use the previous
   // SECTION_ID so any leftover instance from v1.1 is replaced cleanly.
@@ -46,17 +45,12 @@
 
   function folderOperatorModeEnabled() {
     try {
-      const api = W.H2O?.Studio?.folderOperatorMode;
-      if (api && typeof api.isEnabled === 'function') return api.isEnabled() === true;
-    } catch {}
-    try {
-      const explicit = W.H2O?.Studio?.folderLocalReviewOperatorMode;
-      if (explicit === true) return true;
-      if (explicit === false) return false;
-    } catch {}
-    try {
-      const raw = W.localStorage?.getItem?.(FOLDER_LOCAL_REVIEW_OPERATOR_MODE_KEY);
-      return raw === '1' || raw === 'true';
+      const api = W.H2O?.Library?.Maintenance?.folderOperatorMode;
+      return !!(api
+        && api.contract === 'h2o.library.folder-operator-mode.v1'
+        && api.owner === 'L-COCKPIT-LIBRARY'
+        && typeof api.isEnabled === 'function'
+        && api.isEnabled() === true);
     } catch {}
     return false;
   }

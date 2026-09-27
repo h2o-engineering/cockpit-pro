@@ -71,7 +71,6 @@
   ];
   const SIDEBAR_APPEARANCE_KEY = 'h2o:studio:sidebar:row-appearance:v1';
   const TAG_CATEGORY_LINKS_KEY = 'h2o:prm:cgx:library:tag-category-links:v1';
-  const FOLDER_LOCAL_REVIEW_OPERATOR_MODE_KEY = 'h2o:studio:folder-local-review:operator-mode:v1';
   const LOCAL_REVIEW_EXPLANATION = 'These folders exist locally but are not in your native ChatGPT folder catalog. Read-only — no cleanup performed.';
   const LOCAL_REVIEW_BADGE_ORDER = Object.freeze(['extra', 'test', 'conflict', 'desktop-only', 'chrome-only', 'review-required']);
   const FOLDER_METADATA_OPERATION_SCHEMA = 'h2o.folder-metadata-operation.v1';
@@ -290,21 +289,20 @@
     return String(v);
   }
 
+  function folderOperatorModeApi() {
+    try {
+      const api = W.H2O?.Library?.Maintenance?.folderOperatorMode;
+      if (!api || api.contract !== 'h2o.library.folder-operator-mode.v1') return null;
+      if (api.owner !== 'L-COCKPIT-LIBRARY') return null;
+      return api;
+    } catch {
+      return null;
+    }
+  }
+
   function folderOperatorModeEnabled() {
-    try {
-      const api = W.H2O?.Studio?.folderOperatorMode;
-      if (api && typeof api.isEnabled === 'function') return api.isEnabled() === true;
-    } catch {}
-    try {
-      const explicit = W.H2O?.Studio?.folderLocalReviewOperatorMode;
-      if (explicit === true) return true;
-      if (explicit === false) return false;
-    } catch {}
-    try {
-      const raw = W.localStorage?.getItem?.(FOLDER_LOCAL_REVIEW_OPERATOR_MODE_KEY);
-      return raw === '1' || raw === 'true';
-    } catch {}
-    return false;
+    const api = folderOperatorModeApi();
+    return !!(api && typeof api.isEnabled === 'function' && api.isEnabled() === true);
   }
 
   function folderLocalReviewAppearanceAllowed() {
@@ -320,7 +318,7 @@
   }
 
   function folderDestructiveActionsEnabled() {
-    return folderOperatorModeEnabled();
+    return folderOperatorModeEnabled() && !!folderCommandAuthority();
   }
 
   function folderSidebarDebugDetailsVisible() {
@@ -6090,14 +6088,15 @@
   function bindUpdates() {
     const ws = getWorkspace();
     if (ws?.subscribe) ws.subscribe(() => { renderAllSections(); });
+    const folderOperatorMode = folderOperatorModeApi();
+    if (folderOperatorMode?.subscribe) folderOperatorMode.subscribe(() => { renderAllSections(); });
     // Refresh on cross-surface broadcasts so native mutations propagate here.
     W.addEventListener('evt:h2o:library:cross-surface-sync', () => renderAllSections());
     W.addEventListener('evt:h2o:folders:changed', () => renderAllSections());
     W.addEventListener('evt:h2o:labels:changed', () => renderAllSections());
-    W.addEventListener('evt:h2o:studio:folder-operator-mode-changed', () => renderAllSections());
     W.addEventListener('evt:h2o:studio:appearance:changed', () => renderAllSections());
     W.addEventListener('storage', (ev) => {
-      if (FOLDERS_UI_KEYS.includes(String(ev?.key || '')) || String(ev?.key || '') === FOLDER_LOCAL_REVIEW_OPERATOR_MODE_KEY) renderAllSections();
+      if (FOLDERS_UI_KEYS.includes(String(ev?.key || ''))) renderAllSections();
     });
     step('bindUpdates');
   }
@@ -6601,7 +6600,7 @@
         folderOperatorMode: {
           enabled: folderOperatorModeEnabled(),
           localReviewVisible: folderLocalReviewUiEnabled(),
-          storageKey: FOLDER_LOCAL_REVIEW_OPERATOR_MODE_KEY,
+          storageKey: folderOperatorModeApi()?.storageKey || '',
         },
         folderCreateFlow: {
           ...FOLDER_CREATE_FLOW_STATE,
