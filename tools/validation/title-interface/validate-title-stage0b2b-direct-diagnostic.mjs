@@ -207,8 +207,16 @@ async function assertControlActionGuard() {
     removeAttribute(key) { delete this.attrs[key]; }
   }
   const elHint = { textContent: "" };
+  const clearButton = new FakeControl();
+  const editButton = new FakeControl();
+  let setExists = true;
+  const syncPageSetStatus = () => {
+    clearButton.disabled = !setExists;
+    editButton.disabled = !setExists;
+  };
   const context = {
     elHint, Promise, Set, String, console,
+    syncControlValues: () => {}, syncPageSetStatus,
     HTMLButtonElement: FakeControl, HTMLInputElement: FakeControl, HTMLSelectElement: FakeControl,
   };
   vm.runInNewContext(
@@ -247,6 +255,25 @@ async function assertControlActionGuard() {
   assert.equal(runs, 1, "a repeated control action must execute exactly once while in flight");
   assert.deepEqual(outcomes, [true, false, false], "duplicate invocations must report as not-run");
   assert.equal(busyButton.disabled, false, "the initiating control must be re-enabled in finally");
+
+  // The operation's render may set an authoritative disabled state. Releasing
+  // temporary busy ownership must not undo that state for an emptied Set.
+  assert.equal(await runControlAction("Clear", clearButton, async () => {
+    setExists = false;
+    syncPageSetStatus();
+  }), true);
+  assert.equal(clearButton.disabled, true, "Clear must remain disabled after its Set is emptied");
+  assert.equal(editButton.disabled, true, "Edit must remain disabled after its Set is emptied");
+
+  setExists = true;
+  syncPageSetStatus();
+  let finishClear;
+  const pendingClear = runControlAction("Clear", clearButton, () => new Promise((resolve) => { finishClear = resolve; }));
+  await runControlAction("All Off", new FakeControl(), async () => {});
+  assert.equal(clearButton.disabled, true, "an independent completion must preserve another action's busy state");
+  finishClear();
+  await pendingClear;
+  assert.equal(clearButton.disabled, false, "Clear must re-enable when its Set still exists");
 
   // an existing success message is never replaced, and the guard releases
   elHint.textContent = "Toggles reset to default (all on). Reload the page to apply.";
@@ -1258,6 +1285,72 @@ function assertBuildIntegration() {
   assert(manifest.includes('permissions.push("webNavigation", "scripting")'), "permission gate missing");
 }
 
+async function assertFullGeneratedBackground() {
+  const bg = fs.readFileSync(path.join(OUT, "bg.js"), "utf8");
+  const messageListeners = [];
+  const event = (capture = false) => ({ addListener(handler) { if (capture) messageListeners.push(handler); } });
+  const stored = new Map();
+  const chrome = {
+    runtime: {
+      onMessage: event(true), onMessageExternal: event(), onConnect: event(),
+      onStartup: event(), onInstalled: event(), sendMessage: async () => undefined,
+    },
+    storage: {
+      local: {
+        get: async (keys) => Object.fromEntries((Array.isArray(keys) ? keys : [keys])
+          .filter((key) => stored.has(key)).map((key) => [key, stored.get(key)])),
+        set: async (items) => { for (const [key, value] of Object.entries(items)) stored.set(key, value); },
+        remove: async (keys) => { for (const key of keys) stored.delete(key); },
+      },
+      onChanged: event(),
+    },
+    scripting: {
+      getRegisteredContentScripts: async () => [], unregisterContentScripts: async () => {},
+      registerContentScripts: async () => {},
+    },
+    webNavigation: Object.fromEntries([
+      "onBeforeNavigate", "onCommitted", "onDOMContentLoaded", "onCompleted",
+      "onErrorOccurred", "onHistoryStateUpdated", "onReferenceFragmentUpdated",
+    ].map((name) => [name, event()])),
+    tabs: { onUpdated: event(), onRemoved: event(), onActivated: event(), query: async () => [] },
+    action: { onClicked: event() }, alarms: { onAlarm: event() },
+    contextMenus: { onClicked: event(), create: () => {}, removeAll: () => {} },
+  };
+  const context = {
+    chrome, crypto: crypto.webcrypto, TextEncoder, URL, structuredClone, indexedDB: {},
+    setTimeout: () => 1, clearTimeout: () => {},
+    console: { log: () => {}, warn: () => {}, error: () => {} },
+  };
+  vm.runInNewContext(bg, context, { filename: "complete-generated-bg.js" });
+  assert.equal(context.__h2oTitleStage0B2BServiceWorkerV1, true,
+    "complete generated background must establish the diagnostic bootstrap marker");
+  assert.equal(messageListeners.length, 2, "base and diagnostic background listeners must both register");
+
+  async function replyFor(command) {
+    let respond;
+    const response = new Promise((resolve) => { respond = resolve; });
+    const message = { namespace: C.namespace, op: "popup", command };
+    assert.equal(messageListeners[0](message, {}, respond), undefined,
+      "base background listener must leave diagnostic commands unclaimed");
+    assert.equal(messageListeners[1](message, {}, respond), true,
+      "diagnostic background listener must hold its asynchronous response channel");
+    return Promise.race([
+      response,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`diagnostic ${command} reply timed out`)), 1000)),
+    ]);
+  }
+  const status = await replyFor("status");
+  assert.equal(status?.ok, true, "complete generated background status command must reply");
+  assert.equal(status.data?.schema, C.schema, "status reply must contain diagnostic state");
+  const exported = await replyFor("export");
+  assert.equal(exported?.ok, true, "complete generated background export command must reply");
+  assert.equal(exported.data?.schema, C.schema, "export reply must contain sanitized evidence");
+  const invalid = await replyFor("invalid");
+  assert.equal(invalid?.ok, false, "unknown diagnostic command must fail safely");
+  assert.equal(invalid.error, "Unknown diagnostic operation.");
+  console.log(JSON.stringify({ ok: true, check: "full-generated-background-diagnostic-replies" }));
+}
+
 function assertGenerated() {
   assert(fs.existsSync(OUT) && fs.statSync(OUT).isDirectory(), "generated target extension is missing");
   const manifest = JSON.parse(fs.readFileSync(path.join(OUT, "manifest.json"), "utf8"));
@@ -1316,7 +1409,10 @@ await assertIsolatedDomSuppression();
 await assertEvidenceAndNavigationStateMachine();
 assertRuntimeContract();
 assertBuildIntegration();
-if (GENERATED) assertGenerated();
+if (GENERATED) {
+  await assertFullGeneratedBackground();
+  assertGenerated();
+}
 
 const generated = {
   isolatedBytes: Buffer.byteLength(makeTitleNavigationDiagnosticIsolatedJs()),

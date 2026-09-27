@@ -430,6 +430,7 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
   // control, and reports a bounded failure on the existing hint surface. It does not
   // change what a wrapped operation does, and it never replaces its success message.
   const controlActionsInFlight = new Set();
+  const controlTargetsInFlight = new Set();
 
   function boundedActionFailure(error) {
     const raw = String((error && (error.message || error)) || "").replace(/\\s+/g, " ").trim();
@@ -447,6 +448,7 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
       || control instanceof HTMLSelectElement) ? control : null;
     const wasDisabled = target ? !!target.disabled : false;
     if (target) {
+      controlTargetsInFlight.add(target);
       target.setAttribute("data-h2o-action-busy", "1");
       if (!wasDisabled) target.disabled = true;
     }
@@ -465,8 +467,12 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
     ).finally(() => {
       controlActionsInFlight.delete(label);
       if (target) {
+        controlTargetsInFlight.delete(target);
         target.removeAttribute("data-h2o-action-busy");
-        if (!wasDisabled) target.disabled = false;
+        target.disabled = wasDisabled;
+        syncControlValues();
+        syncPageSetStatus();
+        for (const busyTarget of controlTargetsInFlight) busyTarget.disabled = true;
       }
     });
   }
