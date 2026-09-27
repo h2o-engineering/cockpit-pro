@@ -691,7 +691,30 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
       : "Clicking a Set will arm a one-shot preview for the next manual reload.";
   }
 
+  function captureFocusedResizer() {
+    const focused = document.activeElement;
+    if (!focused || !focused.classList) return null;
+    if (focused.classList.contains("script-col-resizer")) return { type: "script-resizer" };
+    if (!focused.classList.contains("metrics-col-resizer")) return null;
+    const key = focused.getAttribute("data-col-resize-key");
+    return key ? { type: "metrics-resizer", key } : null;
+  }
+
+  function restoreFocusedResizer(identity) {
+    if (!identity) return;
+    const target = identity.type === "script-resizer"
+      ? document.querySelector(".script-col-resizer")
+      : identity.type === "metrics-resizer"
+        ? Array.from(document.querySelectorAll(".metrics-col-resizer"))
+          .find((handle) => handle.getAttribute("data-col-resize-key") === identity.key)
+        : null;
+    if (!target) return;
+    try { target.focus({ preventScroll: true }); }
+    catch { target.focus(); }
+  }
+
   function render() {
+    const focusedResizer = captureFocusedResizer();
     syncVisibleScriptsWithOrder();
     recomputeOrderDerivedState();
     syncControlValues();
@@ -715,6 +738,7 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
     allGroups = groupScripts(scripts);
     viewGroups = buildViewGroups();
     renderTable();
+    restoreFocusedResizer(focusedResizer);
     renderHiddenWindow();
   }
 

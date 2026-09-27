@@ -315,11 +315,79 @@ function assertWidthStorageRenderGuard() {
   for (const marker of [
     'scriptColResizer.addEventListener("keydown"',
     'globalHeadMetrics.addEventListener("keydown"',
+    'scriptColResizer.addEventListener("pointerdown"',
+    'globalHeadMetrics.addEventListener("pointerdown"',
     'scriptColResizer.setAttribute("aria-valuemin", "248")',
     'scriptColResizer.setAttribute("aria-valuemax", "620")',
     'resizer.setAttribute("aria-valuemin", "42")',
     'resizer.setAttribute("aria-valuemax", "640")',
   ]) assert(popup.includes(marker), `resizer keyboard or bounds contract missing: ${marker}`);
+}
+
+function assertResizerFocusAcrossRender() {
+  const popup = emittedPopupJs();
+  const start = popup.indexOf("  function captureFocusedResizer() {");
+  const end = popup.indexOf("  async function loadAndRender() {", start);
+  assert(start > 0 && end > start, "resizer focus helpers and render wiring missing");
+  const body = { tagName: "BODY" };
+  const document = {
+    activeElement: body,
+    script: null,
+    metrics: [],
+    querySelector(selector) { return selector === ".script-col-resizer" ? this.script : null; },
+    querySelectorAll(selector) { return selector === ".metrics-col-resizer" ? this.metrics : []; },
+  };
+  const handle = (className, key, fallback = false) => ({
+    classList: { contains: (name) => name === className },
+    getAttribute: (name) => name === "data-col-resize-key" ? key : null,
+    focus(options) {
+      if (fallback && options) throw new TypeError("focus options unsupported");
+      this.focusOptions = options || null;
+      document.activeElement = this;
+    },
+  });
+  const context = {
+    document,
+    scripts: [{}],
+    elCounts: { textContent: "" },
+    countsText: () => "1",
+    syncVisibleScriptsWithOrder() {}, recomputeOrderDerivedState() {}, syncControlValues() {},
+    syncPageSetStatus() {}, renderSetSlots() {}, renderInfoToggles() {}, renderTotals() {},
+    groupScripts: () => [], buildViewGroups: () => [], renderHiddenWindow() {},
+    renderTable() {
+      document.activeElement = body;
+      document.script = handle("script-col-resizer", null);
+      document.metrics = [handle("metrics-col-resizer", "size"), handle("metrics-col-resizer", "lines")];
+    },
+  };
+  vm.runInNewContext(`let allGroups, viewGroups;\n${popup.slice(start, end)}\nglobalThis.testRender = render;`,
+    context, { filename: "generated-dev-controls-resizer-focus.js" });
+
+  document.activeElement = handle("script-col-resizer", null);
+  context.testRender();
+  assert.equal(document.activeElement, document.script, "Scripts focus must follow table recreation");
+  assert.equal(document.script.focusOptions?.preventScroll, true, "resizer focus must not scroll the popup");
+
+  document.activeElement = handle("metrics-col-resizer", "size");
+  context.testRender();
+  assert.equal(document.activeElement, document.metrics[0], "metrics focus must follow its stable key, not index");
+  document.activeElement = handle("metrics-col-resizer", "gone");
+  context.testRender();
+  assert.equal(document.activeElement, body, "missing metrics key must not focus another column");
+  document.activeElement = body;
+  context.testRender();
+  assert.equal(document.activeElement, body, "non-resizer focus must remain unchanged");
+
+  context.renderTable = () => {
+    document.activeElement = body;
+    document.script = handle("script-col-resizer", null, true);
+  };
+  document.activeElement = handle("script-col-resizer", null);
+  context.testRender();
+  assert.equal(document.activeElement, document.script, "focus() fallback must restore Scripts focus");
+
+  assert(/if \(Object\.prototype\.hasOwnProperty\.call\(changes, STORAGE_RUNTIME_KEY\)\) \{\s*runtimeStats = normalizeRuntimeStats\([^;]+;\s*shouldRender = true;/.test(popup),
+    "runtimeStats storage changes must still request render");
 }
 
 function assertWorkspaceContract() {
@@ -1242,6 +1310,7 @@ assertWorkspaceContract();
 assertTitleClickTimingContract();
 await assertControlActionGuard();
 assertWidthStorageRenderGuard();
+assertResizerFocusAcrossRender();
 await assertMainCollectorChangeDriven();
 await assertIsolatedDomSuppression();
 await assertEvidenceAndNavigationStateMachine();
