@@ -1065,6 +1065,12 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
     if (headerUtilityOpen) setHeaderUtilityOpen(false);
   });
 
+  function sameColWidthMap(left, right) {
+    const keys = Object.keys(left);
+    return keys.length === Object.keys(right).length
+      && keys.every((key) => Object.prototype.hasOwnProperty.call(right, key) && left[key] === right[key]);
+  }
+
   if (chrome.storage && chrome.storage.onChanged && typeof chrome.storage.onChanged.addListener === "function") {
     chrome.storage.onChanged.addListener((changes, areaName) => {
       if (areaName !== "local" || !changes || typeof changes !== "object") return;
@@ -1121,12 +1127,18 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
         shouldRender = true;
       }
       if (Object.prototype.hasOwnProperty.call(changes, STORAGE_COL_WIDTHS_KEY)) {
-        colWidthMap = normalizeColWidthMap(changes[STORAGE_COL_WIDTHS_KEY]?.newValue || {});
-        shouldRender = true;
+        const nextColWidthMap = normalizeColWidthMap(changes[STORAGE_COL_WIDTHS_KEY]?.newValue || {});
+        if (!sameColWidthMap(colWidthMap, nextColWidthMap)) {
+          colWidthMap = nextColWidthMap;
+          shouldRender = true;
+        }
       }
       if (Object.prototype.hasOwnProperty.call(changes, STORAGE_SCRIPT_COL_WIDTH_KEY)) {
-        scriptColWidth = normalizeScriptColWidth(changes[STORAGE_SCRIPT_COL_WIDTH_KEY]?.newValue, 248);
-        shouldRender = true;
+        const nextScriptColWidth = normalizeScriptColWidth(changes[STORAGE_SCRIPT_COL_WIDTH_KEY]?.newValue, 248);
+        if (scriptColWidth !== nextScriptColWidth) {
+          scriptColWidth = nextScriptColWidth;
+          shouldRender = true;
+        }
       }
       if (Object.prototype.hasOwnProperty.call(changes, STORAGE_POPUP_BG_MODE_KEY)) {
         popupBgMode = normalizePopupBgMode(changes[STORAGE_POPUP_BG_MODE_KEY]?.newValue);

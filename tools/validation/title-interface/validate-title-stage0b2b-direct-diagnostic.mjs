@@ -264,6 +264,64 @@ async function assertControlActionGuard() {
   assert(first === 1 && second === 1, "independent control actions must not block each other");
 }
 
+function assertWidthStorageRenderGuard() {
+  const popup = emittedPopupJs();
+  const normalizersStart = popup.indexOf("  function normalizeColWidth(");
+  const normalizersEnd = popup.indexOf("  function stripDevCacheNoise(", normalizersStart);
+  const comparisonStart = popup.indexOf("  function sameColWidthMap(");
+  const comparisonEnd = popup.indexOf("  if (chrome.storage && chrome.storage.onChanged", comparisonStart);
+  const widthChangesStart = popup.indexOf("      if (Object.prototype.hasOwnProperty.call(changes, STORAGE_COL_WIDTHS_KEY)) {");
+  const widthChangesEnd = popup.indexOf("      if (Object.prototype.hasOwnProperty.call(changes, STORAGE_POPUP_BG_MODE_KEY))", widthChangesStart);
+  assert(normalizersStart > 0 && normalizersEnd > normalizersStart && comparisonStart > 0
+    && comparisonEnd > comparisonStart && widthChangesStart > 0 && widthChangesEnd > widthChangesStart,
+  "emitted width normalization, comparison, or storage-change handler missing");
+
+  const context = { COL_DEFS: [{ key: "lines", width: 64 }, { key: "size", width: 64 }] };
+  vm.runInNewContext(`
+    ${popup.slice(normalizersStart, normalizersEnd)}
+    ${popup.slice(comparisonStart, comparisonEnd)}
+    const STORAGE_COL_WIDTHS_KEY = "h2oExtDevColWidthsV1";
+    const STORAGE_SCRIPT_COL_WIDTH_KEY = "h2oExtDevScriptColWidthV1";
+    let colWidthMap = { lines: 115, size: 108 };
+    let scriptColWidth = 288;
+    let renders = 0;
+    function apply(changes) {
+      let shouldRender = false;
+      ${popup.slice(widthChangesStart, widthChangesEnd)}
+      if (shouldRender) renders += 1;
+    }
+    globalThis.widthGuard = {
+      apply,
+      state: () => ({ renders, scriptColWidth, lines: colWidthMap.lines, size: colWidthMap.size }),
+      normalizeColWidth,
+      normalizeScriptColWidth,
+    };
+  `, context, { filename: "generated-dev-controls-width-storage-guard.js" });
+  const guard = context.widthGuard;
+  guard.apply({ h2oExtDevScriptColWidthV1: { newValue: "288.2" } });
+  guard.apply({ h2oExtDevColWidthsV1: { newValue: { size: 108, lines: 115.2, ignored: 999 } } });
+  assert.equal(guard.state().renders, 0, "equivalent self-persisted widths must not request render");
+  guard.apply({ h2oExtDevScriptColWidthV1: { newValue: 300 } });
+  assert.equal(guard.state().renders, 1, "external script width must request render");
+  assert.equal(guard.state().scriptColWidth, 300, "external script width was not adopted");
+  guard.apply({ h2oExtDevColWidthsV1: { newValue: { lines: 126, size: 108 } } });
+  assert.equal(guard.state().renders, 2, "external metrics width must request render");
+  assert.equal(guard.state().lines, 126, "external metrics width was not adopted");
+
+  assert.equal(guard.normalizeScriptColWidth(0), 248);
+  assert.equal(guard.normalizeScriptColWidth(999), 620);
+  assert.equal(guard.normalizeColWidth(0), 42);
+  assert.equal(guard.normalizeColWidth(999), 640);
+  for (const marker of [
+    'scriptColResizer.addEventListener("keydown"',
+    'globalHeadMetrics.addEventListener("keydown"',
+    'scriptColResizer.setAttribute("aria-valuemin", "248")',
+    'scriptColResizer.setAttribute("aria-valuemax", "620")',
+    'resizer.setAttribute("aria-valuemin", "42")',
+    'resizer.setAttribute("aria-valuemax", "640")',
+  ]) assert(popup.includes(marker), `resizer keyboard or bounds contract missing: ${marker}`);
+}
+
 function assertWorkspaceContract() {
   const htmlSourcePath = "tools/product/extensions/chatgpt/chrome/popup/chrome-live-popup-html.mjs";
   const popupJsPath = "tools/product/extensions/chatgpt/chrome/popup/chrome-live-popup-js.mjs";
@@ -1183,6 +1241,7 @@ assertVariantIsolation();
 assertWorkspaceContract();
 assertTitleClickTimingContract();
 await assertControlActionGuard();
+assertWidthStorageRenderGuard();
 await assertMainCollectorChangeDriven();
 await assertIsolatedDomSuppression();
 await assertEvidenceAndNavigationStateMachine();
