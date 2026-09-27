@@ -236,6 +236,9 @@ body {
   border-radius: 999px;
   background: rgba(255,255,255,.2);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.2), 0 0 0 1px rgba(0,0,0,.18);
+  cursor: default;
+}
+.project-color-dot[data-popup-action="open-diagnostics"] {
   cursor: pointer;
 }
 .project-color-dot.is-yellow {
@@ -1157,6 +1160,10 @@ button.mini {
   border: 1px solid #2d3542;
   outline: none;
 }
+.metrics-slider:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 4px;
+}
 .metrics-slider::-webkit-slider-runnable-track {
   height: 8px;
   border-radius: 999px;
@@ -1570,7 +1577,8 @@ button.mini {
   background: rgba(255,255,255,.28);
 }
 .script-col-resizer:hover::before,
-.script-col-resizer:active::before {
+.script-col-resizer:active::before,
+.script-col-resizer:focus-visible::before {
   background: rgba(255,255,255,.55);
 }
 .metrics-col-resizer {
@@ -1593,8 +1601,14 @@ button.mini {
   background: rgba(255,255,255,.18);
 }
 .metrics-col-resizer:hover::before,
-.metrics-col-resizer:active::before {
+.metrics-col-resizer:active::before,
+.metrics-col-resizer:focus-visible::before {
   background: rgba(255,255,255,.48);
+}
+.script-col-resizer:focus-visible,
+.metrics-col-resizer:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
 }
 
 /* Full-popup diagnostics workspace. The existing header remains the sole

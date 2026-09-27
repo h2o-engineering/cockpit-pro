@@ -92,19 +92,14 @@ export function makeChromeLivePopupHtml({
               <div class="header-util-pop settings-pop" id="settings-pop" hidden>
                 <div class="settings-head">Settings</div>
                 <section class="settings-section">
-                  <div class="settings-label">Workflow</div>
-                  <div class="settings-note">Reserved for panel behavior defaults and reset actions.</div>
-                </section>
-                <section class="settings-section">
-                  <div class="settings-label">Later</div>
-                  <div class="settings-note">Prepared for future dev preferences like reload/default-state/sort/reset options.</div>
+                  <div class="settings-note">No additional popup settings available.</div>
                 </section>
               </div>
             </div>
-            <div class="brand-swatch-row" aria-label="Project colors">
-              <button type="button" class="project-color-dot is-blue" title="Project blue"></button>
-              <button type="button" class="project-color-dot is-red" title="Project red"></button>
-              <button type="button" class="project-color-dot is-green" title="Project green"></button>
+            <div class="brand-swatch-row">
+              <span class="project-color-dot is-blue" aria-hidden="true"></span>
+              <span class="project-color-dot is-red" aria-hidden="true"></span>
+              <span class="project-color-dot is-green" aria-hidden="true"></span>
               ${titleDiagnosticEnabled ? `<button type="button" class="project-color-dot is-yellow" title="Open Diagnostics Workspace" aria-label="Open Diagnostics Workspace" data-popup-action="open-diagnostics"${q("yellow-action")}></button>` : ""}
             </div>${envBadge}
           </div>

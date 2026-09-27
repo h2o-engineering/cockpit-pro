@@ -187,8 +187,6 @@ export function makeChromeLivePopupJs({
 
   elPackUrl.textContent = PROXY_PACK_URL;
 
-  function setDot(mode) {}
-
   function sendIdentityRequest(action, extra = {}) {
     return new Promise((resolve, reject) => {
       try {
@@ -415,9 +413,8 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
     const key = String(inputEl.dataset.groupTitleEditKey || "").trim();
     if (!key) return;
     const defaultTitle = String(inputEl.dataset.groupDefaultTitle || "");
-    setGroupLabel(key, inputEl.value, defaultTitle).catch((e) => {
-      elHint.textContent = "Group title save failed: " + String(e && (e.message || e));
-    });
+    runControlAction("Group title " + key, inputEl,
+      () => setGroupLabel(key, inputEl.value, defaultTitle));
   }
 
   function snapshotCurrentEnabledMap() {
@@ -442,6 +439,7 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
 
   function runControlAction(actionLabel, control, operation) {
     const label = String(actionLabel || "Action");
+    const feedbackLabel = label.length > 80 ? label.slice(0, 79) + "…" : label;
     if (controlActionsInFlight.has(label)) return Promise.resolve(false);
     controlActionsInFlight.add(label);
     const target = (control instanceof HTMLButtonElement
@@ -461,7 +459,7 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
     return pending.then(
       () => true,
       (error) => {
-        elHint.textContent = label + " failed: " + boundedActionFailure(error);
+        elHint.textContent = feedbackLabel + " failed: " + boundedActionFailure(error);
         return false;
       },
     ).finally(() => {
@@ -721,7 +719,6 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
   }
 
   async function loadAndRender() {
-    setDot();
     elCounts.textContent = "Loading proxy pack...";
     try {
       const [packRes, state, liveOrderSections] = await Promise.all([
@@ -757,11 +754,9 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
         activeTab && typeof activeTab.id === "number" ? activeTab.id : 0,
         activeTab && typeof activeTab.url === "string" ? activeTab.url : ""
       );
-      setDot("ok");
       elHint.textContent = "";
       render();
     } catch (e) {
-      setDot("err");
       elCounts.textContent = "Failed to load proxy pack";
       const host = elTableShell || elList;
       host.innerHTML = "";
@@ -780,38 +775,38 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
     const inlineKind = String(t.dataset.inlineKind || "");
     if (inlineKind) {
       if (inlineKind === "adv" && t instanceof HTMLInputElement) {
-        setRuntimeAdvanced(!!t.checked);
+        runControlAction("Advanced runtime", t, () => setRuntimeAdvanced(!!t.checked));
         return;
       }
       if (t instanceof HTMLSelectElement && inlineKind === "sort") {
-        setSortMode(t.value);
+        runControlAction("Sort mode", t, () => setSortMode(t.value));
         return;
       }
       if (t instanceof HTMLSelectElement && inlineKind === "topn") {
-        setTopNMode(t.value);
+        runControlAction("TopN mode", t, () => setTopNMode(t.value));
         return;
       }
       if (t instanceof HTMLSelectElement && inlineKind === "scope") {
-        setTopNScope(t.value);
+        runControlAction("TopN scope", t, () => setTopNScope(t.value));
         return;
       }
     }
 
     if (t instanceof HTMLInputElement && t.id === "advanced-runtime") {
-      setRuntimeAdvanced(!!t.checked);
+      runControlAction("Advanced runtime", t, () => setRuntimeAdvanced(!!t.checked));
       return;
     }
 
     if (t instanceof HTMLSelectElement && t.id === "sort-mode") {
-      setSortMode(t.value);
+      runControlAction("Sort mode", t, () => setSortMode(t.value));
       return;
     }
     if (t instanceof HTMLSelectElement && t.id === "topn-mode") {
-      setTopNMode(t.value);
+      runControlAction("TopN mode", t, () => setTopNMode(t.value));
       return;
     }
     if (t instanceof HTMLSelectElement && t.id === "topn-scope") {
-      setTopNScope(t.value);
+      runControlAction("TopN scope", t, () => setTopNScope(t.value));
       return;
     }
 
@@ -820,13 +815,13 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
 
     const infoKey = String(t.dataset.infoKey || "");
     if (infoKey) {
-      setInfoPref(infoKey, !!t.checked);
+      runControlAction("Info column " + infoKey, t, () => setInfoPref(infoKey, !!t.checked));
       return;
     }
 
     const aliasId = String(t.dataset.aliasId || "");
     if (!aliasId) return;
-    setAliasEnabled(aliasId, !!t.checked);
+    runControlAction("Script " + aliasId, t, () => setAliasEnabled(aliasId, !!t.checked));
   });
 
   document.addEventListener("click", (ev) => {
@@ -837,9 +832,8 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
     if (rowHideBtn) {
       const aliasId = String(rowHideBtn.getAttribute("data-hide-alias-id") || "").trim();
       if (aliasId) {
-        setHiddenAliasEnabled(aliasId, false, { removeFromVisible: true }).catch((e) => {
-          elHint.textContent = "Move to hidden failed: " + String(e && (e.message || e));
-        });
+        runControlAction("Hidden script " + aliasId, rowHideBtn,
+          () => setHiddenAliasEnabled(aliasId, false, { removeFromVisible: true }));
       }
       return;
     }
@@ -849,9 +843,8 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
       const aliasId = String(hiddenDotBtn.getAttribute("data-off-alias-id") || "").trim();
       const enabledNow = String(hiddenDotBtn.getAttribute("data-off-enabled") || "") === "1";
       if (aliasId) {
-        setHiddenAliasEnabled(aliasId, !enabledNow).catch((e) => {
-          elHint.textContent = "Hidden toggle failed: " + String(e && (e.message || e));
-        });
+        runControlAction("Hidden script " + aliasId, hiddenDotBtn,
+          () => setHiddenAliasEnabled(aliasId, !enabledNow));
       }
       return;
     }
@@ -860,14 +853,15 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
     if (groupToggle) {
       const key = String(groupToggle.getAttribute("data-group-toggle-key") || "");
       const enabledNow = String(groupToggle.getAttribute("data-group-enabled") || "") === "1";
-      if (key) setGroupEnabled(key, !enabledNow);
+      if (key) runControlAction("Group " + key, groupToggle, () => setGroupEnabled(key, !enabledNow));
       return;
     }
 
     const setBtn = target.closest("button[data-set-slot]");
     if (setBtn) {
       const slot = Number(setBtn.getAttribute("data-set-slot"));
-      if (Number.isFinite(slot)) previewSlotForCurrentTab(slot, { reload: setClickReload });
+      if (Number.isFinite(slot)) runControlAction("Preview Set " + slot, setBtn,
+        () => previewSlotForCurrentTab(slot, { reload: setClickReload }));
     }
   });
 
@@ -951,6 +945,21 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
     btn.addEventListener("click", () => {
       setControlsTab(btn.dataset.controlsTab || "main");
     });
+    btn.addEventListener("keydown", (ev) => {
+      const tabs = leftTabButtons.filter((tab) => tab instanceof HTMLButtonElement);
+      const index = tabs.indexOf(btn);
+      if (index < 0) return;
+      let nextIndex;
+      if (ev.key === "ArrowRight") nextIndex = (index + 1) % tabs.length;
+      else if (ev.key === "ArrowLeft") nextIndex = (index - 1 + tabs.length) % tabs.length;
+      else if (ev.key === "Home") nextIndex = 0;
+      else if (ev.key === "End") nextIndex = tabs.length - 1;
+      else return;
+      ev.preventDefault();
+      const nextTab = tabs[nextIndex];
+      setControlsTab(nextTab.dataset.controlsTab || "main");
+      nextTab.focus();
+    });
   }
   for (const btn of railTabButtons) {
     if (!(btn instanceof HTMLButtonElement)) continue;
@@ -1014,9 +1023,7 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
     if (!(btn instanceof HTMLButtonElement)) continue;
     btn.addEventListener("click", (ev) => {
       ev.stopPropagation();
-      setPopupBgMode(btn.dataset.popupBgMode || POPUP_BG_BAR).catch((e) => {
-        elHint.textContent = "Background save failed: " + String(e && (e.message || e));
-      });
+      runControlAction("Background save", btn, () => setPopupBgMode(btn.dataset.popupBgMode || POPUP_BG_BAR));
     });
   }
   if (elSetSave instanceof HTMLButtonElement) {
@@ -1036,9 +1043,7 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
   }
   if (elSetClickReload instanceof HTMLInputElement) {
     elSetClickReload.addEventListener("change", () => {
-      setSetClickReload(!!elSetClickReload.checked).catch((e) => {
-        elHint.textContent = "Set-click reload save failed: " + String(e && (e.message || e));
-      });
+      runControlAction("Set-click reload save", elSetClickReload, () => setSetClickReload(!!elSetClickReload.checked));
     });
   }
   if (elPageSetChat instanceof HTMLSelectElement) {

@@ -1256,7 +1256,13 @@ export function makeChromeLivePopupViewRenderSource() {
     const scriptColResizer = document.createElement("span");
     scriptColResizer.className = "script-col-resizer";
     scriptColResizer.title = "Resize Scripts column";
+    scriptColResizer.tabIndex = 0;
+    scriptColResizer.setAttribute("role", "separator");
+    scriptColResizer.setAttribute("aria-orientation", "vertical");
     scriptColResizer.setAttribute("aria-label", "Resize Scripts column");
+    scriptColResizer.setAttribute("aria-valuemin", "248");
+    scriptColResizer.setAttribute("aria-valuemax", "620");
+    scriptColResizer.setAttribute("aria-valuenow", String(scriptColWidth));
     globalHeadScript.appendChild(scriptColResizer);
 
     const globalMetricsHeadScroll = document.createElement("div");
@@ -1279,7 +1285,14 @@ export function makeChromeLivePopupViewRenderSource() {
         resizer.className = "metrics-col-resizer";
         resizer.dataset.colResizeIdx = String(colIdx);
         resizer.dataset.colResizeKey = String(col && col.key || "");
-        resizer.title = "Resize column";
+        resizer.title = "Resize " + col.label + " column";
+        resizer.tabIndex = 0;
+        resizer.setAttribute("role", "separator");
+        resizer.setAttribute("aria-orientation", "vertical");
+        resizer.setAttribute("aria-label", resizer.title);
+        resizer.setAttribute("aria-valuemin", "42");
+        resizer.setAttribute("aria-valuemax", "640");
+        resizer.setAttribute("aria-valuenow", String(currentColWidths[colIdx]));
         cell.appendChild(resizer);
       }
       globalHeadMetrics.appendChild(cell);
@@ -1316,6 +1329,7 @@ export function makeChromeLivePopupViewRenderSource() {
     const metricsSlider = document.createElement("input");
     metricsSlider.type = "range";
     metricsSlider.className = "metrics-slider";
+    metricsSlider.setAttribute("aria-label", "Scroll metrics columns horizontally");
     metricsSlider.min = "0";
     metricsSlider.max = "0";
     metricsSlider.step = "1";
@@ -1499,11 +1513,15 @@ export function makeChromeLivePopupViewRenderSource() {
         next[key] = normalizeColWidth(currentColWidths[i], currentColWidths[i]);
       }
       colWidthMap = normalizeColWidthMap(next);
-      storageSetColWidthMap(colWidthMap).catch(() => {});
+      storageSetColWidthMap(colWidthMap).catch(() => {
+        elHint.textContent = "Column width changed, but layout could not be saved.";
+      });
     };
     const persistScriptColumnWidth = () => {
       scriptColWidth = normalizeScriptColWidth(scriptColWidth, 248);
-      storageSetScriptColWidth(scriptColWidth).catch(() => {});
+      storageSetScriptColWidth(scriptColWidth).catch(() => {
+        elHint.textContent = "Column width changed, but layout could not be saved.";
+      });
     };
     const startColumnResize = (ev, idx, handleEl) => {
       if (!(ev instanceof PointerEvent)) return;
@@ -1519,6 +1537,7 @@ export function makeChromeLivePopupViewRenderSource() {
         if (mv.pointerId !== pointerId) return;
         const delta = (Number(mv.clientX) || 0) - startX;
         currentColWidths[idx] = normalizeColWidth(startW + delta, startW);
+        if (handleEl) handleEl.setAttribute("aria-valuenow", String(currentColWidths[idx]));
         applyColumnLayout();
         syncMetricsSlider();
       };
@@ -1557,6 +1576,7 @@ export function makeChromeLivePopupViewRenderSource() {
         if (mv.pointerId !== pointerId) return;
         const delta = (Number(mv.clientX) || 0) - startX;
         scriptColWidth = normalizeScriptColWidth(startW + delta, startW);
+        if (handleEl) handleEl.setAttribute("aria-valuenow", String(scriptColWidth));
         applyScriptColumnWidth();
         applyFixedScriptAnchors();
         syncMetricsSlider();
@@ -1587,6 +1607,19 @@ export function makeChromeLivePopupViewRenderSource() {
       ev.preventDefault();
       startScriptResize(ev, scriptColResizer);
     });
+    scriptColResizer.addEventListener("keydown", (ev) => {
+      if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+      ev.preventDefault();
+      const delta = ev.key === "ArrowRight" ? 10 : -10;
+      const startW = normalizeScriptColWidth(scriptColWidth, 248);
+      scriptColWidth = normalizeScriptColWidth(startW + delta, startW);
+      if (scriptColWidth === startW) return;
+      scriptColResizer.setAttribute("aria-valuenow", String(scriptColWidth));
+      applyScriptColumnWidth();
+      applyFixedScriptAnchors();
+      syncMetricsSlider();
+      persistScriptColumnWidth();
+    });
     globalHeadMetrics.addEventListener("pointerdown", (ev) => {
       const target = ev.target;
       if (!(target instanceof Element)) return;
@@ -1595,6 +1628,22 @@ export function makeChromeLivePopupViewRenderSource() {
       ev.preventDefault();
       const idx = Number(handle.getAttribute("data-col-resize-idx") || "");
       startColumnResize(ev, idx, handle);
+    });
+    globalHeadMetrics.addEventListener("keydown", (ev) => {
+      if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+      const handle = ev.target;
+      if (!(handle instanceof HTMLElement) || !handle.classList.contains("metrics-col-resizer")) return;
+      const idx = Number(handle.getAttribute("data-col-resize-idx") || "");
+      if (!Number.isInteger(idx) || idx < 0 || idx >= currentColWidths.length) return;
+      ev.preventDefault();
+      const delta = ev.key === "ArrowRight" ? 10 : -10;
+      const startW = normalizeColWidth(currentColWidths[idx], currentColWidths[idx]);
+      currentColWidths[idx] = normalizeColWidth(startW + delta, startW);
+      if (currentColWidths[idx] === startW) return;
+      handle.setAttribute("aria-valuenow", String(currentColWidths[idx]));
+      applyColumnLayout();
+      syncMetricsSlider();
+      persistColumnLayout();
     });
     linkScriptScrollTable(tableScriptScrollFollowers);
     for (const node of tableMetricScrollFollowers) {
