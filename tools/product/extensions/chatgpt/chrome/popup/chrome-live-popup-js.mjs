@@ -234,8 +234,11 @@ export function makeChromeLivePopupJs({
   async function refreshProviderPermissionUi() {
     try {
       const state = await sendIdentityRequest(IDENTITY_GET_DERIVED_STATE_ACTION);
-      const cfg = state && state.providerConfigStatus && typeof state.providerConfigStatus === "object"
-        ? state.providerConfigStatus
+      const status = state && state.ok === true && state.derivedState && typeof state.derivedState === "object" && !Array.isArray(state.derivedState)
+        ? state.derivedState.providerConfigStatus
+        : null;
+      const cfg = status && typeof status === "object" && !Array.isArray(status)
+        ? status
         : {};
       const visible = shouldShowProviderPermissionGrant(cfg);
       setProviderPermissionPanelVisible(visible);

@@ -187,6 +187,85 @@ function emittedPopupJs() {
   });
 }
 
+async function assertProviderPermissionUiContract() {
+  const popup = emittedPopupJs();
+  const start = popup.indexOf("  function sendIdentityRequest(action, extra = {}) {");
+  const end = popup.indexOf("  function applyLeftbarCollapsed(", start);
+  assert(start > 0 && end > start, "emitted provider-permission UI functions missing");
+
+  class FakeElement {
+    constructor() { this.hidden = true; this.textContent = ""; }
+  }
+  class FakeButton extends FakeElement {
+    constructor() { super(); this.disabled = true; }
+  }
+  const panel = new FakeElement();
+  const button = new FakeButton();
+  const status = new FakeElement();
+  let response;
+  const actions = [];
+  const context = {
+    chrome: { runtime: {
+      lastError: null,
+      sendMessage(message, callback) { actions.push(message.req.action); callback(response); },
+    } },
+    MSG_IDENTITY: "h2o-ext-identity:v1",
+    IDENTITY_GET_DERIVED_STATE_ACTION: "identity:get-derived-state",
+    elProviderPermissionPanel: panel,
+    elProviderPermissionButton: button,
+    elProviderPermissionStatus: status,
+    HTMLElement: FakeElement,
+    HTMLButtonElement: FakeButton,
+    Promise, String, Array,
+  };
+  vm.runInNewContext(popup.slice(start, end) + "\nglobalThis.refresh = refreshProviderPermissionUi;", context,
+    { filename: "generated-dev-controls-provider-permission-ui.js" });
+
+  const providerStatus = {
+    providerKind: "supabase",
+    providerMode: "provider_backed",
+    providerConfigured: true,
+    valid: true,
+    permissionRequired: true,
+    permissionReady: false,
+    permissionHostKind: "exact_supabase_project",
+    phaseNetworkEnabled: true,
+  };
+  const check = async (value, hidden, disabled, message) => {
+    response = value;
+    await context.refresh();
+    assert.equal(panel.hidden, hidden, "provider-permission panel visibility changed");
+    assert.equal(button.disabled, disabled, "provider-permission button state changed");
+    assert.equal(status.textContent, message, "provider-permission status changed");
+    assert.equal(actions.at(-1), "identity:get-derived-state", "popup requested the wrong identity action");
+  };
+
+  await check({ ok: true, derivedState: { providerConfigStatus: providerStatus } },
+    false, false, "Exact provider permission is required.");
+  await check({ ok: true, derivedState: { providerConfigStatus: { ...providerStatus, permissionReady: true } } },
+    true, true, "Provider permission granted.");
+  for (const providerMode of ["local_dev", "mock"]) {
+    await check({ ok: true, derivedState: { providerConfigStatus: { ...providerStatus, providerMode } } },
+      true, true, "Provider permission unavailable.");
+  }
+  for (const malformed of [
+    null,
+    { ok: false, derivedState: { providerConfigStatus: providerStatus } },
+    { ok: true },
+    { ok: true, derivedState: null },
+    { ok: true, derivedState: [] },
+    { ok: true, derivedState: { providerConfigStatus: null } },
+    { ok: true, derivedState: { providerConfigStatus: "malformed" } },
+    { ok: true, derivedState: { providerConfigStatus: [] } },
+    { ok: true, providerConfigStatus: providerStatus },
+    { ok: true, providerConfigStatus: providerStatus, derivedState: { providerConfigStatus: { ...providerStatus, providerMode: "mock" } } },
+  ]) {
+    await check({ ok: true, derivedState: { providerConfigStatus: providerStatus } },
+      false, false, "Exact provider permission is required.");
+    await check(malformed, true, true, "Provider permission unavailable.");
+  }
+}
+
 // Developer-facing async controls once launched floating promises: a rejection was
 // silent and a rapid second click could race the first. They now go through one
 // shared presentation guard. This proves the wiring AND executes the emitted guard.
@@ -1396,12 +1475,19 @@ function assertGenerated() {
   syntax(bg, "generated bg.js"); syntax(loader, "generated loader.js");
 }
 
+if (process.argv.includes("--provider-permission")) {
+  await assertProviderPermissionUiContract();
+  console.log(JSON.stringify({ ok: true, check: "provider-permission-ui-contract" }));
+  process.exit(0);
+}
+
 assertFileScope();
 assertTitleState();
 assertVariantIsolation();
 assertWorkspaceContract();
 assertTitleClickTimingContract();
 await assertControlActionGuard();
+await assertProviderPermissionUiContract();
 assertWidthStorageRenderGuard();
 assertResizerFocusAcrossRender();
 await assertMainCollectorChangeDriven();
