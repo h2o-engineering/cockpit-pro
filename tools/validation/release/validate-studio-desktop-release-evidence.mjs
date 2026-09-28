@@ -104,7 +104,7 @@ try {
     return [kind, artifact];
   }));
   const decision = sealed(synthetic(SCHEMAS.decision, {
-    decisionType: 'rc', decisionAuthority: 'HDA/Product', releaseId, rcId,
+    decisionType: 'RC_DESIGNATION', decisionAuthority: 'HDA/Product', releaseId, rcId,
     managementCommit: 'b'.repeat(40), recordPath: 'missions/synthetic-m03/decision.md',
     decisionDigest: `sha256:${'c'.repeat(64)}`,
     approvedAssetObjectIds: [artifacts.app.objectId, artifacts.dmg.objectId],
@@ -130,9 +130,9 @@ try {
     decisionDigest: `sha256:${'c'.repeat(64)}`,
     approvedAssetObjectIds: [artifacts.app.objectId, artifacts.dmg.objectId],
   };
-  const releaseDecision = sealed(synthetic(SCHEMAS.decision, { ...decisionBase, decisionType: 'release', rcId }));
-  const tagDecision = sealed(synthetic(SCHEMAS.decision, { ...decisionBase, decisionType: 'tag' }));
-  const publicationDecision = sealed(synthetic(SCHEMAS.decision, { ...decisionBase, decisionType: 'publication' }));
+  const releaseDecision = sealed(synthetic(SCHEMAS.decision, { ...decisionBase, decisionType: 'RELEASE_APPROVAL', rcId }));
+  const tagDecision = sealed(synthetic(SCHEMAS.decision, { ...decisionBase, decisionType: 'TAG_CREATION' }));
+  const publicationDecision = sealed(synthetic(SCHEMAS.decision, { ...decisionBase, decisionType: 'PUBLICATION_DECISION' }));
   const tag = sealed(synthetic(SCHEMAS.tag, {
     releaseId, tag: `component/${releaseId}`, targetCommit: sourceCommit,
     refObjectId: sourceCommit, tagObjectId: null,
@@ -171,8 +171,10 @@ try {
   }));
   const copy = sealed(synthetic(SCHEMAS.copy, {
     releaseId, copyId: 'SYNTHETIC_COPY', sourceLocator: 'SYNTHETIC_PRIMARY',
-    targetLocator: 'SYNTHETIC_OTHER_HOST', sourceHostId: 'SYNTHETIC_HOST_A',
-    targetHostId: 'SYNTHETIC_HOST_B', copyDigest: `sha256:${'d'.repeat(64)}`,
+    targetLocator: 'SYNTHETIC_OTHER_DEVICE', sourceHostId: 'SYNTHETIC_HOST_A',
+    targetHostId: 'SYNTHETIC_HOST_A', sourceDeviceId: 'SYNTHETIC_DEVICE_A',
+    targetDeviceId: 'SYNTHETIC_DEVICE_B', sourceFailureDomainId: 'SYNTHETIC_DOMAIN_A',
+    targetFailureDomainId: 'SYNTHETIC_DOMAIN_B', copyDigest: `sha256:${'d'.repeat(64)}`,
     operator: 'SYNTHETIC_OTHER_OPERATOR', observedAtUtc: '2026-09-28T12:06:00Z',
     objectIds: [build.objectId, artifacts.app.objectId, artifacts.dmg.objectId],
   }));
@@ -255,15 +257,89 @@ try {
     childSchema: SCHEMAS.build, childSemanticId: `studio-desktop@${version}`, childObjectId: successorBuild.objectId,
     synthetic: true, disposition: 'supersede', supersedesObjectId: build.objectId,
   });
-  assertCurrentObject([...entries, successor], successorBuild.objectId, { mode: 'synthetic' });
-  rejected('SUPERSEDED_AS_CURRENT', () => assertCurrentObject([...entries, successor], build.objectId, { mode: 'synthetic' }), /historical/);
-  const withdrawal = createIndexEntry({
-    releaseId, sequence: entries.length + 2, previousEntryDigest: `sha256:${successor.digest}`,
-    childSchema: SCHEMAS.decision, childSemanticId: releaseId, childObjectId: wrongDecision.objectId,
-    synthetic: true, disposition: 'withdraw',
-  });
-  assert.equal(resolveIndexState([...entries, successor, withdrawal], { mode: 'synthetic' }).withdrawn, true);
-  rejected('WITHDRAWN_AS_CURRENT', () => assertCurrentObject([...entries, successor, withdrawal], successorBuild.objectId, { mode: 'synthetic' }), /withdrawn/);
+  const successorObjects = new Map([...objects, [successorBuild.objectId, successorBuild]]);
+  const successorEntries = [...entries, successor];
+  assertCurrentObject(successorEntries, successorBuild.objectId, { mode: 'synthetic', objects: successorObjects });
+  rejected('SUPERSEDED_AS_CURRENT', () => assertCurrentObject(successorEntries, build.objectId, { mode: 'synthetic', objects: successorObjects }), /historical/);
+
+  // A same-host copy is schema-valid when physical devices and failure domains differ.
+  assert.deepEqual(verifySealedEvidence(copy, { mode: 'synthetic' }), copy.payload);
+  rejected('COPY_DIFFERENT_HOSTS_SAME_DEVICE_DOMAIN', () => sealed({ ...copy.payload,
+    targetHostId: 'SYNTHETIC_HOST_B', targetDeviceId: copy.payload.sourceDeviceId,
+    targetFailureDomainId: copy.payload.sourceFailureDomainId,
+  }), /copy devices not independent/);
+  rejected('COPY_SAME_HOST_SAME_DEVICE', () => sealed({ ...copy.payload,
+    targetDeviceId: copy.payload.sourceDeviceId,
+  }), /copy devices not independent/);
+  rejected('COPY_DIFFERENT_LOCATORS_SAME_DOMAIN', () => sealed({ ...copy.payload,
+    targetFailureDomainId: copy.payload.sourceFailureDomainId,
+  }), /copy failure domains not independent/);
+  rejected('COPY_MISSING_DEVICE', () => {
+    const { sourceDeviceId, ...rest } = copy.payload;
+    return sealed(rest);
+  }, /sourceDeviceId: missing/);
+  rejected('COPY_MISSING_FAILURE_DOMAIN', () => {
+    const { targetFailureDomainId, ...rest } = copy.payload;
+    return sealed(rest);
+  }, /targetFailureDomainId: missing/);
+  console.log('COPY_SAME_HOST_DISTINCT_DEVICE_MODEL=PASS');
+
+  function dispositionEntry(chain, child, disposition, targetObjectId) {
+    return createIndexEntry({ releaseId, sequence: chain.length + 1,
+      previousEntryDigest: `sha256:${chain.at(-1).digest}`, childSchema: child.payload.schema,
+      childSemanticId: releaseId, childObjectId: child.objectId, synthetic: true,
+      disposition, ...(targetObjectId ? { supersedesObjectId: targetObjectId } : {}),
+    });
+  }
+  const withdrawalDecision = sealed(synthetic(SCHEMAS.decision, {
+    ...decisionBase, decisionType: 'RELEASE_WITHDRAWAL', targetObjectId: releaseDecision.objectId,
+  }));
+  const withdrawal = dispositionEntry(successorEntries, withdrawalDecision, 'withdraw', releaseDecision.objectId);
+  const withdrawalObjects = new Map([...successorObjects, [withdrawalDecision.objectId, withdrawalDecision]]);
+  const observedWithdrawal = dispositionEntry(successorEntries, withdrawalDecision, 'observe');
+  assert.equal(resolveIndexState([...successorEntries, observedWithdrawal],
+    { mode: 'synthetic', objects: withdrawalObjects }).withdrawn, false);
+  rejected('BARE_RELEASE_WITHDRAWAL', () => dispositionEntry(successorEntries, withdrawalDecision, 'withdraw'), /supersedesObjectId/);
+  rejected('WITHDRAWAL_BOUND_TO_NON_WITHDRAWAL_DECISION', () =>
+    validateIndexChain([...successorEntries, dispositionEntry(successorEntries, releaseDecision, 'withdraw', releaseDecision.objectId)],
+      { mode: 'synthetic', objects: successorObjects }), /Release withdrawal needs matching/);
+  assert.equal(resolveIndexState([...successorEntries, withdrawal], { mode: 'synthetic', objects: withdrawalObjects }).withdrawn, true);
+  rejected('WITHDRAWAL_TARGET_MISMATCH', () =>
+    validateIndexChain([...successorEntries, dispositionEntry(successorEntries, withdrawalDecision, 'withdraw', decision.objectId)],
+      { mode: 'synthetic', objects: withdrawalObjects }), /Release withdrawal needs matching/);
+  rejected('WITHDRAWN_AS_CURRENT', () => assertCurrentObject([...successorEntries, withdrawal], successorBuild.objectId,
+    { mode: 'synthetic', objects: withdrawalObjects }), /withdrawn/);
+
+  const rejectionDecision = sealed(synthetic(SCHEMAS.decision, {
+    ...decisionBase, decisionType: 'RC_REJECTION', rcId, targetObjectId: rc.objectId,
+  }));
+  const rejectionObjects = new Map([...objects, [rejectionDecision.objectId, rejectionDecision]]);
+  rejected('BARE_RC_REJECTION', () => dispositionEntry(entries, rejectionDecision, 'reject'), /supersedesObjectId/);
+  rejected('RC_REJECTION_WRONG_DECISION_KIND', () =>
+    validateIndexChain([...entries, dispositionEntry(entries, releaseDecision, 'reject', rc.objectId)],
+      { mode: 'synthetic', objects }), /RC rejection needs matching/);
+  const rejection = dispositionEntry(entries, rejectionDecision, 'reject', rc.objectId);
+  assert.equal(validateIndexChain([...entries, rejection], { mode: 'synthetic', objects: rejectionObjects }), true);
+  assert.equal(resolveIndexState([...entries, rejection], { mode: 'synthetic', objects: rejectionObjects }).current.has(rc.objectId), false);
+
+  const supersessionDecision = sealed(synthetic(SCHEMAS.decision, {
+    ...decisionBase, decisionType: 'RELEASE_SUPERSESSION', targetObjectId: releaseDecision.objectId,
+  }));
+  const supersessionObjects = new Map([...objects, [supersessionDecision.objectId, supersessionDecision]]);
+  rejected('RELEASE_SUPERSESSION_WITHOUT_AUTHORITY_REFERENCE', () =>
+    dispositionEntry(entries, supersessionDecision, 'supersede'), /supersedesObjectId/);
+  const releaseSupersession = dispositionEntry(entries, supersessionDecision, 'supersede', releaseDecision.objectId);
+  assert.equal(resolveIndexState([...entries, releaseSupersession],
+    { mode: 'synthetic', objects: supersessionObjects }).releaseSuperseded, true);
+  rejected('TECHNICAL_SUPERSESSION_CANNOT_FORGE_DECISION', () =>
+    validateIndexChain([...entries, createIndexEntry({
+      releaseId, sequence: entries.length + 1, previousEntryDigest: `sha256:${entries.at(-1).digest}`,
+      childSchema: SCHEMAS.build, childSemanticId: `studio-desktop@${version}`,
+      childObjectId: successorBuild.objectId, synthetic: true,
+      disposition: 'supersede', supersedesObjectId: releaseDecision.objectId,
+    })], { mode: 'synthetic', objects: successorObjects }), /technical supersession cannot change/);
+  rejected('EVIDENCE_AUTHORITY_EFFECT_NON_NONE', () => sealed({ ...withdrawalDecision.payload, authorityEffect: 'RELEASE_WITHDRAWAL' }), /evidence has no authority effect/);
+  rejected('SYNTHETIC_AUTHORITY_DECISION_AS_REAL', () => verifySealedEvidence(withdrawalDecision), /synthetic object presented as real/);
   rejected('SYNTHETIC_AS_REAL_OBJECT', () => verifySealedEvidence(build), /synthetic object presented as real/);
   rejected('SYNTHETIC_AS_REAL_INDEX', () => validateIndexChain(entries, { objects }), /synthetic index presented as real/);
   console.log('SCHEMA_VALIDATION=PASS');

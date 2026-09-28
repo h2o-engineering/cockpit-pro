@@ -63,8 +63,23 @@ entry's `sha256:<digest>`. Gaps, duplicate sequences, forks, predecessor
 mismatches and overwrites fail. Entries bind child schema, semantic ID and
 content object ID. Supersession, rejection and withdrawal append new entries;
 prior observations remain historical. Current state is resolved from the
-verified predecessor chain and disposition, never filename order or a mutable
-`latest.json`.
+verified predecessor chain **and sealed HDA/Product decision references**,
+never a bare disposition string, filename order or a mutable `latest.json`.
+Every entry retains `authorityEffect: "NONE"`.
+
+Decision references use explicit kinds `RC_DESIGNATION`, `RC_REJECTION`,
+`RELEASE_APPROVAL`, `RELEASE_SUPERSESSION`, `RELEASE_WITHDRAWAL`,
+`PUBLICATION_DECISION` and `TAG_CREATION`. RC rejection binds its exact RC
+object; Release supersession and withdrawal bind the exact predecessor Release
+approval or supersession decision object. The sealed reference includes
+`targetObjectId`, which must equal the index entry's `supersedesObjectId`.
+`reject` requires an `RC_REJECTION` child, `withdraw` requires a
+`RELEASE_WITHDRAWAL` child, and Release-level `supersede` requires a
+`RELEASE_SUPERSESSION` child. A technical evidence supersession may replace
+only evidence of the same technical schema and semantic identity; it cannot
+change RC/Release disposition. Missing, mismatched or unsealed decisions fail
+closed. Neither a decision-reference object nor its index entry grants the
+decision it records; the cited Management/HDA record remains authoritative.
 
 Every T03 test fixture carries `synthetic: true` and `authorityEffect: "NONE"`.
 Real/effective validation rejects any synthetic object or index entry. Such
@@ -148,5 +163,11 @@ artifact substitution, broken predecessor, missing/corrupt independent copy,
 withdrawn state, or synthetic data presented as real fails closed. Slice A
 allows only disposable synthetic validation. T04 real-build and recovery proof,
 physical storage and copy execution remain separately gated.
-Copy attestation identifies distinct source and destination locators and hosts;
-distinct strings alone are not T04 proof of independent failure domains.
+Copy attestation records claimed source/target locator, host, physical device
+and failure-domain identities. Locators, devices and failure domains must each
+differ. Source and target **may share one host** when their physical devices
+and failure domains differ; different hosts alone do not prove independence.
+The T03 validator checks these claims as schema data only. T04 must verify
+actual device and failure-domain identity against Filesystem authority before
+an independent copy can count for readiness. No current Mac or Intenso device
+identifier is a universal schema constant.

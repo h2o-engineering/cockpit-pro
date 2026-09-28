@@ -27,6 +27,8 @@ const RC_ID = new RegExp(`^studio-desktop/v(${SEMVER})/rc\\.([1-9][0-9]*)$`);
 const TAG = new RegExp(`^component/studio-desktop/v(${SEMVER})$`);
 const UTC = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z$/;
 const KINDS = new Map(Object.entries(SCHEMAS).map(([kind, schema]) => [schema, kind]));
+const DECISIONS = new Set(['RC_DESIGNATION', 'RC_REJECTION', 'RELEASE_APPROVAL',
+  'RELEASE_SUPERSESSION', 'RELEASE_WITHDRAWAL', 'PUBLICATION_DECISION', 'TAG_CREATION']);
 
 function need(condition, message) {
   if (!condition) throw new Error(message);
@@ -244,8 +246,8 @@ export function validateEvidence(payload, { mode = 'real' } = {}) {
       break;
     }
     case 'decision':
-      base(payload, SCHEMAS.decision, ['decisionType', 'decisionAuthority', 'releaseId', 'managementCommit', 'recordPath', 'decisionDigest', 'approvedAssetObjectIds'], ['rcId']);
-      need(['rc', 'release', 'publication', 'tag'].includes(payload.decisionType), 'decisionType invalid');
+      base(payload, SCHEMAS.decision, ['decisionType', 'decisionAuthority', 'releaseId', 'managementCommit', 'recordPath', 'decisionDigest', 'approvedAssetObjectIds'], ['rcId', 'targetObjectId']);
+      need(DECISIONS.has(payload.decisionType), 'decisionType invalid');
       need(payload.decisionAuthority === 'HDA/Product', 'decision authority mismatch');
       releaseId(payload.releaseId);
       matches(payload.managementCommit, COMMIT, 'managementCommit');
@@ -255,9 +257,12 @@ export function validateEvidence(payload, { mode = 'real' } = {}) {
       need(Array.isArray(payload.approvedAssetObjectIds), 'approvedAssetObjectIds required');
       payload.approvedAssetObjectIds.forEach((id) => matches(id, OBJECT_ID, 'approved asset'));
       need(new Set(payload.approvedAssetObjectIds).size === payload.approvedAssetObjectIds.length, 'duplicate approved asset');
-      if (payload.decisionType === 'rc' || payload.decisionType === 'release') {
+      if (['RC_DESIGNATION', 'RC_REJECTION', 'RELEASE_APPROVAL'].includes(payload.decisionType)) {
         need(rcId(payload.rcId) === releaseId(payload.releaseId), 'approved RC/decision mismatch');
       } else need(!Object.hasOwn(payload, 'rcId'), 'unexpected RC decision binding');
+      if (['RC_REJECTION', 'RELEASE_SUPERSESSION', 'RELEASE_WITHDRAWAL'].includes(payload.decisionType)) {
+        matches(payload.targetObjectId, OBJECT_ID, 'decision targetObjectId');
+      } else need(!Object.hasOwn(payload, 'targetObjectId'), 'unexpected decision target');
       break;
     case 'rc': {
       base(payload, SCHEMAS.rc, ['rcId', 'releaseId', 'sourceCommit', 'buildObjectId', 'artifactObjectIds', 'decisionObjectId']);
@@ -318,12 +323,15 @@ export function validateEvidence(payload, { mode = 'real' } = {}) {
       else need(!Object.hasOwn(payload, 'predecessorObjectId'), 'deployment has activation predecessor');
       break;
     case 'copy':
-      base(payload, SCHEMAS.copy, ['releaseId', 'copyId', 'sourceLocator', 'targetLocator', 'sourceHostId', 'targetHostId', 'copyDigest', 'operator', 'observedAtUtc', 'objectIds']);
+      base(payload, SCHEMAS.copy, ['releaseId', 'copyId', 'sourceLocator', 'targetLocator', 'sourceHostId', 'targetHostId', 'sourceDeviceId', 'targetDeviceId', 'sourceFailureDomainId', 'targetFailureDomainId', 'copyDigest', 'operator', 'observedAtUtc', 'objectIds']);
       releaseId(payload.releaseId); string(payload.copyId, 'copyId');
       string(payload.sourceLocator, 'sourceLocator'); string(payload.targetLocator, 'targetLocator');
       need(payload.sourceLocator !== payload.targetLocator, 'copy not independent');
       string(payload.sourceHostId, 'sourceHostId'); string(payload.targetHostId, 'targetHostId');
-      need(payload.sourceHostId !== payload.targetHostId, 'copy hosts not independent');
+      string(payload.sourceDeviceId, 'sourceDeviceId'); string(payload.targetDeviceId, 'targetDeviceId');
+      string(payload.sourceFailureDomainId, 'sourceFailureDomainId'); string(payload.targetFailureDomainId, 'targetFailureDomainId');
+      need(payload.sourceDeviceId !== payload.targetDeviceId, 'copy devices not independent');
+      need(payload.sourceFailureDomainId !== payload.targetFailureDomainId, 'copy failure domains not independent');
       matches(payload.copyDigest, SHA, 'copyDigest'); string(payload.operator, 'operator'); utc(payload.observedAtUtc, 'observedAtUtc');
       need(Array.isArray(payload.objectIds) && payload.objectIds.length > 0, 'copy objectIds required');
       payload.objectIds.forEach((id) => matches(id, OBJECT_ID, 'copy objectId'));
@@ -372,7 +380,7 @@ export function createIndexEntry({ releaseId: id, sequence, previousEntryDigest,
   if ([SCHEMAS.decision, SCHEMAS.github, SCHEMAS.publication, SCHEMAS.delivery].includes(childSchema)) need(childSemanticId === id, 'child/release identity mismatch');
   need(typeof synthetic === 'boolean', 'explicit synthetic state required');
   need(['observe', 'supersede', 'reject', 'withdraw'].includes(disposition), 'disposition invalid');
-  if (disposition === 'supersede' || disposition === 'reject') matches(supersedesObjectId, OBJECT_ID, 'supersedesObjectId');
+  if (disposition !== 'observe') matches(supersedesObjectId, OBJECT_ID, 'supersedesObjectId');
   else need(supersedesObjectId === undefined, 'unexpected supersession target');
   const payload = {
     schema: SCHEMAS.index, synthetic, authorityEffect: 'NONE', releaseId: id,
@@ -409,6 +417,38 @@ export function validateIndexChain(entries, { mode = 'real', objects } = {}) {
       if (childPayload.releaseId) need(childPayload.releaseId === id, 'index child release mismatch');
       if (childPayload.componentVersion) need(id === `studio-desktop/v${childPayload.componentVersion}`, 'index child version mismatch');
     }
+    if (payload.disposition !== 'observe') {
+      need(objects instanceof Map, 'disposition requires sealed child objects');
+      const child = objects.get(payload.childObjectId);
+      const target = objects.get(payload.supersedesObjectId);
+      need(child && target, 'disposition child or target missing');
+      const childPayload = verifySealedEvidence(child, { mode });
+      const targetPayload = verifySealedEvidence(target, { mode });
+      need(entries.slice(0, i).some((priorEntry) => priorEntry.payload.childObjectId === payload.supersedesObjectId),
+        'disposition target not previously indexed');
+      if (payload.disposition === 'reject') {
+        need(childPayload.schema === SCHEMAS.decision && childPayload.decisionType === 'RC_REJECTION' &&
+          targetPayload.schema === SCHEMAS.rc && childPayload.rcId === targetPayload.rcId &&
+          childPayload.releaseId === targetPayload.releaseId && childPayload.targetObjectId === target.objectId,
+        'RC rejection needs matching HDA/Product decision reference');
+      } else if (payload.disposition === 'withdraw') {
+        need(childPayload.schema === SCHEMAS.decision && childPayload.decisionType === 'RELEASE_WITHDRAWAL' &&
+          targetPayload.schema === SCHEMAS.decision &&
+          ['RELEASE_APPROVAL', 'RELEASE_SUPERSESSION'].includes(targetPayload.decisionType) &&
+          childPayload.releaseId === targetPayload.releaseId && childPayload.targetObjectId === target.objectId,
+        'Release withdrawal needs matching HDA/Product decision reference');
+      } else if (childPayload.schema === SCHEMAS.decision && childPayload.decisionType === 'RELEASE_SUPERSESSION') {
+        need(targetPayload.schema === SCHEMAS.decision &&
+          ['RELEASE_APPROVAL', 'RELEASE_SUPERSESSION'].includes(targetPayload.decisionType) &&
+          childPayload.releaseId === targetPayload.releaseId && childPayload.targetObjectId === target.objectId,
+        'Release supersession needs matching HDA/Product decision reference');
+      } else {
+        need(childPayload.schema !== SCHEMAS.decision && targetPayload.schema !== SCHEMAS.decision &&
+          targetPayload.schema !== SCHEMAS.rc && childPayload.schema === targetPayload.schema &&
+          semanticId(childPayload) === semanticId(targetPayload),
+        'technical supersession cannot change authoritative disposition');
+      }
+    }
     const rebuilt = createIndexEntry(payload);
     need(entry.digest === rebuilt.digest && entry.indexId === rebuilt.indexId, 'index digest mismatch');
     prior = `sha256:${entry.digest}`;
@@ -420,16 +460,22 @@ export function resolveIndexState(entries, options) {
   validateIndexChain(entries, options);
   const current = new Set();
   let withdrawn = false;
+  let releaseSuperseded = false;
   for (const { payload } of entries) {
     if (payload.disposition === 'observe') current.add(payload.childObjectId);
     if (payload.disposition === 'supersede') {
       need(current.delete(payload.supersedesObjectId), 'superseded predecessor absent');
       current.add(payload.childObjectId);
+      if (options.objects.get(payload.childObjectId).payload.decisionType === 'RELEASE_SUPERSESSION') releaseSuperseded = true;
     }
     if (payload.disposition === 'reject') need(current.delete(payload.supersedesObjectId), 'rejected predecessor absent');
-    if (payload.disposition === 'withdraw') { withdrawn = true; current.clear(); }
+    if (payload.disposition === 'withdraw') {
+      need(current.delete(payload.supersedesObjectId), 'withdrawn Release predecessor absent');
+      withdrawn = true;
+      current.clear();
+    }
   }
-  return { current, withdrawn };
+  return { current, withdrawn, releaseSuperseded };
 }
 
 export function assertCurrentObject(entries, objectId, options) {
@@ -445,7 +491,7 @@ export function validateReleaseChain({ build, artifacts, decision, rc }, options
   const d = decision.payload;
   need(r.buildObjectId === build.objectId && r.sourceCommit === b.sourceCommit, 'source/build mismatch');
   need(r.releaseId === `studio-desktop/v${b.componentVersion}`, 'release/version mismatch');
-  need(r.decisionObjectId === decision.objectId && d.decisionType === 'rc' && d.rcId === r.rcId && d.releaseId === r.releaseId, 'decision-reference mismatch');
+  need(r.decisionObjectId === decision.objectId && d.decisionType === 'RC_DESIGNATION' && d.rcId === r.rcId && d.releaseId === r.releaseId, 'decision-reference mismatch');
   for (const kind of ['executable', 'app', 'dmg']) {
     const a = artifacts[kind];
     need(a && a.payload.kind === kind && r.artifactObjectIds[kind] === a.objectId, 'artifact substitution');
@@ -461,7 +507,7 @@ export function validateReleaseEvents({ build, artifacts, rc, releaseDecision, t
   for (const record of [build, rc, releaseDecision, ...Object.values(artifacts)]) verifySealedEvidence(record, options);
   const releaseIdValue = rc.payload.releaseId;
   const approved = [artifacts.app.objectId, artifacts.dmg.objectId];
-  need(releaseDecision.payload.decisionType === 'release' &&
+  need(releaseDecision.payload.decisionType === 'RELEASE_APPROVAL' &&
     releaseDecision.payload.releaseId === releaseIdValue &&
     releaseDecision.payload.rcId === rc.payload.rcId &&
     releaseDecision.payload.approvedAssetObjectIds.length === approved.length &&
@@ -470,7 +516,7 @@ export function validateReleaseEvents({ build, artifacts, rc, releaseDecision, t
   if (tag) {
     need(tagDecision, 'tag decision reference missing');
     verifySealedEvidence(tagDecision, options); verifySealedEvidence(tag, options);
-    need(tagDecision.payload.decisionType === 'tag' && tagDecision.payload.releaseId === releaseIdValue &&
+    need(tagDecision.payload.decisionType === 'TAG_CREATION' && tagDecision.payload.releaseId === releaseIdValue &&
       tag.payload.decisionObjectId === tagDecision.objectId &&
       tag.payload.releaseDecisionObjectId === releaseDecision.objectId &&
       tag.payload.tag === `component/${releaseIdValue}` &&
@@ -479,7 +525,7 @@ export function validateReleaseEvents({ build, artifacts, rc, releaseDecision, t
   if (github) {
     need(publicationDecision && tag, 'hosted state needs publication decision and tag observation');
     verifySealedEvidence(publicationDecision, options); verifySealedEvidence(github, options);
-    need(publicationDecision.payload.decisionType === 'publication' && publicationDecision.payload.releaseId === releaseIdValue &&
+    need(publicationDecision.payload.decisionType === 'PUBLICATION_DECISION' && publicationDecision.payload.releaseId === releaseIdValue &&
       publicationDecision.payload.approvedAssetObjectIds.length === approved.length &&
       approved.every((id) => publicationDecision.payload.approvedAssetObjectIds.includes(id)) &&
       github.payload.decisionObjectId === publicationDecision.objectId &&
