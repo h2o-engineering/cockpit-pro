@@ -285,6 +285,10 @@ try {
   }
   assert.equal(validateIndexChain([...entries, appendedObservation(entries, rc, rcId)],
     { mode: 'synthetic', objects }), true);
+  const observedCurrent = resolveIndexState([...entries, appendedObservation(entries, rc, rcId)],
+    { mode: 'synthetic', objects });
+  assert.equal(observedCurrent.current.has(rc.objectId), true);
+  console.log('REPEATED_CURRENT_OBSERVATION=PASS');
   const reboundRc = sealed({ ...rc.payload, sourceCommit: 'e'.repeat(40) });
   rejected('RC_ID_REBOUND_TO_SECOND_OBJECT', () =>
     validateIndexChain([...entries, appendedObservation(entries, reboundRc, rcId)],
@@ -360,6 +364,17 @@ try {
   const successorEntries = [...entries, successor];
   assertCurrentObject(successorEntries, successorBuild.objectId, { mode: 'synthetic', objects: successorObjects });
   rejected('SUPERSEDED_AS_CURRENT', () => assertCurrentObject(successorEntries, build.objectId, { mode: 'synthetic', objects: successorObjects }), /historical/);
+  const reobservedBuild = [...successorEntries,
+    appendedObservation(successorEntries, build, `studio-desktop@${version}`)];
+  assert.equal(validateIndexChain(reobservedBuild, { mode: 'synthetic', objects: successorObjects }), true);
+  const reobservedBuildState = resolveIndexState(reobservedBuild,
+    { mode: 'synthetic', objects: successorObjects });
+  assert.equal(reobservedBuildState.current.has(build.objectId), false);
+  assert.equal(reobservedBuildState.historicalObjectIds.has(build.objectId), true);
+  assert.equal(reobservedBuildState.current.has(successorBuild.objectId), true);
+  rejected('SUPERSEDED_REOBSERVATION_AS_CURRENT', () => assertCurrentObject(reobservedBuild,
+    build.objectId, { mode: 'synthetic', objects: successorObjects }), /historical/);
+  console.log('SUPERSEDED_OBJECT_REOBSERVATION_REMAINS_HISTORICAL=PASS');
 
   // A same-host copy is schema-valid when physical devices and failure domains differ.
   assert.deepEqual(verifySealedEvidence(copy, { mode: 'synthetic' }), copy.payload);
@@ -408,6 +423,15 @@ try {
       { mode: 'synthetic', objects: withdrawalObjects }), /Release withdrawal needs matching/);
   rejected('WITHDRAWN_AS_CURRENT', () => assertCurrentObject([...successorEntries, withdrawal], successorBuild.objectId,
     { mode: 'synthetic', objects: withdrawalObjects }), /withdrawn/);
+  const withdrawnEntries = [...successorEntries, withdrawal];
+  const reobservedAfterWithdrawal = [...withdrawnEntries,
+    appendedObservation(withdrawnEntries, successorBuild, `studio-desktop@${version}`)];
+  assert.equal(validateIndexChain(reobservedAfterWithdrawal, { mode: 'synthetic', objects: withdrawalObjects }), true);
+  assert.equal(resolveIndexState(reobservedAfterWithdrawal,
+    { mode: 'synthetic', objects: withdrawalObjects }).current.size, 0);
+  rejected('WITHDRAWN_RELEASE_REOBSERVATION_AS_CURRENT', () => assertCurrentObject(reobservedAfterWithdrawal,
+    successorBuild.objectId, { mode: 'synthetic', objects: withdrawalObjects }), /withdrawn/);
+  console.log('WITHDRAWN_RELEASE_REOBSERVATION=PASS');
 
   const rejectionDecision = sealed(synthetic(SCHEMAS.decision, {
     ...decisionBase, decisionType: 'RC_REJECTION', rcId, targetObjectId: rc.objectId,
@@ -420,6 +444,15 @@ try {
   const rejection = dispositionEntry(entries, rejectionDecision, 'reject', rc.objectId);
   assert.equal(validateIndexChain([...entries, rejection], { mode: 'synthetic', objects: rejectionObjects }), true);
   assert.equal(resolveIndexState([...entries, rejection], { mode: 'synthetic', objects: rejectionObjects }).current.has(rc.objectId), false);
+  const rejectedEntries = [...entries, rejection];
+  const reobservedRc = [...rejectedEntries, appendedObservation(rejectedEntries, rc, rcId)];
+  assert.equal(validateIndexChain(reobservedRc, { mode: 'synthetic', objects: rejectionObjects }), true);
+  const reobservedRcState = resolveIndexState(reobservedRc, { mode: 'synthetic', objects: rejectionObjects });
+  assert.equal(reobservedRcState.current.has(rc.objectId), false);
+  assert.equal(reobservedRcState.historicalObjectIds.has(rc.objectId), true);
+  rejected('REJECTED_RC_REOBSERVATION_AS_CURRENT', () => assertCurrentObject(reobservedRc,
+    rc.objectId, { mode: 'synthetic', objects: rejectionObjects }), /historical/);
+  console.log('REJECTED_RC_REOBSERVATION_REMAINS_HISTORICAL=PASS');
 
   const supersessionDecision = sealed(synthetic(SCHEMAS.decision, {
     ...decisionBase, decisionType: 'RELEASE_SUPERSESSION', targetObjectId: releaseDecision.objectId,
@@ -430,6 +463,15 @@ try {
   const releaseSupersession = dispositionEntry(entries, supersessionDecision, 'supersede', releaseDecision.objectId);
   assert.equal(resolveIndexState([...entries, releaseSupersession],
     { mode: 'synthetic', objects: supersessionObjects }).releaseSuperseded, true);
+  const supersessionEntries = [...entries, releaseSupersession];
+  const reobservedReleaseDecision = [...supersessionEntries,
+    appendedObservation(supersessionEntries, releaseDecision, releaseId)];
+  assert.equal(validateIndexChain(reobservedReleaseDecision,
+    { mode: 'synthetic', objects: supersessionObjects }), true);
+  const supersessionState = resolveIndexState(reobservedReleaseDecision,
+    { mode: 'synthetic', objects: supersessionObjects });
+  assert.equal(supersessionState.current.has(releaseDecision.objectId), false);
+  assert.equal(supersessionState.current.has(supersessionDecision.objectId), true);
   rejected('TECHNICAL_SUPERSESSION_CANNOT_FORGE_DECISION', () =>
     validateIndexChain([...entries, createIndexEntry({
       releaseId, sequence: entries.length + 1, previousEntryDigest: `sha256:${entries.at(-1).digest}`,

@@ -475,23 +475,33 @@ export function validateIndexChain(entries, { mode = 'real', objects } = {}) {
 export function resolveIndexState(entries, options) {
   validateIndexChain(entries, options);
   const current = new Set();
+  const historicalObjectIds = new Set();
   let withdrawn = false;
   let releaseSuperseded = false;
   for (const { payload } of entries) {
-    if (payload.disposition === 'observe') current.add(payload.childObjectId);
+    if (payload.disposition === 'observe' && !withdrawn && !historicalObjectIds.has(payload.childObjectId)) {
+      current.add(payload.childObjectId);
+    }
     if (payload.disposition === 'supersede') {
       need(current.delete(payload.supersedesObjectId), 'superseded predecessor absent');
+      historicalObjectIds.add(payload.supersedesObjectId);
+      need(!historicalObjectIds.has(payload.childObjectId), 'historical successor cannot become current');
       current.add(payload.childObjectId);
       if (options.objects.get(payload.childObjectId).payload.decisionType === 'RELEASE_SUPERSESSION') releaseSuperseded = true;
     }
-    if (payload.disposition === 'reject') need(current.delete(payload.supersedesObjectId), 'rejected predecessor absent');
+    if (payload.disposition === 'reject') {
+      need(current.delete(payload.supersedesObjectId), 'rejected predecessor absent');
+      historicalObjectIds.add(payload.supersedesObjectId);
+    }
     if (payload.disposition === 'withdraw') {
       need(current.delete(payload.supersedesObjectId), 'withdrawn Release predecessor absent');
       withdrawn = true;
+      for (const objectId of current) historicalObjectIds.add(objectId);
+      historicalObjectIds.add(payload.supersedesObjectId);
       current.clear();
     }
   }
-  return { current, withdrawn, releaseSuperseded };
+  return { current, historicalObjectIds, withdrawn, releaseSuperseded };
 }
 
 export function assertCurrentObject(entries, objectId, options) {

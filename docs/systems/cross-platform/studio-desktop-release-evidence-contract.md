@@ -64,8 +64,11 @@ starts at 1 with a null predecessor; each later entry binds the preceding
 entry's `sha256:<digest>`. Gaps, duplicate sequences, forks, predecessor
 mismatches and overwrites fail. Entries bind child schema, semantic ID and
 content object ID. Supersession, rejection and withdrawal append new entries;
-prior observations remain historical. Current state is resolved from the
-verified predecessor chain **and sealed HDA/Product decision references**,
+prior observations remain historical. Historical disposition is monotonic:
+observing the same rejected or superseded sealed object again records another
+observation but never restores currentness. After Release withdrawal, later
+observations likewise cannot restore current Release evidence. Current state
+is resolved from the verified predecessor chain **and sealed HDA/Product decision references**,
 never a bare disposition string, filename order or a mutable `latest.json`.
 Every entry retains `authorityEffect: "NONE"`.
 Within the verified index, one numbered RC semantic ID binds to exactly one
