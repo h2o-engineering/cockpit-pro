@@ -117,15 +117,32 @@ pub(crate) fn is_folder_object_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-'))
 }
 
+/// ECMAScript whitespace used by String.trim() and the folder-name /\s+/gu
+/// canonicalizer. Unicode White_Space differs at U+0085 and U+FEFF.
+fn is_js_whitespace(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0009}'..='\u{000D}'
+            | '\u{0020}'
+            | '\u{00A0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200A}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}'
+            | '\u{FEFF}'
+    )
+}
+
 /// The chat family's objectId rule (strict identifier), restated for the
-/// binding family: 1..512 characters, trimmed, no C0 control and no DEL.
+/// binding family: 1..512 Unicode code points, JS-trimmed, no Unicode Cc.
 pub(crate) fn is_chat_object_id(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= MAX_ID_LENGTH_V2
-        && value.trim() == value
-        && !value
-            .chars()
-            .any(|ch| ch.is_ascii_control() || ch == '\u{7f}')
+        && value.chars().count() <= MAX_ID_LENGTH_V2
+        && value.trim_matches(is_js_whitespace) == value
+        && !value.chars().any(char::is_control)
 }
 
 /// Canonical name form for PROJECTORS: Unicode whitespace runs collapse to one
@@ -134,7 +151,7 @@ pub(crate) fn canonical_folder_name(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     let mut in_whitespace = false;
     for ch in value.chars() {
-        if ch.is_whitespace() {
+        if is_js_whitespace(ch) {
             in_whitespace = true;
         } else {
             if in_whitespace && !output.is_empty() {

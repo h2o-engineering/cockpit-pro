@@ -196,6 +196,16 @@
         "expected": "p02-rel-folder-name-invalid"
       },
       {
+        "id": "folder-name-internal-u-feff-whitespace",
+        "objectId": "f_abc123",
+        "payload": {
+          "schema": "h2o.studio.folderCatalogState.v1",
+          "folderId": "f_abc123",
+          "name": "Stu\uFEFFdy"
+        },
+        "expected": "p02-rel-folder-name-invalid"
+      },
+      {
         "id": "folder-name-untrimmed-leading",
         "objectId": "f_abc123",
         "payload": {
@@ -649,6 +659,24 @@
         }
       },
       {
+        "id": "binding-chat-id-internal-u-feff",
+        "objectId": "chat-\uFEFFabc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-\uFEFFabc",
+          "folderId": "f_abc123"
+        }
+      },
+      {
+        "id": "binding-chat-id-multibyte-over-512-bytes",
+        "objectId": "chat-😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+          "folderId": "f_abc123"
+        }
+      },
+      {
         "id": "binding-folder-id-uuid-style",
         "objectId": "chat-abc",
         "payload": {
@@ -752,6 +780,36 @@
         "payload": {
           "schema": "h2o.studio.chatFolderBinding.v1",
           "chatId": "chat-\u0001abc",
+          "folderId": "f_abc123"
+        },
+        "expected": "p02-rel-binding-chat-id-invalid"
+      },
+      {
+        "id": "binding-chat-id-c1-control",
+        "objectId": "chat-\u0085abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-\u0085abc",
+          "folderId": "f_abc123"
+        },
+        "expected": "p02-rel-binding-chat-id-invalid"
+      },
+      {
+        "id": "binding-chat-id-leading-u-feff",
+        "objectId": "\uFEFFchat-abc",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "\uFEFFchat-abc",
+          "folderId": "f_abc123"
+        },
+        "expected": "p02-rel-binding-chat-id-invalid"
+      },
+      {
+        "id": "binding-chat-id-trailing-u-feff",
+        "objectId": "chat-abc\uFEFF",
+        "payload": {
+          "schema": "h2o.studio.chatFolderBinding.v1",
+          "chatId": "chat-abc\uFEFF",
           "folderId": "f_abc123"
         },
         "expected": "p02-rel-binding-chat-id-invalid"
