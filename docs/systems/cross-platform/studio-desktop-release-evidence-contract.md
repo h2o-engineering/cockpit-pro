@@ -110,7 +110,12 @@ The packaged executable separately supports exact invocation
 `targetOs`, `architecture`, `profile`, `governed`, `sourceDirty` and
 `executableSha256`. The mode hashes the running executable read-only before
 Tauri startup and exits nonzero if required stamped/readback data is missing
-or inconsistent. Ordinary invocation still starts Tauri.
+or inconsistent. Its `executableSha256` is raw lowercase 64-character SHA-256
+hex. Canonical build and artifact evidence digests remain `sha256:<64-lowercase-hex>`.
+Evidence validation adds the `sha256:` prefix only at the packaged-readback
+binding boundary and requires the two values to identify exactly the same
+digest. A prefixed, uppercase, malformed or mismatched packaged hash fails.
+Ordinary invocation still starts Tauri.
 Both the evidence validator and packaged-executable readback require a real
 Gregorian UTC calendar time in `YYYY-MM-DDTHH:MM:SS[.fraction]Z` form. Invalid
 month/day combinations, non-leap February 29, hour 24, minute/second 60 and

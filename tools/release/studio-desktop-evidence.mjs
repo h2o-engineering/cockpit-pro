@@ -18,6 +18,7 @@ export const SCHEMAS = Object.freeze({
 
 const HEX = '[0-9a-f]{64}';
 const SHA = new RegExp(`^sha256:${HEX}$`);
+const PACKAGED_SHA = new RegExp(`^${HEX}$`);
 const OBJECT_ID = new RegExp(`^obj:sha256:${HEX}$`);
 const COMMIT = /^[0-9a-f]{40}$/;
 const SEMVER = '(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?';
@@ -237,9 +238,12 @@ export function validateEvidence(payload, { mode = 'real' } = {}) {
       object(payload.packagedReadback, 'packagedReadback');
       keys(payload.packagedReadback, ['schema', 'componentId', 'componentVersion', 'sourceCommit', 'checkpoint', 'builtAtUtc', 'targetOs', 'architecture', 'profile', 'governed', 'sourceDirty', 'executableSha256']);
       need(payload.packagedReadback.schema === 'h2o.studio.release-evidence.packaged-build-identity.v1', 'packaged readback schema mismatch');
-      for (const field of ['componentId', 'componentVersion', 'sourceCommit', 'checkpoint', 'builtAtUtc', 'targetOs', 'architecture', 'profile', 'governed', 'sourceDirty', 'executableSha256']) {
+      matches(payload.packagedReadback.executableSha256, PACKAGED_SHA, 'packaged readback executableSha256');
+      for (const field of ['componentId', 'componentVersion', 'sourceCommit', 'checkpoint', 'builtAtUtc', 'targetOs', 'architecture', 'profile', 'governed', 'sourceDirty']) {
         need(payload[field] === payload.packagedReadback[field], `packaged readback ${field} mismatch`);
       }
+      need(payload.executableSha256 === `sha256:${payload.packagedReadback.executableSha256}`,
+        'packaged readback executableSha256 mismatch');
       break;
     case 'artifact': {
       base(payload, SCHEMAS.artifact, ['artifactId', 'kind', 'digestMethod', 'digest', 'byteSize', 'buildObjectId', 'sourceCommit', 'componentVersion', 'targetOs', 'architecture']);

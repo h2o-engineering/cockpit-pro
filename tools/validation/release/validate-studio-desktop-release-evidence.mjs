@@ -98,7 +98,8 @@ try {
   const version = '0.1.0';
   const releaseId = `studio-desktop/v${version}`;
   const rcId = `${releaseId}/rc.1`;
-  const exeDigest = `sha256:${sha256File(executablePath)}`;
+  const bareExeDigest = sha256File(executablePath);
+  const exeDigest = `sha256:${bareExeDigest}`;
   const appDigest = `sha256:${bundleTreeSha256(appPath)}`;
   const dmgDigest = `sha256:${sha256File(dmgPath)}`;
   assert.notEqual(appDigest, dmgDigest);
@@ -112,8 +113,13 @@ try {
   const build = sealed(synthetic(SCHEMAS.build, {
     ...readback, packagedReadback: {
       schema: 'h2o.studio.release-evidence.packaged-build-identity.v1', ...readback,
+      executableSha256: bareExeDigest,
     },
   }));
+  assert.equal(build.payload.executableSha256, `sha256:${build.payload.packagedReadback.executableSha256}`);
+  console.log('PACKAGED_READBACK_BARE_SHA256=PASS');
+  console.log('CANONICAL_BUILD_SHA256_PREFIXED=PASS');
+  console.log('NORMALIZED_DIGEST_EQUALITY=PASS');
   const locations = { executable: executablePath, app: appPath, dmg: dmgPath };
   const digests = { executable: exeDigest, app: appDigest, dmg: dmgDigest };
   const artifacts = Object.fromEntries(['executable', 'app', 'dmg'].map((kind) => {
@@ -215,7 +221,8 @@ try {
     tagDecision, publicationDecision, tag, github, publication };
   const foreignBuildReadback = { ...readback, checkpoint: 'FOREIGN_BUILD' };
   const foreignBuild = sealed(synthetic(SCHEMAS.build, { ...foreignBuildReadback,
-    packagedReadback: { schema: 'h2o.studio.release-evidence.packaged-build-identity.v1', ...foreignBuildReadback },
+    packagedReadback: { schema: 'h2o.studio.release-evidence.packaged-build-identity.v1',
+      ...foreignBuildReadback, executableSha256: bareExeDigest },
   }));
   rejected('RELEASE_EVENT_WITH_FOREIGN_BUILD_OBJECT', () =>
     validateReleaseEvents({ ...eventInput, build: foreignBuild }, { mode: 'synthetic' }), /source\/build mismatch/);
@@ -312,6 +319,22 @@ try {
   rejected('PACKAGED_READBACK_MISMATCH', () => sealed({ ...build.payload,
     packagedReadback: { ...build.payload.packagedReadback, sourceCommit: 'e'.repeat(40) },
   }), /packaged readback sourceCommit mismatch/);
+  const withPackagedHash = (hash) => sealed({ ...build.payload,
+    packagedReadback: { ...build.payload.packagedReadback, executableSha256: hash },
+  });
+  rejected('MISMATCHED_READBACK_DIGEST', () => withPackagedHash('f'.repeat(64)),
+    /packaged readback executableSha256 mismatch/);
+  rejected('PREFIXED_PACKAGED_READBACK_DIGEST', () => withPackagedHash(exeDigest),
+    /packaged readback executableSha256: invalid/);
+  rejected('UPPERCASE_PACKAGED_READBACK_DIGEST', () => withPackagedHash('A'.repeat(64)),
+    /packaged readback executableSha256: invalid/);
+  rejected('WRONG_LENGTH_PACKAGED_READBACK_DIGEST', () => withPackagedHash(bareExeDigest.slice(1)),
+    /packaged readback executableSha256: invalid/);
+  rejected('MALFORMED_PACKAGED_READBACK_DIGEST', () => withPackagedHash('g'.repeat(64)),
+    /packaged readback executableSha256: invalid/);
+  rejected('UNPREFIXED_CANONICAL_BUILD_DIGEST', () => sealed({ ...build.payload,
+    executableSha256: bareExeDigest,
+  }), /executableSha256: invalid/);
   rejected('OBJECT_DIGEST_MISMATCH', () => verifySealedEvidence({ ...build, objectId: `obj:sha256:${'0'.repeat(64)}` }, { mode: 'synthetic' }), /object digest mismatch/);
   rejected('SEALED_PAYLOAD_BYTES_MISMATCH', () => verifySealedEvidence({ ...build, payload: { ...build.payload, checkpoint: 'ALTERED' } }, { mode: 'synthetic' }), /payload\/bytes mismatch/);
   const badPredecessor = createIndexEntry({ ...entries[1].payload, previousEntryDigest: `sha256:${'0'.repeat(64)}` });
@@ -353,6 +376,7 @@ try {
   const successorBuild = sealed(synthetic(SCHEMAS.build, {
     ...successorReadback, packagedReadback: {
       schema: 'h2o.studio.release-evidence.packaged-build-identity.v1', ...successorReadback,
+      executableSha256: bareExeDigest,
     },
   }));
   const successor = createIndexEntry({
