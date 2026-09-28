@@ -5,6 +5,7 @@ use std::io::Read;
 use std::sync::OnceLock;
 
 const IDENTITY_SCHEMA: &str = "h2o.studio.desktop-build-identity.v1";
+const PACKAGED_IDENTITY_SCHEMA: &str = "h2o.studio.release-evidence.packaged-build-identity.v1";
 const UNSTAMPED_CHECKPOINT: &str = "UNSTAMPED";
 const HASH_UNAVAILABLE: &str = "runtime-executable-hash-unavailable";
 
@@ -22,6 +23,75 @@ pub struct DesktopBuildIdentity {
     governed: bool,
     executable_sha256: Option<String>,
     executable_sha256_error: Option<String>,
+}
+
+// Separate from DesktopBuildIdentity and its registered Tauri command: this
+// strict readback is only used by the dedicated packaged-executable CLI mode.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackagedBuildIdentity {
+    schema: &'static str,
+    component_id: &'static str,
+    component_version: &'static str,
+    source_commit: &'static str,
+    checkpoint: &'static str,
+    built_at_utc: &'static str,
+    target_os: &'static str,
+    architecture: &'static str,
+    profile: &'static str,
+    governed: bool,
+    source_dirty: bool,
+    executable_sha256: String,
+}
+
+fn stamped_bool(value: &str, name: &str) -> Result<bool, String> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!("invalid {name} stamp")),
+    }
+}
+
+pub fn packaged_release_evidence_identity() -> Result<PackagedBuildIdentity, String> {
+    let source_commit = env!("H2O_STUDIO_BUILD_SOURCE_COMMIT");
+    let checkpoint = env!("H2O_STUDIO_BUILD_CHECKPOINT");
+    let built_at_utc = env!("H2O_STUDIO_BUILD_TIMESTAMP");
+    let component_version = env!("CARGO_PKG_VERSION");
+    let profile = env!("H2O_BUILD_PROFILE");
+    let governed = stamped_bool(env!("H2O_STUDIO_BUILD_GOVERNED"), "governed")?;
+    let source_dirty = stamped_bool(env!("H2O_BUILD_DIRTY"), "dirty")?;
+
+    if source_commit.len() != 40
+        || !source_commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || source_commit != env!("H2O_BUILD_GIT_SHA")
+    {
+        return Err("missing or inconsistent source commit stamp".into());
+    }
+    if checkpoint.is_empty() || checkpoint == UNSTAMPED_CHECKPOINT {
+        return Err("missing governed checkpoint stamp".into());
+    }
+    if built_at_utc.is_empty() || !built_at_utc.contains('T') || !built_at_utc.ends_with('Z') {
+        return Err("missing UTC build timestamp stamp".into());
+    }
+    if component_version.is_empty() || profile.is_empty() || profile == "unknown" {
+        return Err("missing version or profile stamp".into());
+    }
+    let executable_sha256 = executable_hash_result()?;
+
+    Ok(PackagedBuildIdentity {
+        schema: PACKAGED_IDENTITY_SCHEMA,
+        component_id: "studio-desktop",
+        component_version,
+        source_commit,
+        checkpoint,
+        built_at_utc,
+        target_os: std::env::consts::OS,
+        architecture: runtime_architecture(),
+        profile,
+        governed,
+        source_dirty,
+        executable_sha256,
+    })
 }
 
 fn runtime_architecture() -> &'static str {
