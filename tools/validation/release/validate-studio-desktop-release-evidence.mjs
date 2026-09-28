@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  SCHEMAS, canonicalJson, canonicalBytes, verifyCanonicalBytes, sha256Bytes,
+  SCHEMAS, canonicalJson, canonicalBytes, verifyCanonicalBytes, validateUtcTimestamp, sha256Bytes,
   sha256File, bundleTreeSha256, verifyArtifactBytes, sealEvidence,
   verifySealedEvidence, createIndexEntry, validateIndexChain, resolveIndexState,
   assertCurrentObject, validateReleaseChain, validateReleaseEvents, validateReleaseId, validateRcId,
@@ -59,7 +59,31 @@ rejected('NONFINITE', () => canonicalJson(NaN), /non-finite/);
 rejected('LONE_SURROGATE', () => canonicalJson('\ud800'), /surrogate/);
 rejected('DUPLICATE_KEY', () => verifyCanonicalBytes(Buffer.from('{"a":1,"a":2}')), /noncanonical/);
 rejected('NONCANONICAL_JSON', () => verifyCanonicalBytes(Buffer.from('{"b":1,"a":2}')), /noncanonical/);
+assert.equal(canonicalJson([1, 2]), '[1,2]');
+const nonenumerableIndex = [1];
+Object.defineProperty(nonenumerableIndex, '0', { enumerable: false });
+assert.equal(canonicalJson(nonenumerableIndex), '[1]');
+const enumerableExtra = [1]; enumerableExtra.extra = true;
+rejected('ARRAY_EXTRA_ENUMERABLE_PROPERTY', () => canonicalJson(enumerableExtra), /sparse or extended array/);
+const nonenumerableExtra = [1];
+Object.defineProperty(nonenumerableExtra, 'extra', { value: true, enumerable: false });
+rejected('ARRAY_EXTRA_NONENUMERABLE_PROPERTY', () => canonicalJson(nonenumerableExtra), /sparse or extended array/);
+const symbolExtra = [1]; symbolExtra[Symbol('extra')] = true;
+rejected('ARRAY_SYMBOL_PROPERTY', () => canonicalJson(symbolExtra), /sparse or extended array/);
+rejected('ARRAY_HOLE', () => canonicalJson([, 1]), /sparse or extended array/);
+for (const timestamp of ['2026-02-28T23:59:59Z', '2024-02-29T00:00:00Z', '2026-01-01T00:00:00.123Z']) {
+  assert.equal(validateUtcTimestamp(timestamp), true);
+}
+for (const timestamp of ['2026-02-29T00:00:00Z', '2026-02-30T00:00:00Z',
+  '2026-13-01T00:00:00Z', '2026-01-01T24:00:00Z', '2026-01-01T00:60:00Z',
+  '2026-01-01T00:00:60Z', '2026-01-01 00:00:00Z', '2026-01-01T00:00:00.Z']) {
+  rejected(`INVALID_UTC_${timestamp}`, () => validateUtcTimestamp(timestamp), /UTC/);
+}
+assert.match(oldCommand, /fn valid_utc_timestamp\(value: &str\) -> bool/);
+assert.match(oldCommand, /if !valid_utc_timestamp\(built_at_utc\)/);
+assert.match(oldCommand, /fn utc_stamp_requires_real_gregorian_calendar_time\(\)/);
 console.log('RFC8785_CANONICALIZATION=PASS');
+console.log('STRICT_UTC_CALENDAR=PASS');
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'h2o-m03-synthetic-'));
 try {
@@ -132,7 +156,10 @@ try {
   };
   const releaseDecision = sealed(synthetic(SCHEMAS.decision, { ...decisionBase, decisionType: 'RELEASE_APPROVAL', rcId }));
   const tagDecision = sealed(synthetic(SCHEMAS.decision, { ...decisionBase, decisionType: 'TAG_CREATION' }));
-  const publicationDecision = sealed(synthetic(SCHEMAS.decision, { ...decisionBase, decisionType: 'PUBLICATION_DECISION' }));
+  const publicationDecision = sealed(synthetic(SCHEMAS.decision, {
+    ...decisionBase, decisionType: 'PUBLICATION_DECISION',
+    approvedAssetObjectIds: [artifacts.dmg.objectId],
+  }));
   const tag = sealed(synthetic(SCHEMAS.tag, {
     releaseId, tag: `component/${releaseId}`, targetCommit: sourceCommit,
     refObjectId: sourceCommit, tagObjectId: null,
@@ -146,10 +173,9 @@ try {
     updatedAtUtc: '2026-09-28T12:02:00Z', observedAtUtc: '2026-09-28T12:02:30Z',
     operator: 'SYNTHETIC_OPERATOR',
     assets: [
-      { assetId: 1, name: 'SYNTHETIC.app', byteSize: artifacts.app.payload.byteSize,
-        githubDigest: null, approvedDigest: appDigest, artifactObjectId: artifacts.app.objectId },
-      { assetId: 2, name: 'SYNTHETIC.dmg', byteSize: artifacts.dmg.payload.byteSize,
-        githubDigest: null, approvedDigest: dmgDigest, artifactObjectId: artifacts.dmg.objectId },
+      { assetId: 2, name: 'SYNTHETIC.dmg', representation: 'EXACT_FILE',
+        byteSize: artifacts.dmg.payload.byteSize, githubDigest: dmgDigest,
+        approvedDigest: dmgDigest, artifactObjectId: artifacts.dmg.objectId },
     ],
     decisionObjectId: publicationDecision.objectId,
     releaseDecisionObjectId: releaseDecision.objectId,
@@ -180,9 +206,56 @@ try {
   }));
   for (const record of [releaseDecision, tagDecision, publicationDecision, tag, github, publication, deployment, activation, copy]) verifySealedEvidence(record, { mode: 'synthetic' });
   assert.equal(validateReleaseEvents({
-    build, artifacts, rc, releaseDecision, tagDecision, publicationDecision,
+    build, artifacts, rcDesignationDecision: decision, rc, releaseDecision, tagDecision, publicationDecision,
     tag, github, publication,
   }, { mode: 'synthetic' }), true);
+  console.log('COMPLETE_RC_CHAIN_THEN_RELEASE_EVENTS=PASS');
+  console.log('VALID_EXACT_DMG_HOSTED_REPRESENTATION=PASS');
+  const eventInput = { build, artifacts, rcDesignationDecision: decision, rc, releaseDecision,
+    tagDecision, publicationDecision, tag, github, publication };
+  const foreignBuildReadback = { ...readback, checkpoint: 'FOREIGN_BUILD' };
+  const foreignBuild = sealed(synthetic(SCHEMAS.build, { ...foreignBuildReadback,
+    packagedReadback: { schema: 'h2o.studio.release-evidence.packaged-build-identity.v1', ...foreignBuildReadback },
+  }));
+  rejected('RELEASE_EVENT_WITH_FOREIGN_BUILD_OBJECT', () =>
+    validateReleaseEvents({ ...eventInput, build: foreignBuild }, { mode: 'synthetic' }), /source\/build mismatch/);
+  const foreignSourceRc = sealed({ ...rc.payload, sourceCommit: 'e'.repeat(40) });
+  rejected('RELEASE_EVENT_WITH_FOREIGN_SOURCE_COMMIT', () =>
+    validateReleaseEvents({ ...eventInput, rc: foreignSourceRc }, { mode: 'synthetic' }), /source\/build mismatch/);
+  const foreignExecutable = sealed({ ...artifacts.executable.payload, digest: `sha256:${'f'.repeat(64)}`,
+    artifactId: `studio-desktop@${version}/artifact/executable/sha256:${'f'.repeat(64)}` });
+  rejected('RELEASE_EVENT_WITH_FOREIGN_EXECUTABLE_OBJECT', () =>
+    validateReleaseEvents({ ...eventInput, artifacts: { ...artifacts, executable: foreignExecutable } },
+      { mode: 'synthetic' }), /artifact substitution/);
+  const wrongDesignation = sealed({ ...decision.payload, rcId: `${releaseId}/rc.2` });
+  rejected('RELEASE_EVENT_WITH_WRONG_RC_DESIGNATION_DECISION', () =>
+    validateReleaseEvents({ ...eventInput, rcDesignationDecision: wrongDesignation },
+      { mode: 'synthetic' }), /decision-reference mismatch/);
+  rejected('RELEASE_EVENT_WITHOUT_RC_DESIGNATION_DECISION', () =>
+    validateReleaseEvents({ ...eventInput, rcDesignationDecision: undefined },
+      { mode: 'synthetic' }), /RC designation decision required/);
+  function hostedWith(asset) { return sealed({ ...github.payload, assets: [asset] }); }
+  const exactAsset = github.payload.assets[0];
+  rejected('HOSTED_EXACT_FILE_SIZE_MISMATCH', () =>
+    validateReleaseEvents({ ...eventInput, github: hostedWith({ ...exactAsset, byteSize: exactAsset.byteSize + 1 }) },
+      { mode: 'synthetic' }), /hosted authority\/asset mismatch/);
+  rejected('HOSTED_EXACT_FILE_DIGEST_MISMATCH', () =>
+    validateReleaseEvents({ ...eventInput, github: hostedWith({ ...exactAsset, approvedDigest: `sha256:${'f'.repeat(64)}` }) },
+      { mode: 'synthetic' }), /hosted authority\/asset mismatch/);
+  rejected('HOSTED_PROVIDER_DIGEST_MISMATCH', () =>
+    validateReleaseEvents({ ...eventInput, github: hostedWith({ ...exactAsset, githubDigest: `sha256:${'f'.repeat(64)}` }) },
+      { mode: 'synthetic' }), /hosted authority\/asset mismatch/);
+  const appPublicationDecision = sealed({ ...publicationDecision.payload,
+    approvedAssetObjectIds: [artifacts.app.objectId] });
+  const hostedApp = hostedWith({ ...exactAsset, name: 'SYNTHETIC.app', artifactObjectId: artifacts.app.objectId,
+    byteSize: artifacts.app.payload.byteSize, approvedDigest: appDigest, githubDigest: appDigest });
+  rejected('APP_TREE_DIGEST_TREATED_AS_HOSTED_FILE_DIGEST', () =>
+    validateReleaseEvents({ ...eventInput, publicationDecision: appPublicationDecision,
+      github: sealed({ ...hostedApp.payload, decisionObjectId: appPublicationDecision.objectId }) },
+    { mode: 'synthetic' }), /hosted authority\/asset mismatch/);
+  rejected('TRANSFORMED_REPRESENTATION_WITHOUT_APPROVED_BYTE_IDENTITY', () =>
+    hostedWith({ ...exactAsset, representation: 'TRANSFORMED_FILE' }),
+  /transformed hosted representation lacks approved byte identity/);
   console.log('OPTIONAL_EVENT_SCHEMAS=PASS');
 
   const children = [build, artifacts.executable, artifacts.app, artifacts.dmg, decision, rc,
@@ -202,7 +275,33 @@ try {
     childObjectId: child.objectId, synthetic: true,
   }));
   assert.equal(validateIndexChain(entries, { mode: 'synthetic', objects }), true);
-  assertCurrentObject(entries, build.objectId, { mode: 'synthetic' });
+  assertCurrentObject(entries, build.objectId, { mode: 'synthetic', objects });
+  function appendedObservation(chain, child, semanticId) {
+    return createIndexEntry({ releaseId, sequence: chain.length + 1,
+      previousEntryDigest: `sha256:${chain.at(-1).digest}`,
+      childSchema: child.payload.schema, childSemanticId: semanticId,
+      childObjectId: child.objectId, synthetic: true,
+    });
+  }
+  assert.equal(validateIndexChain([...entries, appendedObservation(entries, rc, rcId)],
+    { mode: 'synthetic', objects }), true);
+  const reboundRc = sealed({ ...rc.payload, sourceCommit: 'e'.repeat(40) });
+  rejected('RC_ID_REBOUND_TO_SECOND_OBJECT', () =>
+    validateIndexChain([...entries, appendedObservation(entries, reboundRc, rcId)],
+      { mode: 'synthetic', objects: new Map([...objects, [reboundRc.objectId, reboundRc]]) }),
+  /RC ID rebound to different object/);
+  const correctedRcId = `${releaseId}/rc.2`;
+  const correctedDesignation = sealed({ ...decision.payload, rcId: correctedRcId });
+  const correctedRc = sealed({ ...rc.payload, rcId: correctedRcId,
+    decisionObjectId: correctedDesignation.objectId });
+  assert.equal(validateReleaseChain({ build, artifacts, decision: correctedDesignation, rc: correctedRc },
+    { mode: 'synthetic' }), true);
+  const correctedDecisionEntry = appendedObservation(entries, correctedDesignation, releaseId);
+  const correctedRcEntry = appendedObservation([...entries, correctedDecisionEntry], correctedRc, correctedRcId);
+  assert.equal(validateIndexChain([...entries, correctedDecisionEntry, correctedRcEntry],
+    { mode: 'synthetic', objects: new Map([...objects,
+      [correctedDesignation.objectId, correctedDesignation], [correctedRc.objectId, correctedRc]]) }), true);
+  console.log('RC_CORRECTION_WITH_NEW_RC_NUMBER=PASS');
   console.log('APPEND_ONLY_INDEX=PASS');
 
   rejected('MALFORMED_SCHEMA', () => sealed({ ...build.payload, schema: 'invalid' }), /malformed schema/);
@@ -239,10 +338,10 @@ try {
   rejected('DECISION_REFERENCE_MISMATCH', () => validateReleaseChain({ build, artifacts, decision: wrongDecision, rc: decisionRc }, { mode: 'synthetic' }), /decision-reference mismatch/);
   rejected('UNSAFE_DECISION_LOCATOR', () => sealed({ ...decision.payload, recordPath: 'missions/../other.md' }), /unsafe Management recordPath/);
   rejected('APPROVED_RC_MISMATCH', () => sealed({ ...releaseDecision.payload, rcId: `${releaseId}/rc.2`, releaseId: 'studio-desktop/v0.2.0' }), /approved RC\/decision mismatch/);
-  const wrongHosted = sealed({ ...github.payload, assets: [github.payload.assets[0]] });
-  rejected('HOSTED_ASSET_MISMATCH', () => validateReleaseEvents({ build, artifacts, rc, releaseDecision, tagDecision, publicationDecision, tag, github: wrongHosted }, { mode: 'synthetic' }), /hosted authority\/asset mismatch/);
+  const wrongHosted = sealed({ ...github.payload, assets: [] });
+  rejected('HOSTED_ASSET_MISMATCH', () => validateReleaseEvents({ build, artifacts, rcDesignationDecision: decision, rc, releaseDecision, tagDecision, publicationDecision, tag, github: wrongHosted }, { mode: 'synthetic' }), /hosted authority\/asset mismatch/);
   const draftHosted = sealed({ ...github.payload, state: 'draft', publishedAtUtc: null });
-  rejected('DRAFT_AS_PUBLICATION', () => validateReleaseEvents({ build, artifacts, rc, releaseDecision, tagDecision, publicationDecision, tag, github: draftHosted, publication }, { mode: 'synthetic' }), /publication needs published hosted state/);
+  rejected('DRAFT_AS_PUBLICATION', () => validateReleaseEvents({ build, artifacts, rcDesignationDecision: decision, rc, releaseDecision, tagDecision, publicationDecision, tag, github: draftHosted, publication }, { mode: 'synthetic' }), /publication needs published hosted state/);
   rejected('INVALID_RELEASE_GRAMMAR', () => validateReleaseId('studio-desktop/v01.0.0'), /releaseId/);
   rejected('INVALID_RC_GRAMMAR', () => validateRcId(`${releaseId}/rc.0`), /rcId/);
   rejected('INVALID_TAG_GRAMMAR', () => validateReleaseTag(`component/${releaseId}/rc.1`), /release tag/);

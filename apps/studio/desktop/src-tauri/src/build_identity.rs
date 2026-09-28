@@ -52,6 +52,63 @@ fn stamped_bool(value: &str, name: &str) -> Result<bool, String> {
     }
 }
 
+fn utc_digits(bytes: &[u8]) -> Option<u32> {
+    if !bytes.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    Some(
+        bytes
+            .iter()
+            .fold(0, |value, digit| value * 10 + u32::from(*digit - b'0')),
+    )
+}
+
+fn valid_utc_timestamp(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() < 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[bytes.len() - 1] != b'Z'
+        || (bytes.len() > 20 && (bytes[19] != b'.' || bytes.len() < 22))
+        || (bytes.len() == 20 && bytes[19] != b'Z')
+        || (bytes.len() > 20 && utc_digits(&bytes[20..bytes.len() - 1]).is_none())
+    {
+        return false;
+    }
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+        utc_digits(&bytes[0..4]),
+        utc_digits(&bytes[5..7]),
+        utc_digits(&bytes[8..10]),
+        utc_digits(&bytes[11..13]),
+        utc_digits(&bytes[14..16]),
+        utc_digits(&bytes[17..19]),
+    ) else {
+        return false;
+    };
+    if !(1..=12).contains(&month) || hour > 23 || minute > 59 || second > 59 {
+        return false;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    day >= 1 && day <= days[(month - 1) as usize]
+}
+
 pub fn packaged_release_evidence_identity() -> Result<PackagedBuildIdentity, String> {
     let source_commit = env!("H2O_STUDIO_BUILD_SOURCE_COMMIT");
     let checkpoint = env!("H2O_STUDIO_BUILD_CHECKPOINT");
@@ -70,8 +127,8 @@ pub fn packaged_release_evidence_identity() -> Result<PackagedBuildIdentity, Str
     if checkpoint.is_empty() || checkpoint == UNSTAMPED_CHECKPOINT {
         return Err("missing governed checkpoint stamp".into());
     }
-    if built_at_utc.is_empty() || !built_at_utc.contains('T') || !built_at_utc.ends_with('Z') {
-        return Err("missing UTC build timestamp stamp".into());
+    if !valid_utc_timestamp(built_at_utc) {
+        return Err("invalid UTC build timestamp stamp".into());
     }
     if component_version.is_empty() || profile.is_empty() || profile == "unknown" {
         return Err("missing version or profile stamp".into());
@@ -162,5 +219,28 @@ mod tests {
         assert!(!identity.architecture.is_empty());
         assert!(identity.executable_sha256.is_some());
         assert!(identity.executable_sha256_error.is_none());
+    }
+
+    #[test]
+    fn utc_stamp_requires_real_gregorian_calendar_time() {
+        for value in [
+            "2026-02-28T23:59:59Z",
+            "2024-02-29T00:00:00Z",
+            "2026-01-01T00:00:00.123Z",
+        ] {
+            assert!(valid_utc_timestamp(value), "{value}");
+        }
+        for value in [
+            "2026-02-29T00:00:00Z",
+            "2026-02-30T00:00:00Z",
+            "2026-13-01T00:00:00Z",
+            "2026-01-01T24:00:00Z",
+            "2026-01-01T00:60:00Z",
+            "2026-01-01T00:00:60Z",
+            "2026-01-01 00:00:00Z",
+            "2026-01-01T00:00:00.Z",
+        ] {
+            assert!(!valid_utc_timestamp(value), "{value}");
+        }
     }
 }

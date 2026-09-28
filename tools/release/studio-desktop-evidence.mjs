@@ -25,7 +25,7 @@ const VERSION = new RegExp(`^${SEMVER}$`);
 const RELEASE_ID = new RegExp(`^studio-desktop/v(${SEMVER})$`);
 const RC_ID = new RegExp(`^studio-desktop/v(${SEMVER})/rc\\.([1-9][0-9]*)$`);
 const TAG = new RegExp(`^component/studio-desktop/v(${SEMVER})$`);
-const UTC = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z$/;
+const UTC = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/;
 const KINDS = new Map(Object.entries(SCHEMAS).map(([kind, schema]) => [schema, kind]));
 const DECISIONS = new Set(['RC_DESIGNATION', 'RC_REJECTION', 'RELEASE_APPROVAL',
   'RELEASE_SUPERSESSION', 'RELEASE_WITHDRAWAL', 'PUBLICATION_DECISION', 'TAG_CREATION']);
@@ -56,10 +56,17 @@ function keys(value, required, optional = []) {
   }
 }
 
-function utc(value, label) {
-  matches(value, UTC, label);
-  need(!Number.isNaN(Date.parse(value)), `${label}: invalid UTC time`);
+export function validateUtcTimestamp(value, label = 'UTC time') {
+  const match = matches(value, UTC, label).match(UTC);
+  const [year, month, day, hour, minute, second] = match.slice(1).map(Number);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  need(month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1] &&
+    hour <= 23 && minute <= 59 && second <= 59, `${label}: invalid UTC calendar time`);
+  return true;
 }
+
+const utc = validateUtcTimestamp;
 
 function version(value) {
   matches(value, VERSION, 'componentVersion');
@@ -101,7 +108,8 @@ export function canonicalJson(value) {
     return JSON.stringify(value);
   }
   if (Array.isArray(value)) {
-    need(Object.keys(value).length === value.length &&
+    const own = Reflect.ownKeys(value);
+    need(own.length === value.length + 1 && Object.hasOwn(value, 'length') &&
       Array.from({ length: value.length }, (_, index) => Object.hasOwn(value, index)).every(Boolean),
     'sparse or extended array');
     return `[${value.map(canonicalJson).join(',')}]`;
@@ -296,9 +304,10 @@ export function validateEvidence(payload, { mode = 'real' } = {}) {
       utc(payload.observedAtUtc, 'observedAtUtc'); string(payload.operator, 'operator');
       need(Array.isArray(payload.assets), 'assets required');
       for (const asset of payload.assets) {
-        object(asset, 'asset'); keys(asset, ['assetId', 'name', 'byteSize', 'githubDigest', 'approvedDigest', 'artifactObjectId']);
+        object(asset, 'asset'); keys(asset, ['assetId', 'name', 'representation', 'byteSize', 'githubDigest', 'approvedDigest', 'artifactObjectId']);
         need(Number.isSafeInteger(asset.assetId) && asset.assetId > 0, 'assetId invalid');
         string(asset.name, 'asset name');
+        need(asset.representation === 'EXACT_FILE', 'transformed hosted representation lacks approved byte identity');
         need(Number.isSafeInteger(asset.byteSize) && asset.byteSize >= 0, 'asset byteSize invalid');
         need(asset.githubDigest === null || SHA.test(asset.githubDigest), 'githubDigest invalid');
         matches(asset.approvedDigest, SHA, 'approvedDigest');
@@ -398,6 +407,7 @@ export function validateIndexChain(entries, { mode = 'real', objects } = {}) {
   if (mode === 'real') need(objects instanceof Map, 'real index requires sealed child objects');
   let prior = null;
   let id = null;
+  const rcBindings = new Map();
   for (let i = 0; i < entries.length; i += 1) {
     const entry = entries[i];
     const payload = verifyCanonicalBytes(entry.bytes);
@@ -409,6 +419,7 @@ export function validateIndexChain(entries, { mode = 'real', objects } = {}) {
     need(payload.previousEntryDigest === prior, 'predecessor mismatch');
     if (id === null) id = payload.releaseId;
     need(payload.releaseId === id, 'release identity mismatch');
+    if (payload.childSchema === SCHEMAS.rc) need(objects instanceof Map, 'RC binding requires sealed objects');
     if (objects) {
       const child = objects.get(payload.childObjectId);
       need(child, 'missing sealed child object');
@@ -416,6 +427,11 @@ export function validateIndexChain(entries, { mode = 'real', objects } = {}) {
       need(childPayload.schema === payload.childSchema && semanticId(childPayload) === payload.childSemanticId, 'index child binding mismatch');
       if (childPayload.releaseId) need(childPayload.releaseId === id, 'index child release mismatch');
       if (childPayload.componentVersion) need(id === `studio-desktop/v${childPayload.componentVersion}`, 'index child version mismatch');
+      if (childPayload.schema === SCHEMAS.rc) {
+        const bound = rcBindings.get(childPayload.rcId);
+        need(bound === undefined || bound === child.objectId, 'RC ID rebound to different object');
+        rcBindings.set(childPayload.rcId, child.objectId);
+      }
     }
     if (payload.disposition !== 'observe') {
       need(objects instanceof Map, 'disposition requires sealed child objects');
@@ -503,8 +519,10 @@ export function validateReleaseChain({ build, artifacts, decision, rc }, options
   return true;
 }
 
-export function validateReleaseEvents({ build, artifacts, rc, releaseDecision, tagDecision, publicationDecision, tag, github, publication }, options) {
-  for (const record of [build, rc, releaseDecision, ...Object.values(artifacts)]) verifySealedEvidence(record, options);
+export function validateReleaseEvents({ build, artifacts, rcDesignationDecision, rc, releaseDecision, tagDecision, publicationDecision, tag, github, publication }, options) {
+  need(rcDesignationDecision, 'RC designation decision required');
+  validateReleaseChain({ build, artifacts, decision: rcDesignationDecision, rc }, options);
+  verifySealedEvidence(releaseDecision, options);
   const releaseIdValue = rc.payload.releaseId;
   const approved = [artifacts.app.objectId, artifacts.dmg.objectId];
   need(releaseDecision.payload.decisionType === 'RELEASE_APPROVAL' &&
@@ -525,16 +543,21 @@ export function validateReleaseEvents({ build, artifacts, rc, releaseDecision, t
   if (github) {
     need(publicationDecision && tag, 'hosted state needs publication decision and tag observation');
     verifySealedEvidence(publicationDecision, options); verifySealedEvidence(github, options);
+    const hostedApproved = publicationDecision.payload.approvedAssetObjectIds;
     need(publicationDecision.payload.decisionType === 'PUBLICATION_DECISION' && publicationDecision.payload.releaseId === releaseIdValue &&
-      publicationDecision.payload.approvedAssetObjectIds.length === approved.length &&
-      approved.every((id) => publicationDecision.payload.approvedAssetObjectIds.includes(id)) &&
+      hostedApproved.length > 0 && hostedApproved.every((id) => approved.includes(id)) &&
       github.payload.decisionObjectId === publicationDecision.objectId &&
       github.payload.releaseDecisionObjectId === releaseDecision.objectId &&
       github.payload.releaseId === releaseIdValue && github.payload.tag === tag.payload.tag &&
       github.payload.targetCommit === build.payload.sourceCommit &&
-      github.payload.assets.length === approved.length &&
-      [artifacts.app, artifacts.dmg].every((artifact) => github.payload.assets.some((asset) =>
-        asset.artifactObjectId === artifact.objectId && asset.approvedDigest === artifact.payload.digest)),
+      github.payload.assets.length === hostedApproved.length &&
+      hostedApproved.every((id) => github.payload.assets.some((asset) => {
+        const artifact = [artifacts.app, artifacts.dmg].find((item) => item.objectId === id);
+        return artifact && asset.artifactObjectId === id &&
+          asset.representation === 'EXACT_FILE' && artifact.payload.digestMethod === 'sha256-file-v1' &&
+          asset.byteSize === artifact.payload.byteSize && asset.approvedDigest === artifact.payload.digest &&
+          (asset.githubDigest === null || asset.githubDigest === artifact.payload.digest);
+      })),
     'hosted authority/asset mismatch');
   }
   if (publication) {

@@ -42,6 +42,8 @@ the exact canonical UTF-8 payload gives the external object ID
 `obj:sha256:<64-lowercase-hex>`. Object and index digests are **not fields of
 their own hashed payload**. Raw input must already equal its canonical bytes;
 duplicate-key or otherwise noncanonical raw JSON is rejected.
+Array serialization checks every own property, including nonenumerable and
+Symbol keys: only dense numeric indices and built-in `length` are allowed.
 
 | Object/event | Schema ID |
 |---|---|
@@ -66,6 +68,9 @@ prior observations remain historical. Current state is resolved from the
 verified predecessor chain **and sealed HDA/Product decision references**,
 never a bare disposition string, filename order or a mutable `latest.json`.
 Every entry retains `authorityEffect: "NONE"`.
+Within the verified index, one numbered RC semantic ID binds to exactly one
+sealed RC object ID. Reobserving that same object is allowed; changed RC
+evidence requires a new positive RC number.
 
 Decision references use explicit kinds `RC_DESIGNATION`, `RC_REJECTION`,
 `RELEASE_APPROVAL`, `RELEASE_SUPERSESSION`, `RELEASE_WITHDRAWAL`,
@@ -103,6 +108,10 @@ The packaged executable separately supports exact invocation
 `executableSha256`. The mode hashes the running executable read-only before
 Tauri startup and exits nonzero if required stamped/readback data is missing
 or inconsistent. Ordinary invocation still starts Tauri.
+Both the evidence validator and packaged-executable readback require a real
+Gregorian UTC calendar time in `YYYY-MM-DDTHH:MM:SS[.fraction]Z` form. Invalid
+month/day combinations, non-leap February 29, hour 24, minute/second 60 and
+normalized impossible dates fail closed.
 
 Artifacts have distinct executable, `.app` and DMG identities bound to one
 build object, source commit, version and target OS/architecture. The executable
@@ -126,10 +135,19 @@ never replaces the decision. A Release may exist without a tag or GitHub
 Release. Tag, hosted-state, publication, deployment and activation observations
 have separate lifecycles and objects. The tag event binds the Release decision,
 tag decision, tag/ref objects, target commit, operator and readback time. A
-GitHub event binds numeric/node ID, draft/published state, tag/target,
+Release-event verification first validates the complete sealed RC designation,
+build and executable/`.app`/DMG artifact chain. GitHub event binds numeric/node ID, draft/published state, tag/target,
 created/published/updated and observation times, operator, Release/publication
 decision references and each asset's ID, name, size, exposed digest when
-available, independently approved digest and artifact object. Publication
+available, independently approved digest and artifact object. The publication
+decision approves the exact hosted asset subset of the Release-approved assets.
+The v1 hosted representation is `EXACT_FILE`: its linked approved artifact must
+use `sha256-file-v1`, and its observed byte size, approved digest and any
+comparable provider SHA-256 digest must equal that artifact's sealed file-byte
+identity. A `.app` bundle-tree digest is not a hosted file digest. A transformed
+`.app` archive or other transformed upload fails closed until a separate sealed,
+HDA/Product-approved byte representation exists; this v1 model does not invent
+one. Publication
 needs a separate HDA/Product decision and a published hosted predecessor.
 Withdrawal preserves history and prevents treating the Release as current.
 
