@@ -259,18 +259,20 @@ export function makeChromeLivePopupJs({
     if (!(elProviderPermissionButton instanceof HTMLButtonElement)) return;
     elProviderPermissionButton.disabled = true;
     setProviderPermissionStatus("Requesting provider permission.", true);
+    let failureMessage = "";
     try {
       const res = await sendIdentityRequest(IDENTITY_REQUEST_PROVIDER_PERMISSION_ACTION);
-      if (res && res.ok === true && res.permissionReady === true) {
-        setProviderPermissionStatus("Provider permission granted.", true);
-      } else {
-        const code = res && res.errorCode ? String(res.errorCode) : "permission not granted";
-        setProviderPermissionStatus("Provider permission not granted: " + code, false);
+      if (!(res && res.ok === true && res.permissionReady === true)) {
+        const code = res && res.errorCode ? res.errorCode : "permission not granted";
+        failureMessage = "Provider permission not granted: " + boundedActionFailure(code);
       }
-    } catch (e) {
-      setProviderPermissionStatus("Provider permission request failed.", false);
+    } catch (error) {
+      failureMessage = "Provider permission request failed: " + boundedActionFailure(error);
     }
-    await refreshProviderPermissionUi();
+    const cfg = await refreshProviderPermissionUi();
+    if (failureMessage && cfg?.permissionReady !== true) {
+      setProviderPermissionStatus(failureMessage, !shouldShowProviderPermissionGrant(cfg));
+    }
   }
 
   function applyLeftbarCollapsed(collapsedRaw) {
@@ -569,78 +571,66 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
   }
 
   async function setChatBinding(slotNum) {
-    try {
-      const tab = await getActiveTab();
-      if (!tab || typeof tab.id !== "number") {
-        elHint.textContent = "No active tab found.";
+    const tab = await getActiveTab();
+    if (!tab || typeof tab.id !== "number") {
+      elHint.textContent = "No active tab found.";
+      return;
+    }
+    currentTabId = tab.id;
+    currentChatUrl = String(tab.url || currentChatUrl || "");
+    const slot = normalizeSetSlot(slotNum);
+    if (slot) {
+      const rec = getSetRecord(slot);
+      if (!rec) {
+        elHint.textContent = "Set " + slot + " is empty. Save current first.";
         return;
       }
-      currentTabId = tab.id;
-      currentChatUrl = String(tab.url || currentChatUrl || "");
-      const slot = normalizeSetSlot(slotNum);
-      if (slot) {
-        const rec = getSetRecord(slot);
-        if (!rec) {
-          elHint.textContent = "Set " + slot + " is empty. Save current first.";
-          return;
-        }
-        await sendPageSetLink("set-chat-binding", tab.id, slot, currentChatUrl);
-        elHint.textContent = "This Chat now points to Set " + slot + ". Reload the page to apply.";
-      } else {
-        await sendPageSetLink("clear-chat-binding", tab.id, 0, currentChatUrl);
-        elHint.textContent = "This Chat binding cleared. Reload the page to apply.";
-      }
-      await loadCurrentPageSetLink(tab.id, currentChatUrl);
-      render();
-    } catch (e) {
-      elHint.textContent = "This Chat binding failed: " + String(e && (e.message || e));
+      await sendPageSetLink("set-chat-binding", tab.id, slot, currentChatUrl);
+      elHint.textContent = "This Chat now points to Set " + slot + ". Reload the page to apply.";
+    } else {
+      await sendPageSetLink("clear-chat-binding", tab.id, 0, currentChatUrl);
+      elHint.textContent = "This Chat binding cleared. Reload the page to apply.";
     }
+    await loadCurrentPageSetLink(tab.id, currentChatUrl);
+    render();
   }
 
   async function setGlobalDefaultBinding(slotNum) {
-    try {
-      const slot = normalizeSetSlot(slotNum);
-      if (slot) {
-        const rec = getSetRecord(slot);
-        if (!rec) {
-          elHint.textContent = "Set " + slot + " is empty. Save current first.";
-          return;
-        }
-        await sendPageSetLink("set-global-default", currentTabId, slot, currentChatUrl);
-        elHint.textContent = "Global default now points to Set " + slot + ". Reload unbound chats to apply.";
-      } else {
-        await sendPageSetLink("clear-global-default", currentTabId, 0, currentChatUrl);
-        elHint.textContent = "Global default cleared. Unbound chats fall back to global toggles.";
+    const slot = normalizeSetSlot(slotNum);
+    if (slot) {
+      const rec = getSetRecord(slot);
+      if (!rec) {
+        elHint.textContent = "Set " + slot + " is empty. Save current first.";
+        return;
       }
-      await loadCurrentPageSetLink(currentTabId, currentChatUrl);
-      render();
-    } catch (e) {
-      elHint.textContent = "Global default failed: " + String(e && (e.message || e));
+      await sendPageSetLink("set-global-default", currentTabId, slot, currentChatUrl);
+      elHint.textContent = "Global default now points to Set " + slot + ". Reload unbound chats to apply.";
+    } else {
+      await sendPageSetLink("clear-global-default", currentTabId, 0, currentChatUrl);
+      elHint.textContent = "Global default cleared. Unbound chats fall back to global toggles.";
     }
+    await loadCurrentPageSetLink(currentTabId, currentChatUrl);
+    render();
   }
 
   async function setChatBypass(nextRaw) {
-    try {
-      const tab = await getActiveTab();
-      if (!tab || typeof tab.id !== "number") {
-        elHint.textContent = "No active tab found.";
-        return;
-      }
-      currentTabId = tab.id;
-      currentChatUrl = String(tab.url || currentChatUrl || "");
-      const enabled = !!nextRaw;
-      if (enabled) {
-        await sendPageSetLink("set-chat-bypass", tab.id, 0, currentChatUrl);
-        elHint.textContent = "This Chat will reload with all scripts off.";
-      } else {
-        await sendPageSetLink("clear-chat-bypass", tab.id, 0, currentChatUrl);
-        elHint.textContent = "This Chat can use its Set or Global default again. Reload the page to apply.";
-      }
-      await loadCurrentPageSetLink(tab.id, currentChatUrl);
-      render();
-    } catch (e) {
-      elHint.textContent = "All-off reload toggle failed: " + String(e && (e.message || e));
+    const tab = await getActiveTab();
+    if (!tab || typeof tab.id !== "number") {
+      elHint.textContent = "No active tab found.";
+      return;
     }
+    currentTabId = tab.id;
+    currentChatUrl = String(tab.url || currentChatUrl || "");
+    const enabled = !!nextRaw;
+    if (enabled) {
+      await sendPageSetLink("set-chat-bypass", tab.id, 0, currentChatUrl);
+      elHint.textContent = "This Chat will reload with all scripts off.";
+    } else {
+      await sendPageSetLink("clear-chat-bypass", tab.id, 0, currentChatUrl);
+      elHint.textContent = "This Chat can use its Set or Global default again. Reload the page to apply.";
+    }
+    await loadCurrentPageSetLink(tab.id, currentChatUrl);
+    render();
   }
 
   async function resetToggles() {
@@ -661,34 +651,26 @@ ${makeChromeLivePopupViewRenderSource()}  function commitGroupTitleInput(inputEl
   }
 
   async function reloadActiveTab() {
-    try {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      const tab = tabs && tabs[0];
-      if (!tab || typeof tab.id !== "number") {
-        elHint.textContent = "No active tab found.";
-        return;
-      }
-      await chrome.tabs.reload(tab.id);
-      elHint.textContent = "Active tab reloaded.";
-    } catch (e) {
-      elHint.textContent = "Reload failed: " + String(e && (e.message || e));
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tab = tabs && tabs[0];
+    if (!tab || typeof tab.id !== "number") {
+      elHint.textContent = "No active tab found.";
+      return;
     }
+    await chrome.tabs.reload(tab.id);
+    elHint.textContent = "Active tab reloaded.";
   }
 
   async function disableCurrentPageOnce() {
-    try {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      const tab = tabs && tabs[0];
-      if (!tab || typeof tab.id !== "number") {
-        elHint.textContent = "No active tab found.";
-        return;
-      }
-      await sendPageDisableOnce("arm", tab.id);
-      await chrome.tabs.reload(tab.id);
-      elHint.textContent = "Active tab reloaded with H2O scripts disabled for this load only.";
-    } catch (e) {
-      elHint.textContent = "This-page disable failed: " + String(e && (e.message || e));
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tab = tabs && tabs[0];
+    if (!tab || typeof tab.id !== "number") {
+      elHint.textContent = "No active tab found.";
+      return;
     }
+    await sendPageDisableOnce("arm", tab.id);
+    await chrome.tabs.reload(tab.id);
+    elHint.textContent = "Active tab reloaded with H2O scripts disabled for this load only.";
   }
 
   async function setSetClickReload(enabled) {
