@@ -345,13 +345,17 @@ assert(!loaderSrc.includes("identity:request-provider-permission"),
   "loader must not allow-list a provider permission bridge action");
 const containsExactHostFnA2 = extractFunction(bgSrc, "identityProviderPermission_containsExactHost");
 const requestExactHostFnA2 = extractFunction(bgSrc, "identityProviderPermission_requestExactHost");
+const pageMetadataContainsFnA2 = extractFunction(bgSrc, "pageMetadataPermissionContains");
 assert(containsExactHostFnA2.includes("chrome.permissions.contains"),
   "chrome.permissions.contains must be confined to exact-host readiness helper");
 assert(requestExactHostFnA2.includes("chrome.permissions.request"),
   "chrome.permissions.request must be confined to internal exact-host request helper");
+assert(pageMetadataContainsFnA2.includes("chrome.permissions.contains"),
+  "F19 page-metadata permission checks must stay in their named helper");
 const bgWithoutPermissionHelpersA2 = bgSrc
   .replace(containsExactHostFnA2, "")
-  .replace(requestExactHostFnA2, "");
+  .replace(requestExactHostFnA2, "")
+  .replace(pageMetadataContainsFnA2, "");
 assert(!bgWithoutPermissionHelpersA2.includes("chrome.permissions.contains"),
   "chrome.permissions.contains must not appear outside exact-host readiness helper");
 assert(!bgWithoutPermissionHelpersA2.includes("chrome.permissions.request"),

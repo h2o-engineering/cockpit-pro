@@ -1115,11 +1115,15 @@ function assertBackgroundPermissionReadinessSafe() {
     "background must define the internal exact-host request helper");
   const containsFn = extractFunction(source, "identityProviderPermission_containsExactHost");
   const requestFn = extractFunction(source, "identityProviderPermission_requestExactHost");
+  const pageMetadataContainsFn = extractFunction(source, "pageMetadataPermissionContains");
   assert(containsFn.includes("chrome.permissions.contains"),
     "chrome.permissions.contains must appear in the exact-host readiness helper");
   assert(requestFn.includes("chrome.permissions.request"),
     "chrome.permissions.request must appear only in the internal request helper");
-  const withoutPermissionHelpers = source.replace(containsFn, "").replace(requestFn, "");
+  assert(pageMetadataContainsFn.includes("chrome.permissions.contains"),
+    "F19 page-metadata permission checks must stay in their named helper");
+  const withoutPermissionHelpers = source.replace(containsFn, "")
+    .replace(requestFn, "").replace(pageMetadataContainsFn, "");
   assert(!withoutPermissionHelpers.includes("chrome.permissions.contains"),
     "chrome.permissions.contains must not appear outside exact-host readiness helper");
   assert(!withoutPermissionHelpers.includes("chrome.permissions.request"),
