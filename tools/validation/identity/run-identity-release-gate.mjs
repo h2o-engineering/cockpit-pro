@@ -493,6 +493,83 @@ function canonicalExtBuildRel(variant, ...segments) {
         transformed.slice(blockEnd + 3);
     }
 
+    const legacyNoWriteEndMarker =
+      '  "release runner must not write files, run git/destructive commands, or contain credential fields");';
+    const legacyNoWriteEnd = transformed.indexOf(legacyNoWriteEndMarker);
+    const legacyNoWriteStart = transformed.lastIndexOf(
+      "assert(",
+      legacyNoWriteEnd,
+    );
+    if (legacyNoWriteStart < 0 || legacyNoWriteEnd < 0) {
+      throw new Error("[H2O Identity] Phase 3.5B legacy no-write assertion not found");
+    }
+    const sourceSafeWriteContract = `function extractReleaseRunnerFunction(sourceText, name) {
+  const marker = \`function \${name}(\`;
+  const start = sourceText.indexOf(marker);
+  if (start < 0) return "";
+  const bodyStart = sourceText.indexOf("{", start);
+  if (bodyStart < 0) return "";
+  let depth = 0;
+  for (let index = bodyStart; index < sourceText.length; index += 1) {
+    const char = sourceText[index];
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return sourceText.slice(start, index + 1);
+    }
+  }
+  return "";
+}
+
+const sourceSafeIconFixtureFn =
+  extractReleaseRunnerFunction(releaseRunner, "createSourceSafeIconFixtures");
+const sourceSafeValidatorCopyFn =
+  extractReleaseRunnerFunction(releaseRunner, "writeSourceSafeValidatorCopy");
+const sourceSafeCleanupFn =
+  extractReleaseRunnerFunction(releaseRunner, "cleanupSourceSafeRoot");
+const sourceSafeWriteSites =
+  releaseRunner.match(/\\bfs\\.writeFileSync\\s*\\(/g) || [];
+const sourceSafeRemoveSites =
+  releaseRunner.match(/\\bfs\\.rmSync\\s*\\(/g) || [];
+
+const sourceSafeForbiddenTokens = [
+  ["append", "File"].join(""),
+  ["apply", "_patch"].join(""),
+  ["service", "_role"].join(""),
+  ["service", "-role"].join(""),
+  ["access", "_token"].join(""),
+  ["refresh", "_token"].join(""),
+  ["create", "WriteStream"].join(""),
+];
+for (const forbiddenToken of sourceSafeForbiddenTokens) {
+  assert(!releaseRunner.includes(forbiddenToken),
+    "release runner must not contain forbidden token " + forbiddenToken);
+}
+assert(!/rm\\s+-|git\\s+|fs\\.writeFile\\s*\\(|fs\\.promises\\.writeFile/.test(releaseRunner),
+  "release runner must not invoke destructive shell commands, git, or arbitrary writeFile APIs");
+assert(sourceSafeWriteSites.length === 3,
+  "release runner must contain exactly three approved source-safe writeFileSync sites");
+assert((sourceSafeIconFixtureFn.match(/\\bfs\\.writeFileSync\\s*\\(/g) || []).length === 2
+    && sourceSafeIconFixtureFn.includes("SOURCE_SAFE_READY_ICONS")
+    && sourceSafeIconFixtureFn.includes("SOURCE_SAFE_PANEL_ICONS"),
+  "source-safe icon fixture writes must be exactly two and remain rooted under the approved temp icon directories");
+assert((sourceSafeValidatorCopyFn.match(/\\bfs\\.writeFileSync\\s*\\(/g) || []).length === 1
+    && sourceSafeValidatorCopyFn.includes("SOURCE_SAFE_VALIDATION_REPOSITORY"),
+  "source-safe validator copy must be the only third write site and remain rooted under the temp validation repository");
+assert(sourceSafeRemoveSites.length === 1
+    && (sourceSafeCleanupFn.match(/\\bfs\\.rmSync\\s*\\(/g) || []).length === 1,
+  "release runner must contain exactly one rmSync site and it must stay inside cleanupSourceSafeRoot");
+assert(sourceSafeCleanupFn.includes("path.relative(os.tmpdir(), SOURCE_SAFE_TEMP_ROOT)")
+    && sourceSafeCleanupFn.includes("path.basename(SOURCE_SAFE_TEMP_ROOT).startsWith(")
+    && sourceSafeCleanupFn.includes('"h2o-identity-release-gate-"')
+    && sourceSafeCleanupFn.includes("Refusing unsafe temporary cleanup"),
+  "source-safe cleanup must preserve tmpdir confinement, the release-gate basename guard, and fail-closed refusal");
+`;
+    transformed =
+      transformed.slice(0, legacyNoWriteStart) +
+      sourceSafeWriteContract +
+      transformed.slice(legacyNoWriteEnd + legacyNoWriteEndMarker.length);
+
     return transformed;
   });
 }
