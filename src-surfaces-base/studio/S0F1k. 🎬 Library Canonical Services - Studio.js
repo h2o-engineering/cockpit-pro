@@ -2100,6 +2100,31 @@
     return Promise.resolve(messaging.send(STORAGE_ARCHIVE_MSG, message));
   }
 
+  async function getBackgroundHealth() {
+    try {
+      const bridge = safeCall('storage-adapter.background.bridge.get', () => H2O.archiveBoot?._getExtensionBridge?.(), null);
+      if (bridge && typeof bridge.libraryStorageDiagnose === 'function') {
+        const out = await bridge.libraryStorageDiagnose();
+        return normalizeBackgroundHealthEnvelope(out, 'extension-archive-bridge');
+      }
+      if (typeof H2O.Studio?.platform?.messaging?.send === 'function') {
+        const out = await sendRuntimeArchiveMessage(STORAGE_BACKGROUND_DIAG_OP, {});
+        return normalizeBackgroundHealthEnvelope(out, 'studio.platform.messaging');
+      }
+      return rememberBackgroundHealth({
+        ok: false,
+        status: 'background-diagnostic-unavailable',
+        reason: 'no extension archive bridge or Studio platform messaging available',
+      }, 'none');
+    } catch (e) {
+      return rememberBackgroundHealth({
+        ok: false,
+        status: 'background-diagnostic-error',
+        reason: String(e?.message || e || ''),
+      }, 'error');
+    }
+  }
+
   function rememberSchemaCreationResult(result, transport) {
     const out = (result && typeof result === 'object' && !Array.isArray(result))
       ? { ...result }
