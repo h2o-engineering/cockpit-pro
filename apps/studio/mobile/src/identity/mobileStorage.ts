@@ -46,6 +46,18 @@ async function clearKey(key: string): Promise<void> {
   }
 }
 
+export async function readMobileStorageItem(key: string): Promise<string | null> {
+  return AsyncStorage.getItem(key);
+}
+
+export async function writeMobileStorageJson(key: string, value: unknown): Promise<void> {
+  await writeJson(key, value);
+}
+
+export async function removeMobileStorageItem(key: string): Promise<void> {
+  await AsyncStorage.removeItem(key);
+}
+
 export async function readSnapshot(): Promise<unknown | null> {
   return readJson(KEY_SNAPSHOT);
 }

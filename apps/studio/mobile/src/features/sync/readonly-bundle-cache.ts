@@ -1,4 +1,8 @@
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import {
+  readMobileStorageItem,
+  writeMobileStorageJson,
+  removeMobileStorageItem,
+} from "../../identity/mobileStorage";
 
 import type { MobileBundleDiagnostic } from "./latest-bundle-reader";
 
@@ -72,7 +76,7 @@ export async function saveReadOnlyBundleCacheMetadata(
   }
 
   try {
-    await AsyncStorage.setItem(READ_ONLY_BUNDLE_CACHE_KEY, JSON.stringify(normalized));
+    await writeMobileStorageJson(READ_ONLY_BUNDLE_CACHE_KEY, normalized);
     return { ok: true, warnings: [] };
   } catch {
     return {
@@ -90,7 +94,7 @@ export async function loadReadOnlyBundleCacheMetadata(): Promise<{
 }> {
   let raw: string | null;
   try {
-    raw = await AsyncStorage.getItem(READ_ONLY_BUNDLE_CACHE_KEY);
+    raw = await readMobileStorageItem(READ_ONLY_BUNDLE_CACHE_KEY);
   } catch {
     return {
       ok: false,
@@ -153,7 +157,7 @@ export async function clearReadOnlyBundleCacheMetadata(): Promise<{
   warnings: MobileReadOnlyBundleCacheWarning[];
 }> {
   try {
-    await AsyncStorage.removeItem(READ_ONLY_BUNDLE_CACHE_KEY);
+    await removeMobileStorageItem(READ_ONLY_BUNDLE_CACHE_KEY);
     return { ok: true, warnings: [] };
   } catch {
     return {

@@ -8,7 +8,13 @@ import ts from 'typescript';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '../../..');
 
-const asyncStorageMock = createAsyncStorageMock();
+const mobileStorageMock = createMobileStorageMock();
+
+const cacheSource = readRepoFile('apps/studio/mobile/src/features/sync/readonly-bundle-cache.ts');
+const mobileStorageSource = readRepoFile('apps/studio/mobile/src/identity/mobileStorage.ts');
+assert.doesNotMatch(cacheSource, /@react-native-async-storage\/async-storage/);
+assert.match(cacheSource, /from ["']\.\.\/\.\.\/identity\/mobileStorage["']/);
+assert.match(mobileStorageSource, /export async function writeMobileStorageJson\(key: string, value: unknown\): Promise<void> \{\s*await writeJson\(key, value\);\s*\}/);
 
 function readRepoFile(relativePath) {
   return fs.readFileSync(path.join(repoRoot, relativePath), 'utf8');
@@ -18,7 +24,7 @@ function loadReadonlyCacheModule() {
   return loadTypescriptModuleWithMocks(
     'apps/studio/mobile/src/features/sync/readonly-bundle-cache.ts',
     {
-      '@react-native-async-storage/async-storage': asyncStorageMock.api,
+      '../../identity/mobileStorage': mobileStorageMock.api,
     },
   );
 }
@@ -55,7 +61,7 @@ function loadTypescriptModuleWithMocks(relativePath, mocks) {
   }
 }
 
-function createAsyncStorageMock() {
+function createMobileStorageMock() {
   const state = {
     values: new Map(),
     setCalls: [],
@@ -64,14 +70,14 @@ function createAsyncStorageMock() {
   return {
     state,
     api: {
-      async getItem(key) {
+      async readMobileStorageItem(key) {
         return state.values.has(key) ? state.values.get(key) : null;
       },
-      async setItem(key, value) {
+      async writeMobileStorageJson(key, value) {
         state.setCalls.push(key);
-        state.values.set(key, value);
+        state.values.set(key, JSON.stringify(value));
       },
-      async removeItem(key) {
+      async removeMobileStorageItem(key) {
         state.removeCalls.push(key);
         state.values.delete(key);
       },
@@ -160,9 +166,9 @@ const {
 assert.equal(READ_ONLY_BUNDLE_CACHE_KEY, 'h2o.mobile.readonly.bundle-cache.v1');
 assert.equal(READ_ONLY_BUNDLE_CACHE_SCHEMA, 'h2o.mobile.readonly.bundle-cache.v1');
 
-asyncStorageMock.state.values.set('h2o_chat_archive_v1.json', 'archive-state-sentinel');
-asyncStorageMock.state.values.set('h2o_webdav_settings_v1.json', 'webdav-settings-sentinel');
-asyncStorageMock.state.values.set('h2o.identity.snapshot.v1', 'identity-sentinel');
+mobileStorageMock.state.values.set('h2o_chat_archive_v1.json', 'archive-state-sentinel');
+mobileStorageMock.state.values.set('h2o_webdav_settings_v1.json', 'webdav-settings-sentinel');
+mobileStorageMock.state.values.set('h2o.identity.snapshot.v1', 'identity-sentinel');
 
 const missing = await loadReadOnlyBundleCacheMetadata();
 assert.equal(missing.ok, true);
@@ -196,9 +202,9 @@ const metadataWithExtraFields = {
 const saveResult = await saveReadOnlyBundleCacheMetadata(metadataWithExtraFields);
 assert.equal(saveResult.ok, true);
 assert.deepEqual(saveResult.warnings, []);
-assert.deepEqual(asyncStorageMock.state.setCalls, [READ_ONLY_BUNDLE_CACHE_KEY]);
+assert.deepEqual(mobileStorageMock.state.setCalls, [READ_ONLY_BUNDLE_CACHE_KEY]);
 
-const storedValue = asyncStorageMock.state.values.get(READ_ONLY_BUNDLE_CACHE_KEY);
+const storedValue = mobileStorageMock.state.values.get(READ_ONLY_BUNDLE_CACHE_KEY);
 assert.equal(typeof storedValue, 'string');
 assertStoredValueRedacted(storedValue);
 
@@ -235,14 +241,14 @@ assert.equal(loaded.found, true);
 assert.deepEqual(loaded.metadata, metadata);
 assert.deepEqual(loaded.warnings, []);
 
-asyncStorageMock.state.values.set(READ_ONLY_BUNDLE_CACHE_KEY, '{ bad json');
+mobileStorageMock.state.values.set(READ_ONLY_BUNDLE_CACHE_KEY, '{ bad json');
 const malformed = await loadReadOnlyBundleCacheMetadata();
 assert.equal(malformed.ok, false);
 assert.equal(malformed.found, false);
 assert.equal(malformed.metadata, null);
 assertWarning(malformed, 'readonly-cache-malformed');
 
-asyncStorageMock.state.values.set(
+mobileStorageMock.state.values.set(
   READ_ONLY_BUNDLE_CACHE_KEY,
   JSON.stringify({ ...metadata, schema: 'h2o.mobile.readonly.bundle-cache.v0' }),
 );
@@ -252,15 +258,15 @@ assert.equal(unsupported.found, false);
 assert.equal(unsupported.metadata, null);
 assertWarning(unsupported, 'readonly-cache-schema-unsupported');
 
-asyncStorageMock.state.values.set(READ_ONLY_BUNDLE_CACHE_KEY, storedValue);
+mobileStorageMock.state.values.set(READ_ONLY_BUNDLE_CACHE_KEY, storedValue);
 const clearResult = await clearReadOnlyBundleCacheMetadata();
 assert.equal(clearResult.ok, true);
 assert.deepEqual(clearResult.warnings, []);
-assert.deepEqual(asyncStorageMock.state.removeCalls, [READ_ONLY_BUNDLE_CACHE_KEY]);
-assert.equal(asyncStorageMock.state.values.has(READ_ONLY_BUNDLE_CACHE_KEY), false);
-assert.equal(asyncStorageMock.state.values.get('h2o_chat_archive_v1.json'), 'archive-state-sentinel');
-assert.equal(asyncStorageMock.state.values.get('h2o_webdav_settings_v1.json'), 'webdav-settings-sentinel');
-assert.equal(asyncStorageMock.state.values.get('h2o.identity.snapshot.v1'), 'identity-sentinel');
+assert.deepEqual(mobileStorageMock.state.removeCalls, [READ_ONLY_BUNDLE_CACHE_KEY]);
+assert.equal(mobileStorageMock.state.values.has(READ_ONLY_BUNDLE_CACHE_KEY), false);
+assert.equal(mobileStorageMock.state.values.get('h2o_chat_archive_v1.json'), 'archive-state-sentinel');
+assert.equal(mobileStorageMock.state.values.get('h2o_webdav_settings_v1.json'), 'webdav-settings-sentinel');
+assert.equal(mobileStorageMock.state.values.get('h2o.identity.snapshot.v1'), 'identity-sentinel');
 
 console.log(
   JSON.stringify(
