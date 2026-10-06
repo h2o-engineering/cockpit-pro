@@ -20,6 +20,8 @@ const PHASE3_4D_VALIDATOR =
   "tools/validation/identity/validate-identity-phase3_4d-baseline.mjs";
 const PHASE3_5B_VALIDATOR =
   "tools/validation/identity/validate-identity-phase3_5b-release-gate.mjs";
+const PHASE3_8E_VALIDATOR =
+  "tools/validation/identity/validate-identity-phase3_8e-password-integrity.mjs";
 const SOURCE_SAFE_VALIDATION_MODE = "source-safe-local";
 const SOURCE_SAFE_TEMP_ROOT = fs.mkdtempSync(
   path.join(os.tmpdir(), "h2o-identity-release-gate-"),
@@ -569,6 +571,76 @@ assert(sourceSafeCleanupFn.includes("path.relative(os.tmpdir(), SOURCE_SAFE_TEMP
       transformed.slice(0, legacyNoWriteStart) +
       sourceSafeWriteContract +
       transformed.slice(legacyNoWriteEnd + legacyNoWriteEndMarker.length);
+
+    return transformed;
+  });
+
+  writeSourceSafeValidatorCopy(PHASE3_8E_VALIDATOR, (source) => {
+    const repoRootDeclaration =
+      'const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");';
+    let transformed = source.replace(
+      repoRootDeclaration,
+      `const REPO_ROOT = ${JSON.stringify(REPO_ROOT)};`,
+    );
+
+    const leakFunctionStart = transformed.indexOf(
+      "function assertNoUiLeakFields(label, source) {",
+    );
+    const leakFunctionEndMarker =
+      '\n}\n\nconsole.log("\\n-- Identity Phase 3.8E password integrity validation -----------");';
+    const leakFunctionEnd = transformed.indexOf(
+      leakFunctionEndMarker,
+      leakFunctionStart,
+    );
+    if (leakFunctionStart < 0 || leakFunctionEnd < 0) {
+      throw new Error("[H2O Identity] Phase 3.8E UI leak function not found");
+    }
+
+    const correctedLeakContract = String.raw`function phase38eHasSensitiveStoragePersistence(source) {
+  const pageStoragePattern =
+    /(localStorage|sessionStorage)\.(?:setItem|getItem)\([^)]*(?:password|code|otp)/i;
+  const chromeStoragePattern =
+    /chrome\.storage\.(?:local|session)[\s\S]{0,180}(?:password\s*:|currentPassword|current_password|code\s*:|otp\s*:)/i;
+  return pageStoragePattern.test(source) || chromeStoragePattern.test(source);
+}
+
+function assertNoUiLeakFields(label, source) {
+  const forbiddenRawFields = [
+    ["access", "_token"].join(""),
+    ["refresh", "_token"].join(""),
+    "rawSession",
+    "rawUser",
+    "owner_user_id",
+    "deleted_at",
+  ];
+  for (const forbiddenRawField of forbiddenRawFields) {
+    assert(!source.includes(forbiddenRawField),
+      label + ": must not contain forbidden raw field " + forbiddenRawField);
+  }
+  assert(!phase38eHasSensitiveStoragePersistence(source),
+    label + ": password/code values must not be written to storage");
+}
+
+assert(!phase38eHasSensitiveStoragePersistence(
+  'if (localStorage.H2O_LOADER_V3_WAVE_DIAG === "1") { return { pilotPlan: pilot }; }'
+), "3.8E storage guard must not match pilotPlan diagnostics");
+
+for (const unsafeStorageSource of [
+  'localStorage.setItem("password", passwordValue);',
+  'sessionStorage.getItem("otp");',
+  'chrome.storage.local.set({ password: passwordValue });',
+  'chrome.storage.session.set({ currentPassword: passwordValue });',
+  'chrome.storage.local.set({ code: recoveryCode });',
+  'chrome.storage.local.set({ otp: otpValue });',
+]) {
+  assert(phase38eHasSensitiveStoragePersistence(unsafeStorageSource),
+    "3.8E storage guard must reject representative sensitive persistence");
+}`;
+
+    transformed =
+      transformed.slice(0, leakFunctionStart) +
+      correctedLeakContract +
+      transformed.slice(leakFunctionEnd + 2);
 
     return transformed;
   });
