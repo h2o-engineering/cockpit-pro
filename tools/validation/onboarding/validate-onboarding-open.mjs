@@ -3,11 +3,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { RUNTIME_BASE_DIR, extensionBuildDir } from '../../paths.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const IDENTITY_SCRIPT = path.join(REPO_ROOT, 'scripts', '0D4a.⬛️🔐 Identity Core 🔐.js');
-const LOADER_SRC   = fs.readFileSync(path.join(REPO_ROOT, 'tools', 'product', 'extension', 'chrome-live-loader.mjs'), 'utf8');
-const BG_SRC       = fs.readFileSync(path.join(REPO_ROOT, 'tools', 'product', 'extension', 'chrome-live-background.mjs'), 'utf8');
+const CHROME_TOOL_DIR = path.join(REPO_ROOT, 'tools', 'product', 'extensions', 'chatgpt', 'chrome');
+const IDENTITY_SCRIPT = path.join(RUNTIME_BASE_DIR, '0D4a.⬛️🔐 Identity Core 🔐.js');
+const LOADER_SRC   = fs.readFileSync(path.join(CHROME_TOOL_DIR, 'chrome-live-loader.mjs'), 'utf8');
+const BG_SRC       = fs.readFileSync(path.join(CHROME_TOOL_DIR, 'chrome-live-background.mjs'), 'utf8');
 const IDENTITY_SRC = fs.readFileSync(IDENTITY_SCRIPT, 'utf8');
 
 function assert(condition, message) {
@@ -53,8 +55,8 @@ assert(LOADER_SRC.includes('"identity:open-onboarding"'), 'A6: loader allows ide
 console.log('  loader ALLOW_ACTIONS includes identity:open-onboarding ✓');
 
 // A7: built outputs include the new action
-const builtLoader = fs.readFileSync(path.join(REPO_ROOT, 'build', 'chrome-ext-dev-controls', 'loader.js'), 'utf8');
-const builtBg     = fs.readFileSync(path.join(REPO_ROOT, 'build', 'chrome-ext-dev-controls', 'bg.js'), 'utf8');
+const builtLoader = fs.readFileSync(path.join(extensionBuildDir('dev-controls'), 'loader.js'), 'utf8');
+const builtBg     = fs.readFileSync(path.join(extensionBuildDir('dev-controls'), 'bg.js'), 'utf8');
 assert(builtLoader.includes('"identity:open-onboarding"'), 'A7: built loader includes identity:open-onboarding');
 assert(builtBg.includes('identity:open-onboarding'), 'A7: built bg.js includes identity:open-onboarding');
 console.log('  built outputs include identity:open-onboarding ✓');
@@ -239,10 +241,10 @@ console.log('Suite B PASSED ✓');
 console.log('\n── Suite C: Control Hub integration ─────────────────────────────');
 
 const CHUB_SRC = fs.readFileSync(
-  path.join(REPO_ROOT, 'scripts', '0Z1a.⬛️🕹️ Control Hub 🕹️.js'), 'utf8'
+  path.join(RUNTIME_BASE_DIR, '0Z1a.⬛️🕹️ Control Hub 🕹️.js'), 'utf8'
 );
 const CHUB_ACCOUNT_SRC = fs.readFileSync(
-  path.join(REPO_ROOT, 'scripts', '0Z1e.⚫️🔐 Account Tab (Control Hub 🔌 Plugin) 🔐.js'), 'utf8'
+  path.join(RUNTIME_BASE_DIR, '0Z1e.⚫️🔐 Account Tab (Control Hub 🔌 Plugin) 🔐.js'), 'utf8'
 );
 const CHUB_ACCOUNT_SURFACE = `${CHUB_SRC}\n${CHUB_ACCOUNT_SRC}`;
 
