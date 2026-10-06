@@ -16,6 +16,8 @@ const BACKGROUND_VALIDATOR =
   "tools/validation/identity/validate-identity-background-bundle.mjs";
 const PHASE3_0Q_VALIDATOR =
   "tools/validation/identity/validate-identity-phase3_0q.mjs";
+const PHASE3_4D_VALIDATOR =
+  "tools/validation/identity/validate-identity-phase3_4d-baseline.mjs";
 const SOURCE_SAFE_VALIDATION_MODE = "source-safe-local";
 const SOURCE_SAFE_TEMP_ROOT = fs.mkdtempSync(
   path.join(os.tmpdir(), "h2o-identity-release-gate-"),
@@ -415,6 +417,43 @@ function createSourceSafeLegacyValidatorFixtures() {
     PHASE3_0Q_VALIDATOR,
     phase3Destinations.map(([, destination]) => destination),
   );
+
+  writeSourceSafeValidatorCopy(PHASE3_4D_VALIDATOR, (source) => {
+    const repoRootDeclaration =
+      'const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");';
+    const extBuildRelBlock = `function extBuildRel(variant, ...segments) {
+  return path.relative(REPO_ROOT, path.join(extensionBuildDir(variant), ...segments));
+}`;
+    const canonicalExtBuildRelBlock = `${extBuildRelBlock}
+
+function canonicalExtBuildRel(variant, ...segments) {
+  return path.relative(
+    REPO_ROOT,
+    path.join(REPO_ROOT, "apps", "extensions", "chatgpt", "chrome", variant, ...segments),
+  );
+}`;
+
+    let transformed = source
+      .replace(repoRootDeclaration, `const REPO_ROOT = ${JSON.stringify(REPO_ROOT)};`)
+      .replace(extBuildRelBlock, canonicalExtBuildRelBlock);
+
+    const activeBuildStart = transformed.indexOf("const ACTIVE_BUILDS = [");
+    const activeBuildEnd = transformed.indexOf("\n];", activeBuildStart);
+    if (activeBuildStart < 0 || activeBuildEnd < 0) {
+      throw new Error("[H2O Identity] Phase 3.4D ACTIVE_BUILDS block not found");
+    }
+    const activeBuildBlock = transformed.slice(activeBuildStart, activeBuildEnd + 3);
+    const canonicalActiveBuildBlock = activeBuildBlock.replaceAll(
+      "extBuildRel(",
+      "canonicalExtBuildRel(",
+    );
+    transformed =
+      transformed.slice(0, activeBuildStart) +
+      canonicalActiveBuildBlock +
+      transformed.slice(activeBuildEnd + 3);
+
+    return transformed;
+  });
 }
 
 function runCommand(command) {
