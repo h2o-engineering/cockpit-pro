@@ -24,6 +24,8 @@ const PHASE3_8E_VALIDATOR =
   "tools/validation/identity/validate-identity-phase3_8e-password-integrity.mjs";
 const PHASE3_8F_VALIDATOR =
   "tools/validation/identity/validate-identity-phase3_8f-password-auth-release-gate.mjs";
+const PHASE4_7_VALIDATOR =
+  "tools/validation/identity/validate-identity-phase4_7-production-deployment-gate.mjs";
 const SOURCE_SAFE_VALIDATION_MODE = "source-safe-local";
 const SOURCE_SAFE_TEMP_ROOT = fs.mkdtempSync(
   path.join(os.tmpdir(), "h2o-identity-release-gate-"),
@@ -703,6 +705,63 @@ for (const unsafeStorageSource of [
       transformed.slice(0, storageFunctionStart) +
       correctedStorageContract +
       transformed.slice(storageFunctionEnd + 2);
+
+    return transformed;
+  });
+
+  writeSourceSafeValidatorCopy(PHASE4_7_VALIDATOR, (source) => {
+    const repoRootDeclaration =
+      'const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");';
+    let transformed = source.replace(
+      repoRootDeclaration,
+      `const REPO_ROOT = ${JSON.stringify(REPO_ROOT)};`,
+    );
+
+    const staleAssertion =
+      'assert(!prodManifest.externally_connectable,\n  "production manifest must not include externally_connectable");';
+    if (!transformed.includes(staleAssertion)) {
+      throw new Error("[H2O Identity] Phase 4.7 stale externally_connectable assertion not found");
+    }
+
+    const correctedExternallyConnectableContract = String.raw`const studioLauncherIdMatch = manifestSource.match(
+  /const STUDIO_LAUNCHER_EXTENSION_ID = "([a-p]{32})";/
+);
+assert(studioLauncherIdMatch,
+  "manifest source must declare one canonical Studio Launcher Chrome extension ID");
+const approvedStudioLauncherId = studioLauncherIdMatch[1];
+
+function phase47ExternallyConnectableIsApproved(value, approvedId) {
+  const ids = array(value && value.ids);
+  return ids.length === 1 && ids[0] === approvedId && ids[0] !== "*";
+}
+
+assert(phase47ExternallyConnectableIsApproved(
+  prodManifest.externally_connectable,
+  approvedStudioLauncherId,
+), "production externally_connectable must contain exactly the canonical Studio Launcher ID");
+
+const phase47UnknownId =
+  approvedStudioLauncherId === "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ? "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    : "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+assert(!phase47ExternallyConnectableIsApproved(
+  { ids: ["*"] },
+  approvedStudioLauncherId,
+), "Phase 4.7 must reject wildcard externally_connectable");
+assert(!phase47ExternallyConnectableIsApproved(
+  { ids: [phase47UnknownId] },
+  approvedStudioLauncherId,
+), "Phase 4.7 must reject an unknown externally_connectable ID");
+assert(!phase47ExternallyConnectableIsApproved(
+  { ids: [approvedStudioLauncherId, phase47UnknownId] },
+  approvedStudioLauncherId,
+), "Phase 4.7 must reject multiple externally_connectable IDs");`;
+
+    transformed = transformed.replace(
+      staleAssertion,
+      correctedExternallyConnectableContract,
+    );
 
     return transformed;
   });
