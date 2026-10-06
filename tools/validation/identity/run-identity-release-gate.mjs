@@ -339,6 +339,7 @@ function createSourceSafeLegacyValidatorFixtures() {
     "config",
     "tools/product",
     "tools/paths.mjs",
+    "src-runtime-base/0D4a.⬛️🔐 Identity Core 🔐.js",
   ]) {
     linkSourceSafeValidationInput(
       input,
