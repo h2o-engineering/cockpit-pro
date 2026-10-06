@@ -763,6 +763,54 @@ assert(!phase47ExternallyConnectableIsApproved(
       correctedExternallyConnectableContract,
     );
 
+    const staleLocalConfigEndMarker =
+      '  "runtime/page/provider sources must not reference local config or .env files as committed runtime config");';
+    const staleLocalConfigEnd = transformed.indexOf(staleLocalConfigEndMarker);
+    const staleLocalConfigStart = transformed.lastIndexOf(
+      "assert(",
+      staleLocalConfigEnd,
+    );
+    if (staleLocalConfigStart < 0 || staleLocalConfigEnd < 0) {
+      throw new Error("[H2O Identity] Phase 4.7 stale local-config assertion not found");
+    }
+
+    const correctedLocalConfigContract = String.raw`const phase47RuntimeConfigSources =
+  background + provider + billingProvider + loader + identityCore +
+  accountPlugin + identitySurfaceJs + identitySurfaceHtml;
+
+function phase47HasForbiddenLocalConfigReference(sourceText) {
+  if (sourceText.includes("identity-provider.local.json")) return true;
+  const withoutProcessEnvAccess = sourceText.replace(
+    /\bprocess(?:\.|\?\.)env\b/g,
+    "processEnv",
+  );
+  const dotenvFilePattern =
+    /(?:^|[^A-Za-z0-9_$])\.env(?:\.[A-Za-z0-9_-]+)?(?=$|[^A-Za-z0-9_$])/m;
+  return dotenvFilePattern.test(withoutProcessEnvAccess);
+}
+
+assert(!phase47HasForbiddenLocalConfigReference(phase47RuntimeConfigSources),
+  "runtime/page/provider sources must not reference local config or .env files as committed runtime config");
+
+assert(!phase47HasForbiddenLocalConfigReference(
+  "const envBuildTs = Number(process.env.H2O_BUILD_TS);"
+), "Phase 4.7 local-config guard must allow process.env property access");
+
+for (const forbiddenLocalConfigSource of [
+  'const file = ".env";',
+  'const file = ".env.local";',
+  'const file = "config/.env.production";',
+  'const file = "config/local/identity-provider.local.json";',
+]) {
+  assert(phase47HasForbiddenLocalConfigReference(forbiddenLocalConfigSource),
+    "Phase 4.7 local-config guard must reject real local config file references");
+}`;
+
+    transformed =
+      transformed.slice(0, staleLocalConfigStart) +
+      correctedLocalConfigContract +
+      transformed.slice(staleLocalConfigEnd + staleLocalConfigEndMarker.length);
+
     return transformed;
   });
 }
