@@ -14154,8 +14154,8 @@ if (ARCHIVE_WORKBENCH_ENABLED &&
         }),
       });
     __h2oBackgroundSyncRuntime.install();
-  } catch (error) {
-    console.warn(TAG, "background Sync unavailable", String(error && (error.code || error.message || error)));
+  } catch {
+    console.warn(TAG, "background Sync unavailable");
   }
 }
 /* Unconditional, and after both the composed and the not-composed paths: a
