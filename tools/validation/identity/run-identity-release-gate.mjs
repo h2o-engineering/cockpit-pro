@@ -18,6 +18,8 @@ const PHASE3_0Q_VALIDATOR =
   "tools/validation/identity/validate-identity-phase3_0q.mjs";
 const PHASE3_4D_VALIDATOR =
   "tools/validation/identity/validate-identity-phase3_4d-baseline.mjs";
+const PHASE3_5B_VALIDATOR =
+  "tools/validation/identity/validate-identity-phase3_5b-release-gate.mjs";
 const SOURCE_SAFE_VALIDATION_MODE = "source-safe-local";
 const SOURCE_SAFE_TEMP_ROOT = fs.mkdtempSync(
   path.join(os.tmpdir(), "h2o-identity-release-gate-"),
@@ -451,6 +453,45 @@ function canonicalExtBuildRel(variant, ...segments) {
       transformed.slice(0, activeBuildStart) +
       canonicalActiveBuildBlock +
       transformed.slice(activeBuildEnd + 3);
+
+    return transformed;
+  });
+
+  writeSourceSafeValidatorCopy(PHASE3_5B_VALIDATOR, (source) => {
+    const repoRootDeclaration =
+      'const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");';
+    const extBuildRelBlock = `function extBuildRel(variant, ...segments) {
+  return path.relative(REPO_ROOT, path.join(extensionBuildDir(variant), ...segments));
+}`;
+    const canonicalExtBuildRelBlock = `${extBuildRelBlock}
+
+function canonicalExtBuildRel(variant, ...segments) {
+  return path.relative(
+    REPO_ROOT,
+    path.join(REPO_ROOT, "apps", "extensions", "chatgpt", "chrome", variant, ...segments),
+  );
+}`;
+
+    let transformed = source
+      .replace(repoRootDeclaration, `const REPO_ROOT = ${JSON.stringify(REPO_ROOT)};`)
+      .replace(extBuildRelBlock, canonicalExtBuildRelBlock);
+
+    for (const blockName of ["ACTIVE_BUILDS", "SYNTAX_COMMANDS"]) {
+      const blockStart = transformed.indexOf(`const ${blockName} = [`);
+      const blockEnd = transformed.indexOf("\n];", blockStart);
+      if (blockStart < 0 || blockEnd < 0) {
+        throw new Error(`[H2O Identity] Phase 3.5B ${blockName} block not found`);
+      }
+      const block = transformed.slice(blockStart, blockEnd + 3);
+      const canonicalBlock = block.replaceAll(
+        "extBuildRel(",
+        "canonicalExtBuildRel(",
+      );
+      transformed =
+        transformed.slice(0, blockStart) +
+        canonicalBlock +
+        transformed.slice(blockEnd + 3);
+    }
 
     return transformed;
   });
