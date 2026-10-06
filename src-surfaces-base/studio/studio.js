@@ -158,10 +158,14 @@ const state = {
   interfaceMetaByChat: {},
 };
 
+H2O.Studio.authoring.editOverrideCompat.configure({
+  getCurrentSnapshotId: () => state.currentReaderSnapshot?.snapshotId || "",
+  applyOverlayOp: (op) => H2O.Studio.RibbonBridge?.applyOverlayOp?.(op),
+});
+
 let activeRailPopoverButton = null;
 let folderOperatorModeMemoryValue = false;
 let folderOperatorModeHydrationSequence = 0;
-const editOverrideCompatibilityBySnapshot = new Map();
 
 // D2 blocker: expose a read-only accessor for the current reader chat
 // context so the Studio Dock shell (dock-shell.studio.js) can route
@@ -1014,104 +1018,25 @@ function subscribeReaderToPresentationPreference(){
   state.readerPresentationUnsubscribe = typeof unsubscribe === "function" ? unsubscribe : function () {};
 }
 
-// ─── Edit-override compatibility view ────────────────────────────────────────
-// Renderer still consumes a synchronous getEditOverride hook. The durable
-// authority is the existing per-snapshot edit-overlay store; renderReader
-// hydrates this in-memory projection before Renderer receives the hook.
-
-function buildEditOverrideCompatibilityView(overlay){
-  const view = new Map();
-  try {
-    const applier = W.H2O?.Studio?.overlay;
-    if (!overlay || typeof applier?.computeMessageState !== "function") return view;
-    const turnIndexes = new Set();
-    (Array.isArray(overlay.ops) ? overlay.ops : []).forEach((op) => {
-      const idx = Number(op?.target?.turnIdx);
-      if (op?.target?.kind === "message" && Number.isInteger(idx) && idx > 0) turnIndexes.add(idx);
-    });
-    turnIndexes.forEach((idx) => {
-      const messageState = applier.computeMessageState(overlay, idx);
-      const body = messageState?.textReplace?.body;
-      if (typeof body === "string") view.set(idx, body);
-    });
-  } catch {}
-  return view;
-}
-
+// Reader, Renderer, and Ribbon retain their existing composition call sites.
 function setEditOverrideCompatibilityView(snapshotId, overlay){
-  const sid = String(snapshotId || "").trim();
-  if (!sid) return new Map();
-  const view = buildEditOverrideCompatibilityView(overlay);
-  editOverrideCompatibilityBySnapshot.set(sid, view);
-  return view;
+  return H2O.Studio.authoring.editOverrideCompat.updateFromOverlay(snapshotId, overlay);
 }
 
 async function hydrateEditOverrideCompatibilityView(snapshotId){
-  const sid = String(snapshotId || "").trim();
-  if (!sid) return null;
-  try {
-    const store = W.H2O?.Studio?.store?.editOverlay;
-    if (!store || typeof store.get !== "function") {
-      editOverrideCompatibilityBySnapshot.set(sid, new Map());
-      return null;
-    }
-    const overlay = await store.get(sid);
-    setEditOverrideCompatibilityView(sid, overlay || null);
-    return overlay || null;
-  } catch {
-    editOverrideCompatibilityBySnapshot.set(sid, new Map());
-    return null;
-  }
+  return H2O.Studio.authoring.editOverrideCompat.hydrate(snapshotId);
 }
 
 function getEditOverride(snapshotId, turnIdx){
-  const sid = String(snapshotId || "").trim();
-  const idx = Number(turnIdx);
-  if (!sid || !Number.isInteger(idx) || idx < 1) return null;
-  const view = editOverrideCompatibilityBySnapshot.get(sid);
-  return view && view.has(idx) ? view.get(idx) : null;
+  return H2O.Studio.authoring.editOverrideCompat.get(snapshotId, turnIdx);
 }
 
 function setEditOverride(snapshotId, turnIdx, text){
-  try {
-    const sid = String(snapshotId || "").trim();
-    const idx = Number(turnIdx);
-    const snap = state.currentReaderSnapshot;
-    const bridge = W.H2O?.Studio?.RibbonBridge;
-    if (!sid || !Number.isInteger(idx) || idx < 1) return false;
-    if (String(snap?.snapshotId || "").trim() !== sid) return false;
-    if (!bridge || typeof bridge.applyOverlayOp !== "function") return false;
-
-    const view = editOverrideCompatibilityBySnapshot.get(sid) || new Map();
-    view.set(idx, String(text));
-    editOverrideCompatibilityBySnapshot.set(sid, view);
-    Promise.resolve(bridge.applyOverlayOp({
-      type: "text-replace",
-      target: { kind: "message", turnIdx: idx, messageId: null },
-      payload: { text: String(text) },
-    })).then((result) => {
-      if (result?.ok && result.overlay) setEditOverrideCompatibilityView(sid, result.overlay);
-      else hydrateEditOverrideCompatibilityView(sid).catch(() => {});
-    }, () => {
-      hydrateEditOverrideCompatibilityView(sid).catch(() => {});
-    });
-    return true;
-  } catch {
-    return false;
-  }
+  return H2O.Studio.authoring.editOverrideCompat.set(snapshotId, turnIdx, text);
 }
 
 async function deleteEditOverridesForSnapshot(snapshotId){
-  const sid = String(snapshotId || "").trim();
-  if (!sid) return false;
-  editOverrideCompatibilityBySnapshot.delete(sid);
-  try {
-    const store = W.H2O?.Studio?.store?.editOverlay;
-    if (!store || typeof store.remove !== "function") return false;
-    return await store.remove(sid) === true;
-  } catch {
-    return false;
-  }
+  return H2O.Studio.authoring.editOverrideCompat.removeSnapshot(snapshotId);
 }
 
 // ─── Delete-confirm state ─────────────────────────────────────────────────────
