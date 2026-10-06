@@ -6,24 +6,24 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { extensionBuildDir } from '../../paths.mjs';
+import { RUNTIME_BASE_DIR, extensionBuildDir } from '../../paths.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+const CHROME_TOOL_DIR = path.join(REPO_ROOT, 'tools', 'product', 'extensions', 'chatgpt', 'chrome');
 
-const LOADER_SRC     = fs.readFileSync(path.join(REPO_ROOT, 'tools', 'product', 'extension', 'chrome-live-loader.mjs'), 'utf8');
-const BG_SRC         = fs.readFileSync(path.join(REPO_ROOT, 'tools', 'product', 'extension', 'chrome-live-background.mjs'), 'utf8');
-const BUILD_SRC      = fs.readFileSync(path.join(REPO_ROOT, 'tools', 'product', 'extension', 'build-chrome-live-extension.mjs'), 'utf8');
+const LOADER_SRC     = fs.readFileSync(path.join(CHROME_TOOL_DIR, 'chrome-live-loader.mjs'), 'utf8');
+const BG_SRC         = fs.readFileSync(path.join(CHROME_TOOL_DIR, 'chrome-live-background.mjs'), 'utf8');
+const BUILD_SRC      = fs.readFileSync(path.join(CHROME_TOOL_DIR, 'build-chrome-live-extension.mjs'), 'utf8');
 const GITIGNORE_SRC  = fs.readFileSync(path.join(REPO_ROOT, '.gitignore'), 'utf8');
-const IDENTITY_SCRIPT = path.join(REPO_ROOT, 'scripts', '0D4a.⬛️🔐 Identity Core 🔐.js');
+const IDENTITY_SCRIPT = path.join(RUNTIME_BASE_DIR, '0D4a.⬛️🔐 Identity Core 🔐.js');
 const IDENTITY_SRC   = fs.readFileSync(IDENTITY_SCRIPT, 'utf8');
-const CHUB_SRC       = fs.readFileSync(path.join(REPO_ROOT, 'scripts', '0Z1a.⬛️🕹️ Control Hub 🕹️.js'), 'utf8');
-const CHUB_ACCOUNT_SRC = fs.readFileSync(path.join(REPO_ROOT, 'scripts', '0Z1e.⚫️🔐 Account Tab (Control Hub 🔌 Plugin) 🔐.js'), 'utf8');
+const CHUB_SRC       = fs.readFileSync(path.join(RUNTIME_BASE_DIR, '0Z1a.⬛️🕹️ Control Hub 🕹️.js'), 'utf8');
+const CHUB_ACCOUNT_SRC = fs.readFileSync(path.join(RUNTIME_BASE_DIR, '0Z1e.⚫️🔐 Account Tab (Control Hub 🔌 Plugin) 🔐.js'), 'utf8');
 const CHUB_ACCOUNT_SURFACE = `${CHUB_SRC}\n${CHUB_ACCOUNT_SRC}`;
-const FIRST_RUN_SRC  = fs.readFileSync(path.join(REPO_ROOT, 'scripts', '0D4b.⚫️🔐 Identity First-Run Prompt 🚪🔐.js'), 'utf8');
+const FIRST_RUN_SRC  = fs.readFileSync(path.join(RUNTIME_BASE_DIR, '0D4b.⚫️🔐 Identity First-Run Prompt 🚪🔐.js'), 'utf8');
 
-// Phase 4B-1b: built-extension read paths now resolve via paths.extensionBuildDir("dev-controls"),
-// which composes paths.BUILD_DIR with "chrome-ext-dev-controls". Byte-identical resolution to the
-// legacy path.join(REPO_ROOT, 'build', 'chrome-ext-dev-controls', ...) form.
+// Built-extension reads use the central path authority so H2O_EXT_BUILD_ROOT
+// naturally redirects this validator to source-safe disposable artifacts.
 const BUILT_LOADER = fs.readFileSync(path.join(extensionBuildDir('dev-controls'), 'loader.js'), 'utf8');
 const BUILT_BG     = fs.readFileSync(path.join(extensionBuildDir('dev-controls'), 'bg.js'), 'utf8');
 
