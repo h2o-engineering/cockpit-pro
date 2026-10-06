@@ -22,6 +22,8 @@ const PHASE3_5B_VALIDATOR =
   "tools/validation/identity/validate-identity-phase3_5b-release-gate.mjs";
 const PHASE3_8E_VALIDATOR =
   "tools/validation/identity/validate-identity-phase3_8e-password-integrity.mjs";
+const PHASE3_8F_VALIDATOR =
+  "tools/validation/identity/validate-identity-phase3_8f-password-auth-release-gate.mjs";
 const SOURCE_SAFE_VALIDATION_MODE = "source-safe-local";
 const SOURCE_SAFE_TEMP_ROOT = fs.mkdtempSync(
   path.join(os.tmpdir(), "h2o-identity-release-gate-"),
@@ -641,6 +643,66 @@ for (const unsafeStorageSource of [
       transformed.slice(0, leakFunctionStart) +
       correctedLeakContract +
       transformed.slice(leakFunctionEnd + 2);
+
+    return transformed;
+  });
+
+  writeSourceSafeValidatorCopy(PHASE3_8F_VALIDATOR, (source) => {
+    const repoRootDeclaration =
+      'const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");';
+    let transformed = source.replace(
+      repoRootDeclaration,
+      `const REPO_ROOT = ${JSON.stringify(REPO_ROOT)};`,
+    );
+
+    const storageFunctionStart = transformed.indexOf(
+      "function assertNoPasswordStorage(label, source) {",
+    );
+    const storageFunctionEndMarker =
+      '\n}\n\nconsole.log("\\n-- Identity Phase 3.8F password-auth release-gate validation ----");';
+    const storageFunctionEnd = transformed.indexOf(
+      storageFunctionEndMarker,
+      storageFunctionStart,
+    );
+    if (storageFunctionStart < 0 || storageFunctionEnd < 0) {
+      throw new Error("[H2O Identity] Phase 3.8F password storage function not found");
+    }
+
+    const correctedStorageContract = String.raw`function phase38fHasSensitiveStoragePersistence(source) {
+  const pageStoragePattern =
+    /(localStorage|sessionStorage)\.(?:setItem|getItem)\([^)]*(?:password|code|otp)/i;
+  const chromeStoragePattern =
+    /chrome\.storage\.(?:local|session)[\s\S]{0,180}(?:password\s*:|currentPassword|current_password|code\s*:|otp\s*:)/i;
+  return pageStoragePattern.test(source) || chromeStoragePattern.test(source);
+}
+
+function assertNoPasswordStorage(label, source) {
+  assert(!phase38fHasSensitiveStoragePersistence(source),
+    label + ": password/code values must not be written to storage");
+  assert(!/password[\s\S]{0,140}(console\.log|console\.warn|diagnostic|diagnostics|audit)/i.test(source),
+    label + ": password values must not be logged or diagnosed");
+}
+
+assert(!phase38fHasSensitiveStoragePersistence(
+  'if (localStorage.H2O_LOADER_V3_WAVE_DIAG === "1") { return { pilotPlan: pilot }; }'
+), "3.8F storage guard must not match pilotPlan diagnostics");
+
+for (const unsafeStorageSource of [
+  'localStorage.setItem("password", passwordValue);',
+  'sessionStorage.getItem("otp");',
+  'chrome.storage.local.set({ password: passwordValue });',
+  'chrome.storage.session.set({ currentPassword: passwordValue });',
+  'chrome.storage.local.set({ code: recoveryCode });',
+  'chrome.storage.local.set({ otp: otpValue });',
+]) {
+  assert(phase38fHasSensitiveStoragePersistence(unsafeStorageSource),
+    "3.8F storage guard must reject representative sensitive persistence");
+}`;
+
+    transformed =
+      transformed.slice(0, storageFunctionStart) +
+      correctedStorageContract +
+      transformed.slice(storageFunctionEnd + 2);
 
     return transformed;
   });
