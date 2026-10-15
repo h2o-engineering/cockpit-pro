@@ -211,6 +211,7 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   // Studio-local edit overlay records. Passive until future ribbon phases
   // create overlay operations.
   "store/editOverlay.js",
+  "overlay/edit-override-compat.studio.js",
   // Dock Panel read-only feature store façades (Phase 1b-1e). Each is a
   // passive, sync-API/async-hydrate facade over a native engine's
   // chrome.storage keys. studio.html references all four; without these
@@ -1593,6 +1594,7 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   "store/index.js",
   "store/highlights.js",
   "store/editOverlay.js",
+  "overlay/edit-override-compat.studio.js",
   // Dock Panel read-only feature store façades (Phase 1b-1e). See SOURCE_FILES.
   "store/prefs.js",
   "store/context.js",

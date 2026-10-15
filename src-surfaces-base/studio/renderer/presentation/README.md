@@ -95,10 +95,26 @@ with reason `unknown-profile-fallback`, which is not evidence of admission.
 
 Accepted limitation (v1): captured ChatGPT rich content receives the global
 compatibility baseline (`studio.css` `.wbRichRoot` rules, incl. Reader-route
-user end-alignment and pointer suppression of control-like elements) plus the
-Clean Reader element rules only. Provider-fidelity presentation of captured
-markup is not promised by this profile; `chatgpt-reference` stays the
-provider-fidelity presentation and is unchanged.
+user end-alignment) plus the Clean Reader element rules only. Provider-fidelity
+presentation of captured markup is not promised by this profile;
+`chatgpt-reference` stays the provider-fidelity presentation and is unchanged.
+
+## Provider interaction (M04-P2-R02, HDA decision F)
+
+Presentation profiles do not define provider-interaction policy. The Renderer
+sanitizer (`renderer/safety/`, policyVersion 2) is the single authority for
+what captured provider content may do: it admits links (`a[href]` with admitted
+schemes) and native disclosure (`details` / `summary`, including the authored
+`open` state and the user-agent default disclosure control of a `details`
+without an explicit `summary`), and removes forms, form controls, `tabindex`,
+event handlers, identity attributes and unsafe URLs. Admitted native
+disclosures must remain consistently operable — pointer, keyboard and
+assistive-technology semantics — and profile-neutral: neither profile
+stylesheet nor global Shell CSS may suppress or alter that interaction
+(`pointer-events` is not an interaction boundary). The former global
+`.wbRichRoot :where(button, input, textarea, select, summary){pointer-events:none}`
+rule was deleted for that reason. H2O-owned interactive controls placed inside
+the rich root are never subject to provider-origin restrictions.
 
 Stylesheet `1.0.1` (M04 P2 T4): the H2O user attachment grid / card is skinned
 (structural `cgUserAttachmentGrid` / `cgUserAttachmentCard` selectors), and the

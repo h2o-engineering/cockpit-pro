@@ -18,6 +18,26 @@ re-exportable and bit-identical to what was captured.
 This contract defines the **non-destructive overlay model** that holds
 those operations.
 
+## Authoring edit-override compatibility boundary
+
+`overlay/edit-override-compat.studio.js` owns the page-lifetime projection
+used by the synchronous Reader/Renderer `getEditOverride` hook. Its public
+namespace is `H2O.Studio.authoring.editOverrideCompat` (schema
+`h2o.studio.authoring-edit-override-compat`, version `1.0.0`). The API is
+`configure({ getCurrentSnapshotId, applyOverlayOp })`,
+`updateFromOverlay(snapshotId, overlay)`, `hydrate(snapshotId)`,
+`get(snapshotId, turnIdx)`, `set(snapshotId, turnIdx, text)`, and
+`removeSnapshot(snapshotId)`.
+
+`get` and `set` return synchronously. `hydrate` and `removeSnapshot` return
+Promises. The module projects active `text-replace` state through
+`H2O.Studio.overlay.computeMessageState`; it hydrates and removes records only
+through `H2O.Studio.store.editOverlay`. A `set` dispatches the existing
+`text-replace` operation through its configured Authoring/Ribbon collaborator.
+`updateFromOverlay` changes only the in-memory projection. The edit-overlay
+Store remains the sole persistence authority, and captured snapshots remain
+immutable.
+
 ## Hard invariants (Phase 2 and forever)
 
 These rules are immutable for the lifetime of the overlay subsystem.
