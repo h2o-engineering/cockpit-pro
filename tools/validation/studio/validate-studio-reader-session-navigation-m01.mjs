@@ -13,6 +13,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const STUDIO = path.join(ROOT, 'src-surfaces-base/studio');
 const source = fs.readFileSync(path.join(STUDIO, 'studio.js'), 'utf8');
+const readerSource = fs.readFileSync(path.join(STUDIO, 'reader/reader-session-current-render.studio.js'), 'utf8');
+const READER_MOVED = new Set(["bindReaderSemanticIndex", "getReaderSemanticIndex", "getReaderDecorationContributions", "disposeReaderRenderDecorations", "createReaderResumeController", "isCurrentReaderRoot", "getReusableReaderMount", "isReusableReaderMountCurrent", "isReaderPresentationCurrent", "canReuseReaderDOM", "refreshReaderPresentation", "subscribeReaderToPresentationPreference", "resolveReaderNavigationTarget", "getReaderNavigationTarget", "publishReaderTurnSelection", "readerNearestScrollDelta", "goToReaderTarget", "stepReaderTarget", "nextReaderTarget", "previousReaderTarget"]);
 const results = { current: 0, baseline: 0, fixture: 0, failed: 0 };
 async function check(kind, label, fn) {
   try {
@@ -108,7 +110,7 @@ try {
     'renderer/content/content-renderer.v1.js', 'renderer/chat-renderer.studio.js',
   ];
   for (const rel of rendererScripts) await page.addScriptTag({ path: path.join(STUDIO, rel) });
-  const seams = ['getStudioChatRenderer', 'bindReaderSemanticIndex', 'getReaderSemanticIndex', 'getReaderDecorationContributions', 'isCurrentReaderRoot', 'resolveReaderNavigationTarget', 'getReaderNavigationTarget', 'publishReaderTurnSelection', 'readerNearestScrollDelta', 'goToReaderTarget', 'stepReaderTarget', 'nextReaderTarget', 'previousReaderTarget', 'disposeReaderRenderDecorations', 'studioHostUnmount', 'buildReaderDOM'].map(name => extract(name)).join('\n');
+  const seams = ['getStudioChatRenderer', 'bindReaderSemanticIndex', 'getReaderSemanticIndex', 'getReaderDecorationContributions', 'isCurrentReaderRoot', 'resolveReaderNavigationTarget', 'getReaderNavigationTarget', 'publishReaderTurnSelection', 'readerNearestScrollDelta', 'goToReaderTarget', 'stepReaderTarget', 'nextReaderTarget', 'previousReaderTarget', 'disposeReaderRenderDecorations', 'studioHostUnmount', 'buildReaderDOM'].map(name => extract(name, false, READER_MOVED.has(name) ? readerSource : source)).join('\n');
   const readerSeamsScript = `(() => {
     const W = window, H2O = W.H2O, $ = selector => document.querySelector(selector);
     const state = { currentReaderSnapshot: null, currentReaderRender: null, selectedSnapshotId: '', selectedChatId: '' };

@@ -13,8 +13,11 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(__filename), '..', '..', '..');
 const STUDIO_REL = 'src-surfaces-base/studio/studio.js';
+const READER_SESSION_REL = 'src-surfaces-base/studio/reader/reader-session-current-render.studio.js';
 const HOST_REL = 'src-surfaces-base/studio/S0D3e. 🎬 Transcript Studio Host - Studio.js';
 const studioSource = fs.readFileSync(path.join(REPO_ROOT, STUDIO_REL), 'utf8');
+const readerSource = fs.readFileSync(path.join(REPO_ROOT, READER_SESSION_REL), 'utf8');
+const READER_MOVED = new Set(["bindReaderSemanticIndex", "getReaderSemanticIndex", "getReaderDecorationContributions", "disposeReaderRenderDecorations", "createReaderResumeController", "isCurrentReaderRoot", "getReusableReaderMount", "isReusableReaderMountCurrent", "isReaderPresentationCurrent", "canReuseReaderDOM", "refreshReaderPresentation", "subscribeReaderToPresentationPreference", "resolveReaderNavigationTarget", "getReaderNavigationTarget", "publishReaderTurnSelection", "readerNearestScrollDelta", "goToReaderTarget", "stepReaderTarget", "nextReaderTarget", "previousReaderTarget"]);
 const hostSource = fs.readFileSync(path.join(REPO_ROOT, HOST_REL), 'utf8');
 
 function extractFunction(source, name) {
@@ -365,7 +368,7 @@ function createRenderHarness() {
      * target maintenance); extracted verbatim so the real seam runs unstubbed. */
     'rememberPublicationTarget',
     'renderReader',
-  ].map((name) => extractFunction(studioSource, name)).join('\n');
+  ].map((name) => extractFunction(READER_MOVED.has(name) ? readerSource : studioSource, name)).join('\n');
   vm.runInContext(`${lifecycleFunctions}\nthis.renderReaderUnderTest = renderReader;\nthis.isCurrentReaderRootUnderTest = isCurrentReaderRoot;\nthis.leaveReaderUnderTest = studioHostUnmountPreservingRouteHash;\nthis.subscribeReaderUnderTest = subscribeReaderToPresentationPreference;\nthis.refreshReaderPresentationUnderTest = refreshReaderPresentation;\nthis.isReaderPresentationCurrentUnderTest = isReaderPresentationCurrent;`, sandbox);
 
   return {
@@ -435,7 +438,7 @@ function createRouteHashHarness() {
     location.hash = '#/read/A';
     return true;
   };
-  vm.runInContext(`${extractFunction(studioSource, 'disposeReaderRenderDecorations')}\n${extractFunction(studioSource, 'studioHostUnmount')}\n${extractFunction(studioSource, 'studioHostUnmountPreservingRouteHash')}\nthis.leave = studioHostUnmountPreservingRouteHash;`, sandbox);
+  vm.runInContext(`${extractFunction(readerSource, 'disposeReaderRenderDecorations')}\n${extractFunction(studioSource, 'studioHostUnmount')}\n${extractFunction(studioSource, 'studioHostUnmountPreservingRouteHash')}\nthis.leave = studioHostUnmountPreservingRouteHash;`, sandbox);
   return { leave: sandbox.leave, readerEl, oldRoot, location, getUnmounts: () => unmounts };
 }
 
@@ -906,8 +909,10 @@ await check('S4C: a failing decoration cleanup is diagnosed and never blocks Rea
   /* static: order inside the seam + no double dispose path */
   const unmount = extractFunction(studioSource, 'studioHostUnmount');
   assert.ok(unmount.indexOf('disposeReaderRenderDecorations(reason);') < unmount.indexOf('state.currentReaderRender = null;'), 'C: dispose precedes forgetting the binding');
-  assert.equal((studioSource.match(/disposeReaderRenderDecorations\(/g) || []).length, 2, 'exactly one disposal call site (definition + studioHostUnmount)');
-  assert.doesNotMatch(extractFunction(studioSource, 'disposeReaderRenderDecorations'), /querySelector|getElementById|scrollTo|location\.|createLifecycle/, 'the disposer only reaches the bound lifecycle');
+  assert.equal((readerSource.match(/function disposeReaderRenderDecorations\(/g) || []).length, 1, 'one Reader-owned disposer implementation');
+  assert.match(studioSource, /function disposeReaderRenderDecorations\(\.\.\.args\)\{ return readerSessionCurrentRender\.disposeReaderRenderDecorations\(\.\.\.args\); \}/, 'studio.js keeps only the thin disposer adapter');
+  assert.equal((studioSource.match(/disposeReaderRenderDecorations\(reason\);/g) || []).length, 1, 'Shell unmount delegates disposal exactly once');
+  assert.doesNotMatch(extractFunction(readerSource, 'disposeReaderRenderDecorations'), /querySelector|getElementById|scrollTo|location\.|createLifecycle/, 'the Reader-owned disposer only reaches the bound lifecycle');
 });
 
 await check('mounted Reader listener retains only primitive snapshot identity', () => {

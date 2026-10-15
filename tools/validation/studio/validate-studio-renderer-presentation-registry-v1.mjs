@@ -14,7 +14,7 @@
 // stylesheet scoping and the authorized static admission lists.
 // Tier 2 (real Chromium): the REAL Appearance panel over the REAL Renderer
 // registry (lazy list-derived Presentation row, missing-registry isolation),
-// then the REAL Reader seams (extracted verbatim from studio.js, as the
+// then the REAL Reader seams (extracted verbatim from their Reader/Shell owner sources, as the
 // lifecycle validator does) driving the REAL Renderer through the New UI
 // selector: selection, hydration, equivalent reuse, changed-profile rebuild,
 // committed and rapid A -> B -> A, unknown preference, route leave; then the
@@ -39,6 +39,7 @@ const KEYS_REL = 'appearance/appearance-keys.js';
 const STORE_REL = 'appearance/appearance-store.studio.js';
 const PANEL_REL = 'appearance/appearance-panel.studio.js';
 const STUDIO_JS_REL = 'studio.js';
+const READER_SESSION_REL = 'reader/reader-session-current-render.studio.js';
 const PROFILE_REL = 'renderer/presentation/presentation-profile.v1.js';
 const CLEAN_READER_REL = 'renderer/presentation/h2o-clean-reader.v1.js';
 const CLEAN_READER_CSS_REL = 'renderer/presentation/h2o-clean-reader.v1.css';
@@ -403,6 +404,8 @@ check('M04 P2 T3: studio.html, pack-studio (index-paired) and both publication o
 /* Same source-extraction convention as the lifecycle / Reader validators:
  * only the named seams run; the Studio application is not booted. */
 const studioSource = read(STUDIO_JS_REL);
+const readerSource = read(READER_SESSION_REL);
+const READER_MOVED = new Set(["bindReaderSemanticIndex", "getReaderSemanticIndex", "getReaderDecorationContributions", "disposeReaderRenderDecorations", "createReaderResumeController", "isCurrentReaderRoot", "getReusableReaderMount", "isReusableReaderMountCurrent", "isReaderPresentationCurrent", "canReuseReaderDOM", "refreshReaderPresentation", "subscribeReaderToPresentationPreference", "resolveReaderNavigationTarget", "getReaderNavigationTarget", "publishReaderTurnSelection", "readerNearestScrollDelta", "goToReaderTarget", "stepReaderTarget", "nextReaderTarget", "previousReaderTarget"]);
 function extract(name, text = studioSource) {
   const match = new RegExp(`\\b(?:async\\s+)?function\\s+${name}\\s*\\(`).exec(text);
   assert.ok(match, `missing source seam: ${name}`);
@@ -444,7 +447,7 @@ function readerSeamsScript() {
     const resolveFolderBindingsForChatIds = async () => new Map(); const normalizeFolderBinding = (v) => v; const resolveFolderName = () => ''; const updateRowFolderBinding = () => {};
     const getEditOverride = () => null; const refreshReaderOverlay = () => {}; const syncReaderTopOffset = () => {}; const renderReaderRouteMeta = () => {}; const setActiveSidebarChat = () => {}; const syncSelectionControls = () => {}; const applyUiState = () => {}; const esc = (v) => String(v || '');
     const publishReaderTurnSelection = () => null; const __mountOverlayEditorOnTurn = () => {};
-    ${READER_SEAMS.map((name) => extract(name)).join('\n')}
+    ${READER_SEAMS.map((name) => extract(name, READER_MOVED.has(name) ? readerSource : studioSource)).join('\n')}
     const realBuild = buildReaderDOM;
     /* observe every real render through the real seam */
     const observedBuild = (snap, input) => { const root = realBuild(snap, input); renders.push({ snapshotId: String(snap?.snapshotId || ''), effectiveId: state.currentReaderRender?.presentation?.effectiveId || null, requestedId: state.currentReaderRender?.presentation?.requestedId, reason: state.currentReaderRender?.presentation?.reason, marker: root.getAttribute('data-h2o-presentation-profile') }); return root; };

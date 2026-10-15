@@ -28,6 +28,7 @@ const CLEAN_READER_MARKER = 'data-h2o-presentation-profile="h2o-clean-reader"';
 const STUDIO_CSS_REL = 'studio.css';
 /* M03 S4C slice B: the Answer Timestamp consumer and the studio.js Reader bridge it consumes. */
 const STUDIO_JS_REL = 'studio.js';
+const READER_SESSION_REL = 'reader/reader-session-current-render.studio.js';
 const ANSWER_TIMESTAMP_REL = 'S1Z1a. \u{1F3AC} Answer Timestamp - Studio.js';
 function extractStudioFunction(source, name) {
   const match = new RegExp(`\\bfunction\\s+${name}\\s*\\(`).exec(source);
@@ -1066,7 +1067,11 @@ if (!chromium) {
     /* M03 S4C slice B: a second page for the Answer Timestamp consumer. */
     if (rel === '__studio_bridge__.js') {
       const studioSource = read(STUDIO_JS_REL);
-      const bridge = ['bindReaderSemanticIndex', 'getReaderSemanticIndex', 'getReaderDecorationContributions', 'disposeReaderRenderDecorations', 'studioHostUnmount'].map((name) => extractStudioFunction(studioSource, name)).join('\n');
+      const readerSource = read(READER_SESSION_REL);
+      const bridge = [
+        ...['bindReaderSemanticIndex', 'getReaderSemanticIndex', 'getReaderDecorationContributions', 'disposeReaderRenderDecorations'].map((name) => extractStudioFunction(readerSource, name)),
+        extractStudioFunction(studioSource, 'studioHostUnmount'),
+      ].join('\n');
       res.writeHead(200, { 'Content-Type': 'text/javascript' });
       res.end(`(() => { const state = { currentReaderEditOverrides: null, currentReaderRender: null }; const W = { H2O: window.H2O }; window.__unmounts = []; window.__warnings = []; W.H2O.studioHost = { unmount(reason) { window.__unmounts.push(reason); } }; const console = { warn: (...a) => window.__warnings.push(a.map(String).join(' ')) };\n${bridge}\nwindow.H2O.Studio.getReaderSemanticIndex = getReaderSemanticIndex; window.H2O.Studio.getReaderDecorationContributions = getReaderDecorationContributions; window.__bridge = { bind: bindReaderSemanticIndex, unmount: studioHostUnmount, state }; })();`);
       return;

@@ -22,6 +22,7 @@ const repoRoot = path.resolve(here, "../../..");
 const studioRoot = path.join(repoRoot, "src-surfaces-base/studio");
 const files = {
   studio: path.join(studioRoot, "studio.js"),
+  readerSession: path.join(studioRoot, "reader/reader-session-current-render.studio.js"),
   host: path.join(studioRoot, "S0D3e. 🎬 Transcript Studio Host - Studio.js"),
   css: path.join(studioRoot, "studio.css"),
   profileCss: path.join(studioRoot, "renderer/presentation/chatgpt-reference.v1.css"),
@@ -165,6 +166,8 @@ try {
   await page.addScriptTag({ path: files.host });
 
   const studioSource = await fs.readFile(files.studio, "utf8");
+  const readerSource = await fs.readFile(files.readerSession, "utf8");
+  const readerMoved = new Set(["bindReaderSemanticIndex", "getReaderSemanticIndex", "getReaderDecorationContributions", "disposeReaderRenderDecorations", "createReaderResumeController", "isCurrentReaderRoot", "getReusableReaderMount", "isReusableReaderMountCurrent", "isReaderPresentationCurrent", "canReuseReaderDOM", "refreshReaderPresentation", "subscribeReaderToPresentationPreference", "resolveReaderNavigationTarget", "getReaderNavigationTarget", "publishReaderTurnSelection", "readerNearestScrollDelta", "goToReaderTarget", "stepReaderTarget", "nextReaderTarget", "previousReaderTarget"]);
   const studioFunctions = [
     "studioHostUnmount",
     "getStudioChatRenderer",
@@ -183,7 +186,7 @@ try {
     "getReaderSemanticIndex",
     "getReaderDecorationContributions",
     "disposeReaderRenderDecorations",
-  ].map((name) => extractFunction(studioSource, name)).join("\n");
+  ].map((name) => extractFunction(readerMoved.has(name) ? readerSource : studioSource, name)).join("\n");
 
   await page.addScriptTag({ content: `
     const W = window;

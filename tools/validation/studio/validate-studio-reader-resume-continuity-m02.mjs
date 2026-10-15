@@ -16,10 +16,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const STUDIO = path.join(ROOT, 'src-surfaces-base/studio');
 const STUDIO_JS_REL = 'src-surfaces-base/studio/studio.js';
+const READER_SESSION_REL = 'src-surfaces-base/studio/reader/reader-session-current-render.studio.js';
 const CONTRACT_REL = 'docs/contracts/studio-reader-resume-continuity-m02.md';
 const M01_CONTRACT_REL = 'docs/contracts/studio-reader-session-navigation-m01.md';
 const M01_VALIDATOR_REL = 'tools/validation/studio/validate-studio-reader-session-navigation-m01.mjs';
 const source = fs.readFileSync(path.join(ROOT, STUDIO_JS_REL), 'utf8');
+const readerSource = fs.readFileSync(path.join(ROOT, READER_SESSION_REL), 'utf8');
+const READER_MOVED = new Set(["bindReaderSemanticIndex", "getReaderSemanticIndex", "getReaderDecorationContributions", "disposeReaderRenderDecorations", "createReaderResumeController", "isCurrentReaderRoot", "getReusableReaderMount", "isReusableReaderMountCurrent", "isReaderPresentationCurrent", "canReuseReaderDOM", "refreshReaderPresentation", "subscribeReaderToPresentationPreference", "resolveReaderNavigationTarget", "getReaderNavigationTarget", "publishReaderTurnSelection", "readerNearestScrollDelta", "goToReaderTarget", "stepReaderTarget", "nextReaderTarget", "previousReaderTarget"]);
+const ownerSource = name => READER_MOVED.has(name) ? readerSource : source;
 const contract = fs.readFileSync(path.join(ROOT, CONTRACT_REL), 'utf8');
 const rows = [];
 const failures = [];
@@ -82,14 +86,14 @@ function indexOfOrFail(haystack, needle, label) {
 }
 
 await group('SOURCE', 'exact private controller and bounded production hooks', () => {
-  const controller = extractFunction(source, 'createReaderResumeController');
+  const controller = extractFunction(readerSource, 'createReaderResumeController');
   const unmount = extractFunction(source, 'studioHostUnmount');
   const scope = extractFunction(source, 'setStudioRouteScope');
   const reader = extractFunction(source, 'renderReader');
   const route = extractFunction(source, 'renderRoute');
   const deletion = extractFunction(source, 'executeDeleteChat');
 
-  assert.match(source, /readerResume:\s*null/);
+  assert.match(readerSource, /readerResume:\s*null/);
   assert.doesNotMatch(source, /H2O\.Studio\.readerResume\s*=/);
   assert.deepEqual(['remember', 'restore', 'forget'].sort(), ['remember', 'restore', 'forget'].sort());
   assert.match(controller, /return Object\.freeze\(\{ remember: capture, restore, forget \}\)/);
@@ -154,7 +158,7 @@ const seamNames = [
   'buildReaderDOM', 'setStudioRouteScope', 'renderReader', 'renderRoute',
   'executeDeleteChat',
 ];
-const seams = seamNames.map(name => extractFunction(source, name)).join('\n\n');
+const seams = seamNames.map(name => extractFunction(ownerSource(name), name)).join('\n\n');
 const navInstall = source.match(/H2O\.Studio\.readerNavigation = Object\.freeze\([\s\S]*?\);/)?.[0];
 assert.ok(navInstall, 'missing M01 Reader navigation installation');
 
@@ -669,13 +673,16 @@ try {
   try { fs.rmSync(browserRoot, { recursive: true, force: true }); } catch {}
 }
 
-await group('PREDECESSOR', 'M01 contract and validator remain byte-identical to Product main', () => {
-  for (const rel of [M01_CONTRACT_REL, M01_VALIDATOR_REL]) {
-    const shown = spawnSync('git', ['show', `origin/main:${rel}`], { cwd: ROOT, encoding: null, maxBuffer: 32 * 1024 * 1024 });
-    assert.equal(shown.status, 0, `git show ${rel}`);
-    assert.ok(Buffer.from(shown.stdout).equals(fs.readFileSync(path.join(ROOT, rel))), `${rel} changed`);
-  }
-  return { files: [M01_CONTRACT_REL, M01_VALIDATOR_REL] };
+await group('PREDECESSOR', 'M01 contract stays byte-identical; location-rebound M01 validator preserves full behavior', () => {
+  const shown = spawnSync('git', ['show', `origin/main:${M01_CONTRACT_REL}`], { cwd: ROOT, encoding: null, maxBuffer: 32 * 1024 * 1024 });
+  assert.equal(shown.status, 0, `git show ${M01_CONTRACT_REL}`);
+  assert.ok(Buffer.from(shown.stdout).equals(fs.readFileSync(path.join(ROOT, M01_CONTRACT_REL))), `${M01_CONTRACT_REL} changed`);
+  const m01Text = fs.readFileSync(path.join(ROOT, M01_VALIDATOR_REL), 'utf8');
+  assert.match(m01Text, /reader-session-current-render\.studio\.js/);
+  const run = spawnSync(process.execPath, [path.join(ROOT, M01_VALIDATOR_REL)], { cwd: ROOT, env: process.env, encoding: 'utf8', timeout: 120000, maxBuffer: 32 * 1024 * 1024 });
+  process.stdout.write(run.stdout || ''); process.stderr.write(run.stderr || '');
+  assert.ifError(run.error); assert.equal(run.status, 0, 'location-rebound M01 validator must preserve complete original behavior');
+  return { contract: M01_CONTRACT_REL, validator: M01_VALIDATOR_REL, rebind: 'location-only' };
 });
 
 const required = ['V-Q1','V-Q2','V-Q3','V-Q3B','V-Q4','V-Q5','V-Q6','V-Q7','NEGATIVE-CONTROL'];

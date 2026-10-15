@@ -145,6 +145,7 @@ export const LOCAL_PUBLICATION_MODULE_MAPPINGS = Object.freeze([
 export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   "studio.html",
   "studio.css",
+  "reader/reader-session-current-render.studio.js",
   "studio.js",
   "S0D3e. 🎬 Transcript Studio Host - Studio.js",
 
@@ -1549,6 +1550,7 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
 export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
   "studio.html",
   "studio.css",
+  "reader/reader-session-current-render.studio.js",
   "studio.js",
   "S0D3e. 🎬 Transcript Studio Host - Studio.js",
 

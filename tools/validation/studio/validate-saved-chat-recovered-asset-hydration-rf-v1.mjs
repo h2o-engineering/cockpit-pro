@@ -33,6 +33,7 @@ const __filename = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(__filename), '..', '..', '..');
 const STUDIO_ROOT = path.join(REPO_ROOT, 'src-surfaces-base/studio');
 const STUDIO_JS_REL = 'src-surfaces-base/studio/studio.js';
+const READER_SESSION_REL = 'src-surfaces-base/studio/reader/reader-session-current-render.studio.js';
 const IMPORTER_REL = 'src-surfaces-base/studio/ingestion/saved-chat-archive-importer.studio.js';
 const PLATFORM_TAURI_REL = 'src-surfaces-base/studio/platform/platform.tauri.js';
 const FIXTURE_PKG_REL = 'tools/validation/fixtures/saved-chat-archive/asset-restoration/ar-v3-assistant-raster.h2ochat';
@@ -135,6 +136,7 @@ const GIF_URI = 'data:image/gif;base64,' + FIX.gif.bytes.toString('base64');
 // ═══════════════════════════════════════════════════════════════════════════
 console.log('[recovered-asset-hydration-rf] static');
 const studioSrc = readRepo(STUDIO_JS_REL);
+const readerSessionSrc = readRepo(READER_SESSION_REL);
 const studioCode = stripComments(studioSrc);
 
 check('[RF-12] the hydration hook lives ONLY inside loadSnapshotFromStoresDesktop', () => {
@@ -142,10 +144,12 @@ check('[RF-12] the hydration hook lives ONLY inside loadSnapshotFromStoresDeskto
   const inLoader = countOccurrences(stripComments(sliceFunction(studioSrc, 'loadSnapshotFromStoresDesktop')), HOOK);
   assert.equal(total, 1, `studio.js must reference ${HOOK} exactly once (found ${total})`);
   assert.equal(inLoader, 1, 'the single reference must be inside loadSnapshotFromStoresDesktop');
-  for (const fn of ['projectSqliteSnapshotToCanonical', 'renderReader', 'buildReaderDOM', 'canReuseReaderDOM', 'callArchive']) {
+  for (const fn of ['projectSqliteSnapshotToCanonical', 'renderReader', 'buildReaderDOM', 'callArchive']) {
     const code = stripComments(sliceFunction(studioSrc, fn));
     assert.ok(!code.includes(HOOK) && !/hydrateRecovered|readVerifiedAssetBytes|listBySnapshot\(/.test(code), `${fn} must not hydrate recovered assets (seam preservation)`);
   }
+  const reuseCode = stripComments(sliceFunction(readerSessionSrc, 'canReuseReaderDOM'));
+  assert.ok(!reuseCode.includes(HOOK) && !/hydrateRecovered|readVerifiedAssetBytes|listBySnapshot\(/.test(reuseCode), 'canReuseReaderDOM must not hydrate recovered assets (Reader module seam preservation)');
   const loader = stripComments(sliceFunction(studioSrc, 'loadSnapshotFromStoresDesktop'));
   assert.ok(/const canonical = projectSqliteSnapshotToCanonical\(raw\);/.test(loader), 'projection still comes from projectSqliteSnapshotToCanonical');
   assert.ok(/typeof hydrate !== 'function'\) return canonical;/.test(loader), 'absent helper → canonical unchanged');

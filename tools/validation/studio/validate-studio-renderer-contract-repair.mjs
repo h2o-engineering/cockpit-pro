@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(__filename), '..', '..', '..');
 const STUDIO_REL = 'src-surfaces-base/studio/studio.js';
+const READER_SESSION_REL = 'src-surfaces-base/studio/reader/reader-session-current-render.studio.js';
 const RENDERER_REL = 'src-surfaces-base/studio/renderer/chat-renderer.studio.js';
 const STUDIO_HTML_REL = 'src-surfaces-base/studio/studio.html';
 const ARCHIVE_REL = 'src-surfaces-base/studio/S0D3a. 🎬 Transcript Archive Engine - Studio.js';
@@ -102,6 +103,7 @@ function stripJsComments(source) {
 }
 
 const studioSource = readRepo(STUDIO_REL);
+const readerSource = readRepo(READER_SESSION_REL);
 const rendererSource = readRepo(RENDERER_REL);
 const presentationProfileSource = readRepo(PRESENTATION_PROFILE_REL);
 
@@ -2500,7 +2502,8 @@ function validateDecorationContributionLifecycle() {
    * its current-render bridge (bind / accessor / disposeAll on unmount) - it never creates a lifecycle
    * or registers a contribution of its own. */
   assert.doesNotMatch(studioSource, /createLifecycle\(|decorationContributions\??\.register\(|Renderer\.decorationContribution\b/, 'studio.js neither creates lifecycles nor registers contributions');
-  assert.match(studioSource, /function disposeReaderRenderDecorations\(reason\)\{[\s\S]*?lifecycle\.disposeAll\(\);/, 'the Reader disposes the current render lifecycle on its unmount seam (S4C slice B)');
+  assert.doesNotMatch(readerSource, /createLifecycle\(|decorationContributions\??\.register\(|Renderer\.decorationContribution\b/, 'Reader session module neither creates lifecycles nor registers contributions');
+  assert.match(readerSource, /function disposeReaderRenderDecorations\(reason\)\{[\s\S]*?lifecycle\.disposeAll\(\);/, 'the Reader module disposes the current render lifecycle on its unmount seam (S4C slice B)');
   /* The decision harness (stubbed modules) proves the binding flows through render(). */
   const harness = createRendererBuildHarness({ mountedTurnCount: 0, assistantTurnEls: [], fallbackRequired: true });
   const decided = harness.fn({ snapshotId: 's', messages: [{ role: 'user' }, { role: 'assistant' }] }, {});

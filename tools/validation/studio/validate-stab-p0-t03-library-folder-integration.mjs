@@ -8,6 +8,7 @@ const s0z1g = read('src-surfaces-base/studio/S0Z1g. 🎬 Library Sidebar Section
 const s0f3a = read('src-surfaces-base/studio/S0F3a. 🎬 Folders - Studio.js');
 const s0f0a = read('src-surfaces-base/studio/S0F0a. 🎬 Library Surface Host - Studio.js');
 const shell = read('src-surfaces-base/studio/studio.js');
+const readerSession = read('src-surfaces-base/studio/reader/reader-session-current-render.studio.js');
 const html = read('src-surfaces-base/studio/studio.html');
 const pack = read('tools/product/studio/pack-studio.mjs');
 
@@ -77,7 +78,8 @@ const physicalWriterCount = Number(shellWriterPresent) + Number(!librarySecondar
 check(librarySecondaryWriterRetired, 'Secondary Library destructive writer must be retired');
 check(physicalWriterCount === 1, `Physical destructive #folderList writer count must be 1, got ${physicalWriterCount}`);
 
-check(shell.includes('M03 S4C') || shell.includes('getReaderSemanticIndex'), 'Renderer/Reader M03 work must remain present in Shell source');
+check(readerSession.includes('function getReaderSemanticIndex('), 'Renderer/Reader M03 implementation must remain present under Reader ownership');
+check(shell.includes('readerSessionCurrentRender.getReaderSemanticIndex'), 'Shell must retain the thin Reader Semantic Index delegation seam');
 check(html.includes('S0Z1g. 🎬 Library Sidebar Sections - Studio.js?v=2.5.85'), 'Existing Studio carrier admission for S0Z1g must remain intact');
 check(pack.includes('S0Z1g. 🎬 Library Sidebar Sections - Studio.js'), 'pack-studio must still include S0Z1g');
 check(pack.includes('S0F0a. 🎬 Library Surface Host - Studio.js'), 'pack-studio must still include Shell surface host');

@@ -34,6 +34,7 @@ const A0_VALIDATOR_REL = 'tools/validation/reader-notes/validate-reader-notes-ar
  * as the compatibility fallback; studio.js exposes the current render's index. */
 const SEMANTIC_INDEX_REL = 'src-surfaces-base/studio/renderer/semantic/semantic-index.v1.js';
 const STUDIO_JS_REL = 'src-surfaces-base/studio/studio.js';
+const READER_SESSION_REL = 'src-surfaces-base/studio/reader/reader-session-current-render.studio.js';
 const SEMANTIC_INDEX_SCHEMA = 'h2o.renderer.semantic-index';
 
 const RESOLVER_FLAG_KEY = 'studio.readerNotes.anchorResolver.enabled';
@@ -806,10 +807,11 @@ check('S4C: consumer source names the Semantic Index primary authority and keeps
   sourceSafetyChecks();
 });
 
-check('S4C: studio.js exposes a read-only current-render Semantic Index bridge on the existing Reader lifecycle seam', () => {
+check('S4C: Reader module owns the read-only current-render Semantic Index bridge and studio.js keeps the compatibility facade', () => {
   const studio = read(STUDIO_JS_REL);
+  const readerSession = read(READER_SESSION_REL);
   has(studio, 'H2O.Studio.getReaderSemanticIndex = getReaderSemanticIndex;', 'accessor exposed beside the other read-only Studio accessors');
-  has(studio, 'currentReaderRender: null,', 'Reader-owned current-render state field');
+  has(readerSession, 'currentReaderRender: null,', 'Reader-owned current-render state field');
   const build = extractStudioFunction(studio, 'buildReaderDOM');
   /* Reader M01 T5: accepted Renderer T4 (3b5eac87, HDA C) adds
    * presentationProfile to the former { getEditOverride } call. Execute the
@@ -842,8 +844,8 @@ check('S4C: studio.js exposes a read-only current-render Semantic Index bridge o
   const unmount = extractStudioFunction(studio, 'studioHostUnmount');
   has(unmount, 'state.currentReaderRender = null;', 'unmount clears the bridge');
   has(unmount, 'state.currentReaderEditOverrides = null;', 'existing per-render Reader state is cleared on the same seam');
-  const bind = extractStudioFunction(studio, 'bindReaderSemanticIndex');
-  const get = extractStudioFunction(studio, 'getReaderSemanticIndex');
+  const bind = extractStudioFunction(readerSession, 'bindReaderSemanticIndex');
+  const get = extractStudioFunction(readerSession, 'getReaderSemanticIndex');
   for (const [name, text] of [['bindReaderSemanticIndex', bind], ['getReaderSemanticIndex', get]]) {
     for (const token of ['querySelector', 'getElementById', 'document.', 'localStorage', 'sessionStorage', 'indexedDB', 'scrollTo', 'scrollIntoView', 'createShellIndex', 'createLifecycle', 'Object.assign(', 'JSON.parse']) {
       hasNot(text, token, `${name} must not contain ${token}`);
@@ -853,19 +855,22 @@ check('S4C: studio.js exposes a read-only current-render Semantic Index bridge o
   has(get, 'if (root !== undefined && root !== current.root) return null;', 'an unmatched root yields null');
   /* The executed binding check below proves the frozen record and exact retained
    * objects, including T4's additive presentation descriptor, without a layout pin. */
-  assert.equal((studio.match(/bindReaderSemanticIndex\(/g) || []).length, 2, 'exactly one binding call site (definition + buildReaderDOM)');
+  assert.equal((readerSession.match(/function bindReaderSemanticIndex\(/g) || []).length, 1, 'exactly one Reader-owned binding implementation');
+  assert.match(studio, /function bindReaderSemanticIndex\(\.\.\.args\)\{ return readerSessionCurrentRender\.bindReaderSemanticIndex\(\.\.\.args\); \}/, 'studio.js keeps only the thin binding adapter');
+  assert.equal((studio.match(/bindReaderSemanticIndex\(rendererResult\);/g) || []).length, 1, 'buildReaderDOM delegates the exact Renderer result once');
 });
 
-check('S4C: current Reader Semantic Index accessor returns the exact bound index, null for a foreign root, null once unmounted (executed real studio.js functions)', () => {
+check('S4C: current Reader Semantic Index accessor returns the exact bound index, null for a foreign root, null once unmounted (executed Reader module + Shell unmount)', () => {
   const studio = read(STUDIO_JS_REL);
+  const readerSession = read(READER_SESSION_REL);
   const state = { currentReaderEditOverrides: [], currentReaderRender: null };
   const unmounts = [];
   const sandbox = vm.createContext({ state, W: { H2O: { studioHost: { unmount(reason) { unmounts.push(reason); } } } } });
   vm.runInContext([
-    extractStudioFunction(studio, 'bindReaderSemanticIndex'),
-    extractStudioFunction(studio, 'getReaderSemanticIndex'),
-    /* S4C slice B: the real unmount seam disposes the bound decoration lifecycle first. */
-    extractStudioFunction(studio, 'disposeReaderRenderDecorations'),
+    extractStudioFunction(readerSession, 'bindReaderSemanticIndex'),
+    extractStudioFunction(readerSession, 'getReaderSemanticIndex'),
+    /* S4C slice B: Reader-owned disposal executes through the real Shell unmount seam. */
+    extractStudioFunction(readerSession, 'disposeReaderRenderDecorations'),
     extractStudioFunction(studio, 'studioHostUnmount'),
     'this.bind = bindReaderSemanticIndex; this.get = getReaderSemanticIndex; this.unmount = studioHostUnmount;',
   ].join('\n'), sandbox);
