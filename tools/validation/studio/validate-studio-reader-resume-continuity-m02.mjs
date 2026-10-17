@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -673,16 +674,41 @@ try {
   try { fs.rmSync(browserRoot, { recursive: true, force: true }); } catch {}
 }
 
-await group('PREDECESSOR', 'M01 contract stays byte-identical; location-rebound M01 validator preserves full behavior', () => {
+await group('PREDECESSOR', 'M01 contract and approved location-only validator identity are immutable; full M01 behavior remains executable', () => {
   const shown = spawnSync('git', ['show', `origin/main:${M01_CONTRACT_REL}`], { cwd: ROOT, encoding: null, maxBuffer: 32 * 1024 * 1024 });
   assert.equal(shown.status, 0, `git show ${M01_CONTRACT_REL}`);
   assert.ok(Buffer.from(shown.stdout).equals(fs.readFileSync(path.join(ROOT, M01_CONTRACT_REL))), `${M01_CONTRACT_REL} changed`);
-  const m01Text = fs.readFileSync(path.join(ROOT, M01_VALIDATOR_REL), 'utf8');
+
+  const APPROVED_M01_BLOB = 'f6c67699af296d3a356d51074bbfce68da314590';
+  const gitBlobId = bytes => {
+    const payload = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+    return createHash('sha1').update(`blob ${payload.length}\0`).update(payload).digest('hex');
+  };
+  const accepted = fs.readFileSync(path.join(ROOT, M01_VALIDATOR_REL));
+  assert.equal(gitBlobId(accepted), APPROVED_M01_BLOB, 'M01 validator must match exact approved T02 location-only rebinding');
+  const m01Text = accepted.toString('utf8');
   assert.match(m01Text, /reader-session-current-render\.studio\.js/);
+
+  // Falsification: an independently executable, deliberately weakened validator
+  // retains the module marker and exits zero, but cannot satisfy the identity pin.
+  const weakened = Buffer.from("#!/usr/bin/env node\n// reader-session-current-render.studio.js\nprocess.exit(0);\n");
+  const falsificationRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'h2o-m01-predecessor-falsification-'));
+  try {
+    const fixture = path.join(falsificationRoot, 'weakened-m01.mjs');
+    fs.writeFileSync(fixture, weakened);
+    assert.match(weakened.toString('utf8'), /reader-session-current-render\.studio\.js/);
+    const falseRun = spawnSync(process.execPath, [fixture], { cwd: ROOT, encoding: 'utf8', timeout: 10000 });
+    assert.ifError(falseRun.error);
+    assert.equal(falseRun.status, 0, 'falsification fixture must exit successfully');
+    assert.notEqual(gitBlobId(fs.readFileSync(fixture)), APPROVED_M01_BLOB, 'weakened zero-exit M01 must be rejected by predecessor identity guard');
+  } finally {
+    fs.rmSync(falsificationRoot, { recursive: true, force: true });
+  }
+
   const run = spawnSync(process.execPath, [path.join(ROOT, M01_VALIDATOR_REL)], { cwd: ROOT, env: process.env, encoding: 'utf8', timeout: 120000, maxBuffer: 32 * 1024 * 1024 });
   process.stdout.write(run.stdout || ''); process.stderr.write(run.stderr || '');
   assert.ifError(run.error); assert.equal(run.status, 0, 'location-rebound M01 validator must preserve complete original behavior');
-  return { contract: M01_CONTRACT_REL, validator: M01_VALIDATOR_REL, rebind: 'location-only' };
+  return { contract: M01_CONTRACT_REL, validator: M01_VALIDATOR_REL, approvedBlob: APPROVED_M01_BLOB, falsification: 'WEAKENED_ZERO_EXIT_REJECTED' };
 });
 
 const required = ['V-Q1','V-Q2','V-Q3','V-Q3B','V-Q4','V-Q5','V-Q6','V-Q7','NEGATIVE-CONTROL'];
