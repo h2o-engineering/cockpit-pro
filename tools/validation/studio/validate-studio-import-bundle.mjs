@@ -844,6 +844,61 @@ async function runChromeAutoImportTests(desktopIngestion) {
     return makeSampleBundleForChromeRoundTrip();
   }
 
+  // Current P01 mutation-admission fixture. Mirrors the production owner's
+  // fail-closed input + generation checks while keeping this validator
+  // deterministic and free of real Web Locks or Product writes.
+  function makeP01MutationAdmissionFixture() {
+    return {
+      schema: 'h2o.studio.syncP01MutationAdmission.v1',
+      async run({ generationCheck, operation } = {}) {
+        if (typeof generationCheck !== 'function' || typeof operation !== 'function') {
+          throw new Error('p01-mutation-admission-input-invalid');
+        }
+        const generation = await generationCheck();
+        if (!generation || generation.permitted !== true) {
+          throw new Error(String((generation && generation.reason) || 'p01-writer-stood-down'));
+        }
+        const lease = Object.freeze({
+          schema: 'h2o.studio.syncP01MutationAdmissionLease.v1',
+          id: 'validator-p01-admission-1',
+          label: 'validate-studio-import-bundle',
+          release() { return true; },
+        });
+        return operation(lease, generation);
+      },
+    };
+  }
+
+  // Current F19.5 export-source coverage fixture. The row describes the
+  // same supported saved chat represented by sampleBundle().
+  function makeLibraryIndexFixture(rows) {
+    const currentRows = Array.isArray(rows) ? rows : [{
+      chatId: 'c_test1',
+      id: 'c_test1',
+      href: 'https://chatgpt.com/c/c_test1',
+      title: 'Test Chat',
+      displayTitle: 'Test Chat',
+      displayView: 'saved',
+      badgeKind: 'Saved',
+      isSaved: true,
+      isLinked: false,
+      isPinned: false,
+      isArchived: false,
+      snapshotId: 'snap_test1',
+      lastSnapshotId: 'snap_test1',
+      latestSnapshotId: 'snap_test1',
+      snapshotCount: 1,
+      messageCount: 2,
+      turnCount: 2,
+      userTurnCount: 1,
+      assistantTurnCount: 1,
+      answerCount: 1,
+    }];
+    return {
+      getAll() { return currentRows.map((row) => ({ ...row })); },
+    };
+  }
+
   // Set up a sandbox with no Tauri internals, with chrome.runtime present,
   // with a fake IDB pre-populated with a directory handle row, and with
   // an H2O.flags mock starting in OFF state.
@@ -861,6 +916,8 @@ async function runChromeAutoImportTests(desktopIngestion) {
       chrome: makeChromeMock(opts.sendHandler || (() => sampleBundle())),
       indexedDB: makeFakeIdb(idbRows),
       H2O: {
+        Studio: { sync: {} },
+        LibraryIndex: makeLibraryIndexFixture(opts.libraryIndexRows),
         flags: (function () {
           const store = new Map();
           if (opts.flagOn) store.set('sync.chromeAutoImport', true);
@@ -877,6 +934,10 @@ async function runChromeAutoImportTests(desktopIngestion) {
       clearTimeout: globalThis.clearTimeout,
       crypto: globalThis.crypto,
     };
+    if (opts.includeP01Admission !== false) {
+      sandbox.H2O.Studio.sync.p01MutationAdmission = makeP01MutationAdmissionFixture();
+    }
+    if (opts.includeLibraryIndex === false) delete sandbox.H2O.LibraryIndex;
     sandbox.window = sandbox;
     sandbox.globalThis = sandbox;
     vm.createContext(sandbox);
@@ -908,6 +969,16 @@ async function runChromeAutoImportTests(desktopIngestion) {
       assert.equal(typeof autoImport[fn], 'function');
     });
   }
+
+  await checkAsync('missing P01 mutation admission → fail closed before any export mutation', async () => {
+    const env = buildSandbox({ includeHandle: false, includeP01Admission: false });
+    const api = env.sandbox.H2O.Studio.sync.autoImport;
+    const r = await api.exportNow();
+    assert.equal(r.ok, false);
+    assert.equal(r.skipped, true);
+    assert.equal(r.reason, 'p01-mutation-admission-serialization-unavailable');
+    assert.equal(env.handle._files.size, 0, 'missing admission must not write any sync-folder file');
+  });
   await checkAsync('diagnose() reports R3-phase1 / writesLatestJson=false / flagKey', async () => {
     const d = await autoImport.diagnose();
     assert.equal(d.phase, 'R3-phase1');
@@ -957,6 +1028,7 @@ async function runChromeAutoImportTests(desktopIngestion) {
       flagOn: true,
       permission: 'granted',
       sendHandler: () => ({ schema: 'not.the.right.schema' }),
+      libraryIndexRows: [],
     });
     const api = env.sandbox.H2O.Studio.sync.autoImport;
     await checkAsync('SW returns wrong schema → ok=false, error mentions schema', async () => {
@@ -1171,6 +1243,27 @@ async function runChromeEventTriggerTests() {
     };
   }
 
+  function makeP01MutationAdmissionFixture() {
+    return {
+      schema: 'h2o.studio.syncP01MutationAdmission.v1',
+      async run({ generationCheck, operation } = {}) {
+        if (typeof generationCheck !== 'function' || typeof operation !== 'function') {
+          throw new Error('p01-mutation-admission-input-invalid');
+        }
+        const generation = await generationCheck();
+        if (!generation || generation.permitted !== true) {
+          throw new Error(String((generation && generation.reason) || 'p01-writer-stood-down'));
+        }
+        return operation(Object.freeze({
+          schema: 'h2o.studio.syncP01MutationAdmissionLease.v1',
+          id: 'validator-event-p01-admission-1',
+          label: 'validate-studio-import-bundle-event-trigger',
+          release() { return true; },
+        }), generation);
+      },
+    };
+  }
+
   // Build a sandbox with: no Tauri, Chrome runtime present, in-memory IDB
   // with a directory handle, FSA mocks, flag mocks, and an EventTarget
   // backing for window-level dispatchEvent. The same auto-import.mv3.js
@@ -1184,7 +1277,10 @@ async function runChromeEventTriggerTests() {
       __TAURI_INTERNALS__: undefined,
       __TAURI__: undefined,
       indexedDB: undefined,             // filled below
-      H2O: { flags: makeFlagsMock(opts.flags || {}) },
+      H2O: {
+        flags: makeFlagsMock(opts.flags || {}),
+        Studio: { sync: { p01MutationAdmission: makeP01MutationAdmissionFixture() } },
+      },
       chrome: {
         runtime: {
           id: 'mock-extension-id',
@@ -2908,8 +3004,10 @@ async function runDesktopFoldersActionsTests() {
 
   // Mock store.folders — Map for catalog, Map for single-folder-per-chat
   // bindings (chatId → folderId). Mirrors folders.tauri.js public
-  // surface: get / create / patch / remove / bindChat / unbindChat /
-  // listChats / listForChat. INSERT OR REPLACE semantics — rebinding
+  // surface: get / create / patch / softDeleteEmptyFolder / bindChat /
+  // unbindChat / listChats / listForChat. The lower-level remove primitive
+  // remains a mock helper only; current actions.folders.remove delegates to
+  // recoverable soft-delete/tombstone semantics. INSERT OR REPLACE semantics — rebinding
   // chat A to folder X when it was in folder Y atomically moves it.
   function makeFoldersStoreMock() {
     const folders = new Map();   // folderId -> row
@@ -2963,6 +3061,36 @@ async function runDesktopFoldersActionsTests() {
         }
         folders.delete(id);
         return true;
+      },
+      async softDeleteEmptyFolder(idInput) {
+        const id = String(idInput == null ? '' : idInput).trim();
+        if (!id || !folders.has(id)) {
+          return {
+            ok: false,
+            status: 'folder-identity-missing',
+            folderId: id,
+            blockers: ['folder-identity-missing'],
+            noHardDelete: true,
+            noChatDelete: true,
+          };
+        }
+        const boundChats = [];
+        for (const [chatId, folderId] of chatFolder) {
+          if (folderId === id) boundChats.push(chatId);
+        }
+        for (const chatId of boundChats) chatFolder.delete(chatId);
+        return {
+          ok: true,
+          status: 'folder-soft-deleted',
+          folderId: id,
+          tombstoneId: 'tombstone:folder:' + id,
+          affectedChatCount: boundChats.length,
+          bindingUnboundCount: boundChats.length,
+          bindingUnbindSkippedCount: 0,
+          blockers: [],
+          noHardDelete: true,
+          noChatDelete: true,
+        };
       },
       // store.bindChat signature: (folderId, chatId, opts)
       // INSERT OR REPLACE on chat_id PK — atomic move semantics.
@@ -3328,25 +3456,34 @@ async function runDesktopFoldersActionsTests() {
     assert.deepEqual(r.chats, []);
   });
 
-  // ── 13.9 — remove cascades bindings ────────────────────────────────
-  await checkAsync('remove(folderId) deletes bindings + folder row', async () => {
+  // ── 13.9 — remove uses current recoverable soft-delete contract ─────
+  await checkAsync('remove(folderId) soft-deletes + unbinds chats without hard-deleting folder row', async () => {
     // folderC currently has chat_a + chat_b
     assert.equal(sandbox._store._chatFolder.get('chat_a'), folderC);
     assert.equal(sandbox._store._chatFolder.get('chat_b'), folderC);
     sandbox._eventTarget._dispatchedEvents.length = 0;
     const r = await actions.remove(folderC);
     assert.equal(r.ok, true);
-    assert.equal(sandbox._store._folders.has(folderC), false);
+    assert.equal(r.status, 'ok');
+    assert.equal(r.noHardDelete, true);
+    assert.equal(r.noChatDelete, true);
+    assert.match(String(r.tombstoneId || ''), /^tombstone:folder:/);
+    assert.equal(r.bindingUnboundCount, 2);
+    assert.equal(sandbox._store._folders.has(folderC), true,
+      'soft delete must not model the old hard-remove row deletion');
     assert.equal(sandbox._store._chatFolder.has('chat_a'), false);
     assert.equal(sandbox._store._chatFolder.has('chat_b'), false);
     const evts = refreshEvents(sandbox);
     assert.equal(evts.length, 1);
+    assert.match(String(evts[0].detail.reason), /folders-actions:soft-delete/);
   });
-  await checkAsync('remove non-existent → not-found, no refresh', async () => {
+  await checkAsync('remove non-existent → folder-identity-missing, no refresh', async () => {
     sandbox._eventTarget._dispatchedEvents.length = 0;
     const r = await actions.remove('fld_phantom');
     assert.equal(r.ok, false);
-    assert.equal(r.status, 'not-found');
+    assert.equal(r.status, 'folder-identity-missing');
+    assert.equal(r.noHardDelete, true);
+    assert.equal(r.noChatDelete, true);
     assert.equal(refreshEvents(sandbox).length, 0);
   });
 
