@@ -1488,6 +1488,10 @@ export const ARCHIVE_WORKBENCH_SOURCE_FILES = Object.freeze([
   // ARCHIVE_WORKBENCH_OUT_FILES below.
   "reader-notes/annotation-report.studio.js",
 
+  // Knowledge v0 distribution mirrors; keep paired with OUT_FILES below.
+  "knowledge/contracts-v0.studio.js",
+  "knowledge/captured-chat-highlight-adapter-v0.studio.js",
+
   // Renderer sanitizer v2 (M03 P1 S1A) — part of the active Renderer runtime
   // chain. studio.html loads these in dependency order and the accepted
   // Renderer paths consume v2: rich replay and the controlled live-HTML
@@ -1964,6 +1968,10 @@ export const ARCHIVE_WORKBENCH_OUT_FILES = Object.freeze([
 
   // Reader & Notes — NV1 annotation report consumer — see SOURCE_FILES.
   "reader-notes/annotation-report.studio.js",
+
+  // Knowledge v0 distribution mirrors — see SOURCE_FILES above.
+  "knowledge/contracts-v0.studio.js",
+  "knowledge/captured-chat-highlight-adapter-v0.studio.js",
 
   // Renderer sanitizer v2 (M03 P1 S1A) — active Renderer runtime chain — see SOURCE_FILES.
   "renderer/safety/sanitizer-policy.v1.js",
