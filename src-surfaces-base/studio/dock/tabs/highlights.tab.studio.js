@@ -203,10 +203,11 @@
       li.appendChild(body);
       if (actionContext && it.id && actionContext.answerIds.has(it.answerId) &&
           (!it.convoId || it.convoId === `c/${actionContext.chatId}`)) {
+        const targetName = `${i + 1}: ${truncate(it.text || '(no text captured)', 80)} [${it.id}]`;
         const controls = document.createElement('div');
         controls.className = 'wbDockHighlightControls';
         const color = document.createElement('select');
-        color.setAttribute('aria-label', 'Recolor highlight');
+        color.setAttribute('aria-label', `Recolor highlight ${targetName}`);
         for (const name of Object.keys(COLOR_HEX)) {
           const option = document.createElement('option');
           option.value = name;
@@ -220,7 +221,7 @@
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.textContent = 'Remove';
-        remove.setAttribute('aria-label', 'Remove highlight');
+        remove.setAttribute('aria-label', `Remove highlight ${targetName}`);
         remove.addEventListener('click', function () {
           onAction('remove', it, actionContext, '');
         });

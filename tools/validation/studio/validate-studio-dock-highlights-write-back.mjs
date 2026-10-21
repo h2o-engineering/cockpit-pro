@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -187,9 +188,12 @@ await check('Store, DOM, MiniMap and change events follow confirmed recolor', as
 await check('failed persistence reloads canonical Store without optimistic success', async () => {
   const before = disk();
   const writesBefore = context.writes;
+  while (Date.now() <= target().ts) await new Promise(resolve => setTimeout(resolve, 1));
   context.failNextWrite = true;
   const result = await context.bridge.write('recolor', { ...request, color: 'purple' });
   assert.equal(result.ok, false);
+  assert.equal(result.reason, 'persistence-failed');
+  assert.equal(context.failNextWrite, false, 'the failing write was actually exercised');
   assert.deepEqual(disk(), before);
   assert.equal(context.writes, writesBefore);
   assert.equal(store.getForAnswer('answer-a')[0].color, 'red');
@@ -322,6 +326,151 @@ await check('captured Dock control fails closed when flags throw at action time'
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(dockCalls.length, before);
   cleanup();
+});
+
+await check('duplicate highlight text still gives distinguishable accessible action names', async () => {
+  const originalStore = context.H2O.Studio.store.highlights;
+  const duplicateRows = vm.runInContext(`({ itemsByAnswer: {
+    'answer-a': [
+      { id: 'duplicate-1', color: 'red', ts: 4, convoId: 'c/chat-1', anchors: { textQuote: { exact: 'same excerpt' } } },
+      { id: 'duplicate-2', color: 'blue', ts: 5, convoId: 'c/chat-1', anchors: { textQuote: { exact: 'same excerpt' } } },
+    ],
+  } })`, context);
+  context.H2O.Studio.store.highlights = {
+    getAll: () => duplicateRows,
+    subscribe: () => () => {},
+  };
+  context.H2O.flags = { get: () => true };
+  try {
+    const cleanup = renderDock();
+    const recolor = descendants(container, 'select').map(node => node.attributes['aria-label']);
+    const remove = descendants(container, 'button').map(node => node.attributes['aria-label']);
+    assert.equal(recolor.length, 2);
+    assert.equal(remove.length, 2);
+    assert.notEqual(recolor[0], recolor[1]);
+    assert.notEqual(remove[0], remove[1]);
+    assert.ok(recolor.every(name => /Recolor highlight/.test(name) && /same excerpt/.test(name)));
+    assert.ok(remove.every(name => /Remove highlight/.test(name) && /same excerpt/.test(name)));
+    assert.ok(recolor.some(name => name.includes('duplicate-1')));
+    assert.ok(recolor.some(name => name.includes('duplicate-2')));
+    cleanup();
+  } finally {
+    context.H2O.Studio.store.highlights = originalStore;
+  }
+});
+
+async function pausedStoreRace(source, op, boundary, mutation) {
+  const race = vm.createContext({ console, setTimeout: () => 1, clearTimeout: () => {} });
+  vm.runInContext(`
+    var window = globalThis;
+    var disk = { ${JSON.stringify(key)}: {
+      itemsByAnswer: {
+        'answer-a': [{ id: 'target', color: 'gold', ts: 1, convoId: 'c/chat-1', pairNo: 1 }],
+        'answer-b': [{ id: 'original-b', color: 'blue', ts: 2, convoId: 'c/chat-1' }],
+      }, _meta: { currentColor: 'gold' },
+    } };
+    var pauseRead = false, pauseWrite = false, pausedRead = null, pausedWrite = null, listeners = [];
+    var chrome = { runtime: { lastError: null }, storage: {
+      onChanged: { addListener(fn) { listeners.push(fn); }, removeListener() {} },
+      local: {
+        get(_keys, cb) {
+          const snapshot = JSON.parse(JSON.stringify(disk[${JSON.stringify(key)}]));
+          if (pauseRead) { pauseRead = false; pausedRead = () => cb({ [${JSON.stringify(key)}]: snapshot }); return; }
+          cb({ [${JSON.stringify(key)}]: snapshot });
+        },
+        set(record, cb) {
+          const snapshot = JSON.parse(JSON.stringify(record[${JSON.stringify(key)}]));
+          const commit = () => {
+            const oldValue = JSON.parse(JSON.stringify(disk[${JSON.stringify(key)}]));
+            disk[${JSON.stringify(key)}] = snapshot;
+            listeners.forEach(fn => fn({ [${JSON.stringify(key)}]: { oldValue, newValue: snapshot } }, 'local'));
+            cb();
+          };
+          if (pauseWrite) { pauseWrite = false; pausedWrite = commit; return; }
+          commit();
+        },
+      },
+    } };
+    var H2O = { Studio: { store: { __registerEntity(name, api) { this[name] = api; } } } };
+  `, race);
+  vm.runInContext(source, race, { filename: 'race-store/highlights.js' });
+  const api = race.H2O.Studio.store.highlights;
+  await api.init();
+  race[boundary === 'read' ? 'pauseRead' : 'pauseWrite'] = true;
+  const operation = api.applyExisting({
+    op, answerId: 'answer-a', id: 'target', convoId: 'c/chat-1', color: 'red',
+    allowedColors: colors, guard: () => true,
+  });
+  const pausedKey = boundary === 'read' ? 'pausedRead' : 'pausedWrite';
+  for (let i = 0; i < 20 && !race[pausedKey]; i += 1) await Promise.resolve();
+  assert.equal(typeof race[pausedKey], 'function', `precise ${boundary} actually paused`);
+  mutation(api);
+  const presentDuringPause = JSON.parse(JSON.stringify(api.getAll()));
+  race[pausedKey]();
+  const result = await operation;
+  await api.saveNow();
+  return {
+    result,
+    during: presentDuringPause,
+    cache: JSON.parse(JSON.stringify(api.getAll())),
+    disk: JSON.parse(JSON.stringify(race.disk[key])),
+  };
+}
+
+const addUnrelated = api => api.setForAnswer('answer-b', [
+  { id: 'original-b', color: 'blue', ts: 2, convoId: 'c/chat-1' },
+  { id: 'new-b', color: 'green', ts: 3, convoId: 'c/chat-1' },
+]);
+const hasNewB = blob => blob.itemsByAnswer['answer-b']?.some(item => item.id === 'new-b') === true;
+const hasTarget = blob => blob.itemsByAnswer['answer-a']?.some(item => item.id === 'target') === true;
+
+await check('negative control reproduces the T03 lost update in the uncorrected checkpoint', async () => {
+  const baseline = execFileSync('git', [
+    'show', '361c40d46d60199143d0d7e625f6c6cd14b58357:src-surfaces-base/studio/store/highlights.js',
+  ], { cwd: root, encoding: 'utf8' });
+  const old = await pausedStoreRace(baseline, 'recolor', 'read', addUnrelated);
+  assert.equal(hasNewB(old.during), true);
+  assert.equal(old.result.ok, true);
+  assert.equal(hasNewB(old.cache), false);
+  assert.equal(hasNewB(old.disk), false);
+});
+await check('concurrent normal setForAnswer survives precise recolor paused at canonical read', async () => {
+  const result = await pausedStoreRace(storeSource, 'recolor', 'read', addUnrelated);
+  assert.equal(result.result.ok, true);
+  assert.equal(result.cache.itemsByAnswer['answer-a'][0].color, 'red');
+  assert.equal(result.disk.itemsByAnswer['answer-a'][0].color, 'red');
+  assert.equal(hasNewB(result.cache), true);
+  assert.equal(hasNewB(result.disk), true);
+});
+await check('concurrent normal setForAnswer survives precise hard delete paused at canonical read', async () => {
+  const result = await pausedStoreRace(storeSource, 'remove', 'read', addUnrelated);
+  assert.equal(result.result.ok, true);
+  assert.equal(hasTarget(result.cache), false);
+  assert.equal(hasTarget(result.disk), false);
+  assert.equal(hasNewB(result.cache), true);
+  assert.equal(hasNewB(result.disk), true);
+  assert.ok(!JSON.stringify(result.disk).includes('tombstone'));
+});
+await check('concurrent normal write during precise storage callback survives readback', async () => {
+  const result = await pausedStoreRace(storeSource, 'recolor', 'write', addUnrelated);
+  assert.equal(result.result.ok, true);
+  assert.equal(result.cache.itemsByAnswer['answer-a'][0].color, 'red');
+  assert.equal(hasNewB(result.cache), true);
+  assert.equal(hasNewB(result.disk), true);
+});
+await check('concurrent normal update and hard-delete API preserve unrelated Store semantics', async () => {
+  const updated = await pausedStoreRace(storeSource, 'recolor', 'read', api => api.update(draft => {
+    draft.itemsByAnswer['answer-b'].push({ id: 'new-b', color: 'green', ts: 3, convoId: 'c/chat-1' });
+    return draft;
+  }));
+  assert.equal(updated.result.ok, true);
+  assert.equal(hasNewB(updated.cache), true);
+  assert.equal(hasNewB(updated.disk), true);
+  const removed = await pausedStoreRace(storeSource, 'recolor', 'read', api => api.removeForAnswer('answer-b'));
+  assert.equal(removed.result.ok, true);
+  assert.equal(removed.cache.itemsByAnswer['answer-b'], undefined);
+  assert.equal(removed.disk.itemsByAnswer['answer-b'], undefined);
+  assert.equal(removed.cache.itemsByAnswer['answer-a'][0].color, 'red');
 });
 
 console.log(`PASS ${results.length} focused Highlights write-back groups`);

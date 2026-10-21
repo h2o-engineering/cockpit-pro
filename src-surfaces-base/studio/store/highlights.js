@@ -70,6 +70,8 @@
     warnMax: 20,
     subscribers: new Set(),
     preciseWriteInFlight: false,
+    preciseCompletion: null,
+    preciseJournal: [],
     inFlightSave: null,
   };
 
@@ -122,6 +124,10 @@
   function clone(obj) {
     try { return JSON.parse(JSON.stringify(obj || {})); }
     catch (_) { return {}; }
+  }
+  function cloneValue(value) {
+    try { return JSON.parse(JSON.stringify(value)); }
+    catch (_) { throw new Error('Uncloneable concurrent Highlights value'); }
   }
   function ensureShape(obj) {
     var blob = isPlainObject(obj) ? clone(obj) : {};
@@ -307,12 +313,85 @@
     return promise;
   }
 
+  /* Normal APIs keep their synchronous cache contract during a precise
+   * write. Record only their actual before/after delta so a later canonical
+   * readback cannot replace a newer unrelated local mutation. */
+  function preciseBefore() { return state.preciseWriteInFlight ? clone(state.cache) : null; }
+  function preciseAfter(before) {
+    if (before) state.preciseJournal.push({ before: before, after: clone(state.cache) });
+  }
+
+  function applyLocalDelta(base, before, after) {
+    var out = ensureShape(base);
+    var oldItems = asStoreObj(asStoreObj(before).itemsByAnswer);
+    var newItems = asStoreObj(asStoreObj(after).itemsByAnswer);
+    var answers = new Set(Object.keys(oldItems).concat(Object.keys(newItems)));
+    answers.forEach(function (answerId) {
+      var oldList = Array.isArray(oldItems[answerId]) ? oldItems[answerId] : [];
+      var newList = Array.isArray(newItems[answerId]) ? newItems[answerId] : [];
+      if (JSON.stringify(oldList) === JSON.stringify(newList)) return;
+      var ids = function (list) { return list.map(function (item) { return String(item && item.id || ''); }); };
+      var oldIds = ids(oldList), newIds = ids(newList);
+      if (oldIds.includes('') || newIds.includes('') ||
+          new Set(oldIds).size !== oldIds.length || new Set(newIds).size !== newIds.length) {
+        throw new Error('Ambiguous concurrent Highlights item identity');
+      }
+      var current = Array.isArray(out.itemsByAnswer[answerId]) ? out.itemsByAnswer[answerId].slice() : [];
+      oldList.forEach(function (oldItem) {
+        var id = String(oldItem.id);
+        if (newIds.includes(id)) return;
+        current = current.filter(function (item) {
+          return String(item && item.id || '') !== id || Number(item.ts || 0) > Number(oldItem.ts || 0);
+        });
+      });
+      newList.forEach(function (newItem) {
+        var id = String(newItem.id);
+        var oldIndex = oldIds.indexOf(id);
+        if (oldIndex >= 0 && JSON.stringify(oldList[oldIndex]) === JSON.stringify(newItem)) return;
+        var at = current.findIndex(function (item) { return String(item && item.id || '') === id; });
+        if (at < 0) current.push(clone(newItem));
+        else if (Number(newItem.ts || 0) >= Number(current[at].ts || 0)) current[at] = clone(newItem);
+      });
+      if (current.length) out.itemsByAnswer[answerId] = current;
+      else delete out.itemsByAnswer[answerId];
+    });
+    var oldTop = asStoreObj(before), newTop = asStoreObj(after);
+    new Set(Object.keys(oldTop).concat(Object.keys(newTop))).forEach(function (key) {
+      if (key === 'itemsByAnswer' || JSON.stringify(oldTop[key]) === JSON.stringify(newTop[key])) return;
+      if (Object.prototype.hasOwnProperty.call(newTop, key)) out[key] = cloneValue(newTop[key]);
+      else delete out[key];
+    });
+    return out;
+  }
+
+  function replayPreciseJournal(blob, from) {
+    var out = ensureShape(blob);
+    for (var i = from; i < state.preciseJournal.length; i += 1) {
+      out = applyLocalDelta(out, state.preciseJournal[i].before, state.preciseJournal[i].after);
+    }
+    return out;
+  }
+
+  function cancelSaveTimer() {
+    if (!state.saveTimer) return;
+    try { global.clearTimeout(state.saveTimer); } catch (_) { /* ignore */ }
+    state.saveTimer = null;
+  }
+
+  async function flushPendingForPrecise() {
+    if (!state.pending) return;
+    cancelSaveTimer();
+    state.pending = false;
+    await trackSave(writeCanonicalStrict(state.cache));
+  }
+
   function scheduleSave() {
     state.pending = true;
     if (state.saveTimer) return;
     state.saveTimer = global.setTimeout(function () {
       state.saveTimer = null;
       if (!state.pending || state.cache == null) return;
+      if (state.preciseWriteInFlight) return;
       state.pending = false;
       trackSave(writeCanonical(state.cache)).catch(function (e) { recordError('scheduleSave.write', e); });
     }, SAVE_DEBOUNCE_MS);
@@ -417,6 +496,7 @@
     var id = String(answerId == null ? '' : answerId).trim();
     if (!id) { recordError('setForAnswer', new Error('empty answerId')); return; }
     if (!state.cache) state.cache = ensureShape({});
+    var before = preciseBefore();
     var iba = state.cache.itemsByAnswer = asStoreObj(state.cache.itemsByAnswer);
     if (Array.isArray(items) && items.length) {
       iba[id] = clone(items);
@@ -424,6 +504,7 @@
       delete iba[id];
     }
     recordWrite('setForAnswer');
+    preciseAfter(before);
     scheduleSave();
     notifySubscribers({ source: 'local', op: 'setForAnswer', answerId: id });
   }
@@ -433,8 +514,10 @@
     if (!id || !state.cache) return;
     var iba = asStoreObj(state.cache.itemsByAnswer);
     if (Object.prototype.hasOwnProperty.call(iba, id)) {
+      var before = preciseBefore();
       delete iba[id];
       recordWrite('removeForAnswer');
+      preciseAfter(before);
       scheduleSave();
       notifySubscribers({ source: 'local', op: 'removeForAnswer', answerId: id });
     }
@@ -442,6 +525,7 @@
 
   function update(updaterOrObj) {
     if (!state.cache) state.cache = ensureShape({});
+    var before = preciseBefore();
     var next;
     if (typeof updaterOrObj === 'function') {
       var draft = clone(state.cache);
@@ -457,15 +541,14 @@
     }
     state.cache = ensureShape(next);
     recordWrite('update');
+    preciseAfter(before);
     scheduleSave();
     notifySubscribers({ source: 'local', op: 'update' });
   }
 
   function saveNow() {
-    if (state.saveTimer) {
-      try { global.clearTimeout(state.saveTimer); } catch (_) { /* ignore */ }
-      state.saveTimer = null;
-    }
+    if (state.preciseWriteInFlight) return state.preciseCompletion.then(saveNow);
+    cancelSaveTimer();
     state.pending = false;
     if (state.cache == null) return Promise.resolve();
     return trackSave(writeCanonical(state.cache)).catch(function (e) { recordError('saveNow', e); });
@@ -485,13 +568,16 @@
   async function applyExisting(request) {
     if (state.preciseWriteInFlight) return { ok: false, reason: 'busy' };
     state.preciseWriteInFlight = true;
+    state.preciseJournal = [];
+    var finishPrecise;
+    state.preciseCompletion = new Promise(function (resolve) { finishPrecise = resolve; });
     try {
       await init();
       if (state.inFlightSave) await state.inFlightSave;
-      if (state.pending) await saveNow();
+      await flushPendingForPrecise();
       var disk = await readCanonicalStrict();
       if (!isPlainObject(disk)) return { ok: false, reason: 'missing-store' };
-      var draft = ensureShape(disk);
+      var draft = replayPreciseJournal(disk, 0);
       var answerId = String(request && request.answerId || '').trim();
       var id = String(request && request.id || '').trim();
       var convoId = String(request && request.convoId || '').trim();
@@ -520,25 +606,63 @@
       } else {
         draft.itemsByAnswer[answerId] = list.filter(function (item) { return String(item && item.id || '') !== id; });
       }
-      await writeCanonicalStrict(draft);
-      var confirmed = await readCanonicalStrict();
-      var confirmedList = confirmed && confirmed.itemsByAnswer && confirmed.itemsByAnswer[answerId];
-      var confirmedItem = Array.isArray(confirmedList)
-        ? confirmedList.find(function (item) { return item && String(item.id || '') === id; }) : null;
-      if (!isPlainObject(confirmed) || !isPlainObject(confirmed._meta) || confirmed._meta.source !== 'studio' ||
-          (op === 'recolor' && (!confirmedItem || confirmedItem.color !== request.color || confirmedItem.ts !== nextTs)) ||
-          (op === 'remove' && confirmedItem)) throw new Error('Highlights persistence readback mismatch');
-      state.cache = ensureShape(confirmed);
-      state.lastReloadedAt = Date.now();
-      recordWrite('applyExisting');
-      notifySubscribers({ source: 'local', op: 'applyExisting', answerId: answerId });
-      return { ok: true, item: confirmedItem ? clone(confirmedItem) : null };
+      for (var attempt = 0; attempt < 8; attempt += 1) {
+        var included = state.preciseJournal.length;
+        await writeCanonicalStrict(draft);
+        var confirmed = await readCanonicalStrict();
+        var confirmedList = confirmed && confirmed.itemsByAnswer && confirmed.itemsByAnswer[answerId];
+        var confirmedItem = Array.isArray(confirmedList)
+          ? confirmedList.find(function (item) { return item && String(item.id || '') === id; }) : null;
+        if (!isPlainObject(confirmed) || !isPlainObject(confirmed._meta) || confirmed._meta.source !== 'studio' ||
+            (op === 'recolor' && (!confirmedItem || confirmedItem.color !== color || confirmedItem.ts !== nextTs)) ||
+            (op === 'remove' && confirmedItem)) throw new Error('Highlights persistence readback mismatch');
+        if (state.preciseJournal.length !== included) {
+          draft = replayPreciseJournal(confirmed, included);
+          continue;
+        }
+        cancelSaveTimer();
+        state.pending = false;
+        state.cache = ensureShape(confirmed);
+        state.lastReloadedAt = Date.now();
+        recordWrite('applyExisting');
+        notifySubscribers({ source: 'local', op: 'applyExisting', answerId: answerId });
+        return { ok: true, item: confirmedItem ? clone(confirmedItem) : null };
+      }
+      throw new Error('Highlights concurrent mutation did not quiesce');
     } catch (e) {
       recordError('applyExisting', e);
-      try { await reloadStrict(); } catch (reloadError) { recordError('applyExisting.reload', reloadError); }
+      try {
+        await reloadStrict();
+        var settled = false;
+        for (var recovery = 0; recovery < 8; recovery += 1) {
+          var recoveryCount = state.preciseJournal.length;
+          if (!recoveryCount) { settled = true; break; }
+          var recovered = replayPreciseJournal(state.cache, 0);
+          await writeCanonicalStrict(recovered);
+          await reloadStrict();
+          if (state.preciseJournal.length === recoveryCount) { settled = true; break; }
+        }
+        if (settled) {
+          cancelSaveTimer();
+          state.pending = false;
+        } else {
+          state.cache = replayPreciseJournal(state.cache, 0);
+          state.pending = true;
+        }
+      } catch (reloadError) {
+        recordError('applyExisting.reload', reloadError);
+        try {
+          if (state.preciseJournal.length) state.cache = replayPreciseJournal(state.cache, 0);
+        } catch (replayError) { recordError('applyExisting.replay', replayError); }
+        if (state.preciseJournal.length) state.pending = true;
+      }
       return { ok: false, reason: 'persistence-failed' };
     } finally {
       state.preciseWriteInFlight = false;
+      state.preciseJournal = [];
+      state.preciseCompletion = null;
+      finishPrecise();
+      if (state.pending && !state.saveTimer) scheduleSave();
     }
   }
 
@@ -561,9 +685,11 @@
 
   function setCurrentColor(name) {
     if (!state.cache) state.cache = ensureShape({});
+    var before = preciseBefore();
     if (!isPlainObject(state.cache._meta)) state.cache._meta = {};
     state.cache._meta.currentColor = String(name == null ? '' : name).trim().toLowerCase();
     recordWrite('setCurrentColor');
+    preciseAfter(before);
     scheduleSave();
     notifySubscribers({ source: 'local', op: 'setCurrentColor' });
   }
