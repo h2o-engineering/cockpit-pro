@@ -1499,6 +1499,86 @@
     return true;
   };
 
+  /* Dock Phase 3: a narrow existing-item bridge. The current Renderer index
+   * and its mounted root, rather than a Dock row or snapshot id, identify the
+   * message that may be changed. The Store rereads the item from disk. */
+  const HL_DOCK_FLAG = 'studio.dock.highlightsWriteBack.enabled';
+  const HL_dockWriteEnabled = () => {
+    try { return H2O.flags?.get?.(HL_DOCK_FLAG, false) === true; }
+    catch { return false; }
+  };
+
+  const HL_resolveDockTarget = (request) => {
+    const root = request?.currentRendererRoot;
+    const chatId = String(request?.chatId || '').trim();
+    const answerId = String(request?.answerId || '').trim();
+    const id = String(request?.highlightId || '').trim();
+    const pane = document.getElementById('viewReader');
+    if (!root?.isConnected || !pane?.contains?.(root) ||
+        W.H2O?.studioHost?.getReaderRoot?.() !== root ||
+        !chatId || !answerId || !id) return null;
+
+    let context, index, conversation, messages;
+    try {
+      context = H2O.Studio?.getDockContext?.();
+      index = H2O.Studio?.getReaderSemanticIndex?.(root);
+      conversation = index?.getConversation?.();
+      messages = index?.messages?.();
+    } catch { return null; }
+    if (context?.eligible !== true || String(context.chatId || '').trim() !== chatId ||
+        conversation?.target !== root ||
+        String(conversation?.sourceRef?.chatId || '').trim() !== chatId ||
+        !Array.isArray(messages)) return null;
+
+    const matches = messages.filter((record) =>
+      record?.kind === 'message' && record?.role === 'assistant' &&
+      String(record?.sourceRef?.messageId || '').trim() === answerId &&
+      record?.target?.isConnected && root.contains(record.target) &&
+      record.target.getAttribute?.('data-message-id') === answerId
+    );
+    if (matches.length !== 1) return null;
+    return { root, msgEl: matches[0].target, chatId, answerId, id };
+  };
+
+  const HL_syncDockItem = (target) => {
+    const store = W.H2O?.Studio?.store?.highlights;
+    const list = store?.getForAnswer?.(target.answerId) || [];
+    const item = list.find((entry) => String(entry?.id || '') === target.id);
+    const marks = target.msgEl.querySelectorAll(`.${CSS_CLS_HL}[${ATTR_HL_ID}="${UTIL_cssEsc(target.id)}"]`);
+    if (item) {
+      marks.forEach((mark) => HL_setMarkColor(mark, item.color));
+      if (!marks.length) HL_restoreMessage(target.msgEl);
+    } else {
+      HL_unwrapById(target.id, target.msgEl);
+    }
+    HL_notifyChanged(target.answerId);
+    HL_emitInlineChanged(target.msgEl);
+    try { W.syncMiniMapDot?.(target.answerId, STORE_colorsFrom(target.answerId), { persist: true }); } catch {}
+  };
+
+  const HL_writeExistingFromDock = async (op, request) => {
+    if (!HL_dockWriteEnabled()) return { ok: false, reason: 'flag-off' };
+    const target = HL_resolveDockTarget(request);
+    if (!target) return { ok: false, reason: 'stale-reader' };
+    const color = String(request?.color || '').trim().toLowerCase();
+    if (op === 'recolor' && !PAL_names().includes(color)) return { ok: false, reason: 'invalid-color' };
+    const store = W.H2O?.Studio?.store?.highlights;
+    if (typeof store?.applyExisting !== 'function' || typeof store?.reloadStrict !== 'function') {
+      return { ok: false, reason: 'store-unavailable' };
+    }
+    const guard = () => HL_dockWriteEnabled() && !!HL_resolveDockTarget(request);
+    const result = await store.applyExisting({
+      op, answerId: target.answerId, id: target.id, color,
+      convoId: `c/${target.chatId}`, allowedColors: PAL_names(), guard,
+    });
+    if (!result?.ok) {
+      try { await store.reloadStrict(); } catch { return { ok: false, reason: 'canonical-reload-failed' }; }
+    }
+    const current = HL_resolveDockTarget(request);
+    if (current) HL_syncDockItem(current);
+    return result;
+  };
+
   const HL_turnToAnswerId = (turnId, answerIdHint = '') => {
     const hint = String(answerIdHint || '').trim();
     if (hint) return hint;
@@ -2852,6 +2932,8 @@ mark.${CSS_CLS_HL}:hover{
     clearCurrentChat: API_clearCurrentChat,
     openPopup: (ctx = {}) => UI_toolsOpen(ctx),
     recolorTurnHighlights: (turnId, fromColor, toColor, opts = {}) => HL_recolorTurnHighlights(turnId, fromColor, toColor, opts),
+    recolorExistingHighlight: (request) => HL_writeExistingFromDock('recolor', request),
+    removeExistingHighlight: (request) => HL_writeExistingFromDock('remove', request),
     getConfig: () => CFG_getUiConfig(),
     applySetting: (optKey, value) => CFG_applyUiSetting(optKey, value),
     getPaletteConfig: () => CFG_getPaletteConfig(),

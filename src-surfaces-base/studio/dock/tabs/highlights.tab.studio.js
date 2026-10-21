@@ -1,16 +1,17 @@
-/* H2O Studio — Dock Tab: Highlights (Phase 2C-H, read-only rendering)
+/* H2O Studio — Dock Tab: Highlights (flagged Phase 3 write-back)
  *
  * Phase 2C-H: First real-data Dock tab. Renders highlight items from
- * H2O.Studio.store.highlights as a read-only flat list.
+ * H2O.Studio.store.highlights as a flat list. Flagged controls delegate
+ * precise existing-item changes to the Authoring engine.
  *
- * Read-only contract (V1):
+ * Read-only contract when the write-back flag is OFF:
  *   - Reads via H2O.Studio.store.highlights.getAll() (sync, live cache).
  *   - Subscribes via H2O.Studio.store.highlights.subscribe(fn) for live
  *     refresh; the returned cleanup function is handed back to dock-shell
  *     via the render() return value (dock-shell:374-377, 414-417 honor
  *     this contract — it runs on tab switch and on unmount).
- *   - Never calls update / setForAnswer / removeForAnswer / saveNow /
- *     setCurrentColor or any other write API.
+ *   - Does not call a write API. When enabled, the narrow controls call
+ *     the Authoring engine's existing-item APIs.
  *   - Never mutates the live cache object returned by getAll().
  *   - Never scrolls the reader, never touches the native runtime.
  *
@@ -52,6 +53,34 @@
     orange: '#FF914D',
   });
   const NEUTRAL_SWATCH = '#888888';
+  const WRITE_FLAG = 'studio.dock.highlightsWriteBack.enabled';
+
+  function writeEnabled() {
+    try { return H2O.flags?.get?.(WRITE_FLAG, false) === true; }
+    catch (_) { return false; }
+  }
+
+  function currentActionContext(pane) {
+    try {
+      const studio = H2O.Studio;
+      const context = studio.getDockContext?.();
+      const root = H2O.studioHost?.getReaderRoot?.();
+      const index = studio.getReaderSemanticIndex?.(root);
+      const conversation = index?.getConversation?.();
+      const messages = index?.messages?.();
+      const chatId = String(context?.chatId || '').trim();
+      if (context?.eligible !== true || !chatId || !root?.isConnected ||
+          !pane?.contains?.(root) || conversation?.target !== root ||
+          String(conversation?.sourceRef?.chatId || '').trim() !== chatId ||
+          !Array.isArray(messages)) return null;
+      const answerIds = new Set(messages.filter((record) =>
+        record?.kind === 'message' && record?.role === 'assistant' &&
+        record?.target?.isConnected && root.contains(record.target) &&
+        record.target.getAttribute?.('data-message-id') === record?.sourceRef?.messageId
+      ).map((record) => String(record.sourceRef.messageId)));
+      return { root, chatId, answerIds };
+    } catch (_) { return null; }
+  }
 
   function isPlainObject(v) {
     if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
@@ -87,6 +116,7 @@
           answerId: aId,
           id: id,
           color: color,
+          convoId: it.convoId != null ? String(it.convoId) : '',
           text: text,
           ts: ts,
         });
@@ -133,7 +163,7 @@
     container.appendChild(box);
   }
 
-  function renderList(container, items) {
+  function renderList(container, items, actionContext, onAction) {
     clearChildren(container);
     const list = document.createElement('ul');
     list.className = 'wbDockList';
@@ -171,6 +201,33 @@
       if (parts.length) body.appendChild(meta);
       li.appendChild(swatch);
       li.appendChild(body);
+      if (actionContext && it.id && actionContext.answerIds.has(it.answerId) &&
+          (!it.convoId || it.convoId === `c/${actionContext.chatId}`)) {
+        const controls = document.createElement('div');
+        controls.className = 'wbDockHighlightControls';
+        const color = document.createElement('select');
+        color.setAttribute('aria-label', 'Recolor highlight');
+        for (const name of Object.keys(COLOR_HEX)) {
+          const option = document.createElement('option');
+          option.value = name;
+          option.textContent = name;
+          color.appendChild(option);
+        }
+        color.value = Object.prototype.hasOwnProperty.call(COLOR_HEX, it.color) ? it.color : '';
+        color.addEventListener('change', function () {
+          onAction('recolor', it, actionContext, color.value);
+        });
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.textContent = 'Remove';
+        remove.setAttribute('aria-label', 'Remove highlight');
+        remove.addEventListener('click', function () {
+          onAction('remove', it, actionContext, '');
+        });
+        controls.appendChild(color);
+        controls.appendChild(remove);
+        li.appendChild(controls);
+      }
       list.appendChild(li);
     }
     container.appendChild(list);
@@ -197,14 +254,50 @@
         return;
       }
 
+      let active = true;
+      let busy = false;
+      let statusText = '';
+
+      async function onAction(op, item, captured, color) {
+        if (busy || !active || !writeEnabled()) { paint(); return; }
+        busy = true;
+        try {
+          const api = H2O.inline;
+          const method = op === 'recolor' ? api?.recolorExistingHighlight : api?.removeExistingHighlight;
+          if (typeof method !== 'function') throw new Error('Highlights write-back unavailable');
+          const result = await method({
+            currentRendererRoot: captured.root,
+            chatId: captured.chatId,
+            answerId: item.answerId,
+            highlightId: item.id,
+            color,
+          });
+          statusText = result?.ok ? '' : 'Highlight was not changed. Refresh the current Reader selection.';
+        } catch (_) {
+          statusText = 'Highlight was not changed. Reload canonical Highlights before retrying.';
+          try { await hlStore.reloadStrict?.(); } catch (_) { /* fail closed */ }
+        } finally {
+          busy = false;
+          if (active) paint();
+        }
+      }
+
       function paint() {
+        if (!active) return;
         try {
           const blob = hlStore.getAll();
           const items = flattenItems(blob);
+          const actions = writeEnabled() ? currentActionContext(ctx?.readerRoot) : null;
           if (!items.length) {
             renderEmpty(container);
           } else {
-            renderList(container, items);
+            renderList(container, items, actions, onAction);
+          }
+          if (statusText) {
+            const status = document.createElement('div');
+            status.setAttribute('role', 'status');
+            status.textContent = statusText;
+            container.appendChild(status);
           }
         } catch (e) {
           renderError(container, 'Failed to render Highlights.');
@@ -221,6 +314,7 @@
       }
 
       return function cleanup() {
+        active = false;
         if (typeof unsub === 'function') {
           try { unsub(); } catch (_) { /* swallow */ }
           unsub = null;

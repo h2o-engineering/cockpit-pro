@@ -69,6 +69,8 @@
     warnings: [],
     warnMax: 20,
     subscribers: new Set(),
+    preciseWriteInFlight: false,
+    inFlightSave: null,
   };
 
   function recordWrite(/* op */) {
@@ -141,7 +143,7 @@
   /* Non-destructive merge: last-write-wins by per-item `ts`. Mirrors
    * native 3H1a's _mergeStore semantics so cross-tab races stay
    * byte-identical between Studio and native. */
-  function mergeBlob(a, b) {
+  function mergeBlob(a, b, oldValue) {
     if (!isPlainObject(a) && !isPlainObject(b)) return null;
     if (!isPlainObject(a)) return clone(b);
     if (!isPlainObject(b)) return clone(a);
@@ -178,6 +180,24 @@
       }
       out.itemsByAnswer[ans] = merged;
     }
+    /* A hard delete has no tombstone. The storage change's old/new pair is
+     * sufficient to remove an item that has not gained a newer local ts. */
+    var oldItems = asStoreObj(asStoreObj(oldValue).itemsByAnswer);
+    Object.keys(oldItems).forEach(function (ans) {
+      var before = Array.isArray(oldItems[ans]) ? oldItems[ans] : [];
+      var after = Array.isArray(srcItems[ans]) ? srcItems[ans] : [];
+      var retained = new Set(after.map(function (it) { return String(it && it.id || ''); }));
+      var removed = new Map();
+      before.forEach(function (it) {
+        var id = String(it && it.id || '');
+        if (id && !retained.has(id)) removed.set(id, Number(it.ts || 0));
+      });
+      if (!removed.size || !Array.isArray(out.itemsByAnswer[ans])) return;
+      out.itemsByAnswer[ans] = out.itemsByAnswer[ans].filter(function (it) {
+        var id = String(it && it.id || '');
+        return !removed.has(id) || Number(it.ts || 0) > removed.get(id);
+      });
+    });
     if (!isPlainObject(out._meta)) out._meta = {};
     var srcMeta = isPlainObject(b._meta) ? b._meta : {};
     if (!out._meta.currentColor && srcMeta.currentColor) out._meta.currentColor = String(srcMeta.currentColor);
@@ -208,10 +228,25 @@
     });
   }
 
+  function readCanonicalStrict() {
+    return new Promise(function (resolve, reject) {
+      if (!hasChromeStorage()) { reject(new Error('Highlights storage unavailable')); return; }
+      try {
+        global.chrome.storage.local.get([KEY_DISK_CANON], function (record) {
+          var err = global.chrome && global.chrome.runtime && global.chrome.runtime.lastError;
+          if (err) { reject(new Error(String(err.message || err))); return; }
+          var value = record && record[KEY_DISK_CANON];
+          resolve(isPlainObject(value) ? value : null);
+        });
+      } catch (e) { reject(e); }
+    });
+  }
+
   /* Write the canonical blob to chrome.storage.local. No localStorage
    * mirror — chrome.storage.local is the single backend. */
   function writeCanonical(blob) {
     var safe = ensureShape(blob);
+    safe._meta.source = 'studio';
     return new Promise(function (resolve) {
       if (!hasChromeStorage()) {
         recordWarning('chrome.storage unavailable on write');
@@ -242,6 +277,36 @@
     });
   }
 
+  function writeCanonicalStrict(blob) {
+    var safe = ensureShape(blob);
+    safe._meta.source = 'studio';
+    return new Promise(function (resolve, reject) {
+      if (!hasChromeStorage()) { reject(new Error('Highlights storage unavailable')); return; }
+      try {
+        var record = {};
+        record[KEY_DISK_CANON] = safe;
+        global.chrome.storage.local.set(record, function () {
+          var err = global.chrome && global.chrome.runtime && global.chrome.runtime.lastError;
+          if (err) { reject(new Error(String(err.message || err))); return; }
+          state.lastSavedAt = Date.now();
+          state.lastFlushAt = state.lastSavedAt;
+          state.savesSinceBoot += 1;
+          resolve();
+        });
+      } catch (e) { reject(e); }
+    });
+  }
+
+  function trackSave(promise) {
+    state.inFlightSave = promise;
+    promise.then(function () {
+      if (state.inFlightSave === promise) state.inFlightSave = null;
+    }, function () {
+      if (state.inFlightSave === promise) state.inFlightSave = null;
+    });
+    return promise;
+  }
+
   function scheduleSave() {
     state.pending = true;
     if (state.saveTimer) return;
@@ -249,7 +314,7 @@
       state.saveTimer = null;
       if (!state.pending || state.cache == null) return;
       state.pending = false;
-      writeCanonical(state.cache).catch(function (e) { recordError('scheduleSave.write', e); });
+      trackSave(writeCanonical(state.cache)).catch(function (e) { recordError('scheduleSave.write', e); });
     }, SAVE_DEBOUNCE_MS);
   }
 
@@ -288,7 +353,7 @@
     var next = rec && rec.newValue;
     if (!isPlainObject(next)) return;
     /* Merge incoming non-destructively to honor per-item last-write-wins. */
-    var merged = mergeBlob(state.cache || {}, next);
+    var merged = mergeBlob(state.cache || {}, next, rec && rec.oldValue);
     if (merged) state.cache = merged;
     state.lastReloadedAt = Date.now();
     notifySubscribers({ source: 'cross-tab' });
@@ -403,7 +468,78 @@
     }
     state.pending = false;
     if (state.cache == null) return Promise.resolve();
-    return writeCanonical(state.cache).catch(function (e) { recordError('saveNow', e); });
+    return trackSave(writeCanonical(state.cache)).catch(function (e) { recordError('saveNow', e); });
+  }
+
+  function reloadStrict() {
+    return readCanonicalStrict().then(function (blob) {
+      state.cache = ensureShape(blob || {});
+      state.lastReloadedAt = Date.now();
+      notifySubscribers({ source: 'reload' });
+      return clone(state.cache);
+    });
+  }
+
+  /* Precise Dock writes read the canonical item again immediately before
+   * mutation and publish the cache only after storage callback + readback. */
+  async function applyExisting(request) {
+    if (state.preciseWriteInFlight) return { ok: false, reason: 'busy' };
+    state.preciseWriteInFlight = true;
+    try {
+      await init();
+      if (state.inFlightSave) await state.inFlightSave;
+      if (state.pending) await saveNow();
+      var disk = await readCanonicalStrict();
+      if (!isPlainObject(disk)) return { ok: false, reason: 'missing-store' };
+      var draft = ensureShape(disk);
+      var answerId = String(request && request.answerId || '').trim();
+      var id = String(request && request.id || '').trim();
+      var convoId = String(request && request.convoId || '').trim();
+      var op = String(request && request.op || '');
+      var list = asStoreObj(draft.itemsByAnswer)[answerId];
+      if (!answerId || !id || !convoId || !Array.isArray(list) ||
+          (op !== 'recolor' && op !== 'remove')) return { ok: false, reason: 'invalid-target' };
+      var matches = list.filter(function (item) { return item && String(item.id || '') === id; });
+      if (matches.length !== 1 || (matches[0].convoId && matches[0].convoId !== convoId)) {
+        return { ok: false, reason: 'missing-or-foreign-item' };
+      }
+      if (typeof request.guard !== 'function' || request.guard() !== true) {
+        return { ok: false, reason: 'stale-reader' };
+      }
+      var previous = matches[0];
+      var nextTs = 0;
+      if (op === 'recolor') {
+        var color = String(request.color || '').trim().toLowerCase();
+        if (!request.allowedColors || !request.allowedColors.includes(color)) {
+          return { ok: false, reason: 'invalid-color' };
+        }
+        nextTs = Date.now();
+        if (nextTs <= Number(previous.ts || 0)) return { ok: false, reason: 'clock-not-advanced' };
+        previous.color = color;
+        previous.ts = nextTs;
+      } else {
+        draft.itemsByAnswer[answerId] = list.filter(function (item) { return String(item && item.id || '') !== id; });
+      }
+      await writeCanonicalStrict(draft);
+      var confirmed = await readCanonicalStrict();
+      var confirmedList = confirmed && confirmed.itemsByAnswer && confirmed.itemsByAnswer[answerId];
+      var confirmedItem = Array.isArray(confirmedList)
+        ? confirmedList.find(function (item) { return item && String(item.id || '') === id; }) : null;
+      if (!isPlainObject(confirmed) || !isPlainObject(confirmed._meta) || confirmed._meta.source !== 'studio' ||
+          (op === 'recolor' && (!confirmedItem || confirmedItem.color !== request.color || confirmedItem.ts !== nextTs)) ||
+          (op === 'remove' && confirmedItem)) throw new Error('Highlights persistence readback mismatch');
+      state.cache = ensureShape(confirmed);
+      state.lastReloadedAt = Date.now();
+      recordWrite('applyExisting');
+      notifySubscribers({ source: 'local', op: 'applyExisting', answerId: answerId });
+      return { ok: true, item: confirmedItem ? clone(confirmedItem) : null };
+    } catch (e) {
+      recordError('applyExisting', e);
+      try { await reloadStrict(); } catch (reloadError) { recordError('applyExisting.reload', reloadError); }
+      return { ok: false, reason: 'persistence-failed' };
+    } finally {
+      state.preciseWriteInFlight = false;
+    }
   }
 
   function reload() {
@@ -478,6 +614,8 @@
     update: update,
     saveNow: saveNow,
     reload: reload,
+    reloadStrict: reloadStrict,
+    applyExisting: applyExisting,
     getCurrentColor: getCurrentColor,
     setCurrentColor: setCurrentColor,
     subscribe: subscribe,
