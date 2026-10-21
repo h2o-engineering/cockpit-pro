@@ -381,8 +381,9 @@
   async function flushPendingForPrecise() {
     if (!state.pending) return;
     cancelSaveTimer();
-    state.pending = false;
+    var journalStart = state.preciseJournal.length;
     await trackSave(writeCanonicalStrict(state.cache));
+    state.pending = state.preciseJournal.length !== journalStart;
   }
 
   function scheduleSave() {
@@ -569,12 +570,14 @@
     if (state.preciseWriteInFlight) return { ok: false, reason: 'busy' };
     state.preciseWriteInFlight = true;
     state.preciseJournal = [];
+    var pendingFlushFailed = false;
     var finishPrecise;
     state.preciseCompletion = new Promise(function (resolve) { finishPrecise = resolve; });
     try {
       await init();
       if (state.inFlightSave) await state.inFlightSave;
-      await flushPendingForPrecise();
+      try { await flushPendingForPrecise(); }
+      catch (flushError) { pendingFlushFailed = true; throw flushError; }
       var disk = await readCanonicalStrict();
       if (!isPlainObject(disk)) return { ok: false, reason: 'missing-store' };
       var draft = replayPreciseJournal(disk, 0);
@@ -631,6 +634,12 @@
       throw new Error('Highlights concurrent mutation did not quiesce');
     } catch (e) {
       recordError('applyExisting', e);
+      // No precise draft was written. Keep the failed normal save in cache
+      // and dirty so a later public flush can persist it.
+      if (pendingFlushFailed) {
+        state.pending = true;
+        return { ok: false, reason: 'persistence-failed' };
+      }
       try {
         await reloadStrict();
         var settled = false;

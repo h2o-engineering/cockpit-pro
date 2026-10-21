@@ -369,7 +369,8 @@ async function pausedStoreRace(source, op, boundary, mutation) {
         'answer-b': [{ id: 'original-b', color: 'blue', ts: 2, convoId: 'c/chat-1' }],
       }, _meta: { currentColor: 'gold' },
     } };
-    var pauseRead = false, pauseWrite = false, pausedRead = null, pausedWrite = null, listeners = [];
+    var pauseRead = false, pauseWrite = false, failNextWrite = false;
+    var pausedRead = null, pausedWrite = null, listeners = [];
     var chrome = { runtime: { lastError: null }, storage: {
       onChanged: { addListener(fn) { listeners.push(fn); }, removeListener() {} },
       local: {
@@ -379,6 +380,13 @@ async function pausedStoreRace(source, op, boundary, mutation) {
           cb({ [${JSON.stringify(key)}]: snapshot });
         },
         set(record, cb) {
+          if (failNextWrite) {
+            failNextWrite = false;
+            chrome.runtime.lastError = { message: 'injected pending preflush failure' };
+            cb();
+            chrome.runtime.lastError = null;
+            return;
+          }
           const snapshot = JSON.parse(JSON.stringify(record[${JSON.stringify(key)}]));
           const commit = () => {
             const oldValue = JSON.parse(JSON.stringify(disk[${JSON.stringify(key)}]));
@@ -396,6 +404,28 @@ async function pausedStoreRace(source, op, boundary, mutation) {
   vm.runInContext(source, race, { filename: 'race-store/highlights.js' });
   const api = race.H2O.Studio.store.highlights;
   await api.init();
+  if (boundary === 'preflush-failure') {
+    mutation(api);
+    assert.equal(api.diagnose().pendingSave, true);
+    race.failNextWrite = true;
+    const result = await api.applyExisting({
+      op, answerId: 'answer-a', id: 'target', convoId: 'c/chat-1', color: 'red',
+      allowedColors: colors, guard: () => true,
+    });
+    const failed = {
+      result,
+      pending: api.diagnose().pendingSave,
+      cache: JSON.parse(JSON.stringify(api.getAll())),
+      disk: JSON.parse(JSON.stringify(race.disk[key])),
+    };
+    await api.saveNow();
+    return {
+      failed,
+      pendingAfterFlush: api.diagnose().pendingSave,
+      cache: JSON.parse(JSON.stringify(api.getAll())),
+      disk: JSON.parse(JSON.stringify(race.disk[key])),
+    };
+  }
   race[boundary === 'read' ? 'pauseRead' : 'pauseWrite'] = true;
   const operation = api.applyExisting({
     op, answerId: 'answer-a', id: 'target', convoId: 'c/chat-1', color: 'red',
@@ -471,6 +501,34 @@ await check('concurrent normal update and hard-delete API preserve unrelated Sto
   assert.equal(removed.cache.itemsByAnswer['answer-b'], undefined);
   assert.equal(removed.disk.itemsByAnswer['answer-b'], undefined);
   assert.equal(removed.cache.itemsByAnswer['answer-a'][0].color, 'red');
+});
+
+await check('negative control reproduces pending-preflush data loss in the correction candidate', async () => {
+  const candidate = execFileSync('git', [
+    'show', 'be7f78fd24ae9eab567d37dfd65167e03019decd:src-surfaces-base/studio/store/highlights.js',
+  ], { cwd: root, encoding: 'utf8' });
+  const old = await pausedStoreRace(candidate, 'recolor', 'preflush-failure', addUnrelated);
+  assert.equal(old.failed.result.ok, false);
+  assert.equal(hasNewB(old.failed.cache), false);
+  assert.equal(old.failed.pending, false);
+  assert.equal(hasNewB(old.disk), false);
+});
+
+await check('failed pending preflush preserves unrelated edit until a later public flush', async () => {
+  for (const op of ['recolor', 'remove']) {
+    const outcome = await pausedStoreRace(storeSource, op, 'preflush-failure', addUnrelated);
+    assert.equal(outcome.failed.result.ok, false, op);
+    assert.equal(outcome.failed.result.reason, 'persistence-failed', op);
+    assert.equal(outcome.failed.pending, true, op);
+    assert.equal(hasNewB(outcome.failed.cache), true, op);
+    assert.equal(hasNewB(outcome.failed.disk), false, op);
+    assert.equal(outcome.failed.cache.itemsByAnswer['answer-a'][0].color, 'gold', op);
+    assert.equal(outcome.pendingAfterFlush, false, op);
+    assert.equal(hasNewB(outcome.cache), true, op);
+    assert.equal(hasNewB(outcome.disk), true, op);
+    assert.deepEqual(outcome.cache.itemsByAnswer, outcome.disk.itemsByAnswer, op);
+    assert.equal(outcome.disk._meta.source, 'studio', op);
+  }
 });
 
 console.log(`PASS ${results.length} focused Highlights write-back groups`);
