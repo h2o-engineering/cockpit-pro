@@ -684,8 +684,11 @@ await group('PREDECESSOR', 'M01 contract and approved location-only validator id
     const payload = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
     return createHash('sha1').update(`blob ${payload.length}\0`).update(payload).digest('hex');
   };
+  const checkApprovedM01Identity = bytes => {
+    assert.equal(gitBlobId(bytes), APPROVED_M01_BLOB, 'M01 validator must match exact approved T02 location-only rebinding');
+  };
   const accepted = fs.readFileSync(path.join(ROOT, M01_VALIDATOR_REL));
-  assert.equal(gitBlobId(accepted), APPROVED_M01_BLOB, 'M01 validator must match exact approved T02 location-only rebinding');
+  checkApprovedM01Identity(accepted);
   const m01Text = accepted.toString('utf8');
   assert.match(m01Text, /reader-session-current-render\.studio\.js/);
 
@@ -700,7 +703,11 @@ await group('PREDECESSOR', 'M01 contract and approved location-only validator id
     const falseRun = spawnSync(process.execPath, [fixture], { cwd: ROOT, encoding: 'utf8', timeout: 10000 });
     assert.ifError(falseRun.error);
     assert.equal(falseRun.status, 0, 'falsification fixture must exit successfully');
-    assert.notEqual(gitBlobId(fs.readFileSync(fixture)), APPROVED_M01_BLOB, 'weakened zero-exit M01 must be rejected by predecessor identity guard');
+    assert.throws(
+      () => checkApprovedM01Identity(fs.readFileSync(fixture)),
+      { name: 'AssertionError', message: /M01 validator must match exact approved T02 location-only rebinding/ },
+      'weakened zero-exit M01 must be rejected by predecessor identity guard'
+    );
   } finally {
     fs.rmSync(falsificationRoot, { recursive: true, force: true });
   }
