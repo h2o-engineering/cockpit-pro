@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 //
 // Lane: L-COCKPIT-KNOWLEDGE-MODEL
-// Mission: knowledge-model-current-main-semantic-runtime-convergence-v0 (T2)
+// Mission: knowledge-model-current-main-semantic-runtime-convergence-v0 (T2–T3)
 //
 // Studio admission / mirror / packaging validator for the Knowledge Model v0
 // modules. Desktop Studio resolves modules through ./-relative <script src>
@@ -13,8 +13,8 @@
 // Obligations:
 //   A  canonical/mirror parity — IIFE bodies byte-identical, header-only drift
 //   B  API parity — canonical and mirror publish equivalent frozen APIs
-//   C  studio.html load order — dependencies, contracts, adapter; no consumer
-//   D  pack parity — exactly two Knowledge paths, once in each paired list
+//   C  studio.html load order — dependencies, contracts, adapter, consumer
+//   D  pack parity — exactly three Knowledge paths, once in each paired list
 //   E  studio-reference coverage — the existing drift guard sees both
 //   F  inert / read-only admission — namespaces only, adapter never invoked
 //   G  canonical foundation byte-unchanged in this working tree
@@ -180,6 +180,7 @@ for (const pair of PAIRS) {
   const refs = parseStudioHtmlScriptRefs(html);
   const contractsIdx = refs.indexOf(PAIRS[0].packPath);
   const adapterIdx = refs.indexOf(PAIRS[1].packPath);
+  const consumerIdx = refs.indexOf(T3_CONSUMER);
 
   ok('C: contracts admitted in studio.html', contractsIdx !== -1);
   ok('C: adapter admitted in studio.html', adapterIdx !== -1);
@@ -191,11 +192,12 @@ for (const pair of PAIRS) {
     ok(`C: ${pair.label} admitted exactly once`,
       refs.filter((r) => r === pair.packPath).length === 1);
   }
-  // Contiguous cluster: nothing wedged between the two Knowledge scripts.
+  // Contiguous cluster: nothing wedged between the Knowledge scripts.
   ok('C: the Knowledge scripts form one contiguous cluster', adapterIdx === contractsIdx + 1);
-  ok('C: T3 consumer is not admitted', !refs.includes(T3_CONSUMER));
-  ok('C: T3 consumer does not exist', !fs.existsSync(path.join(STUDIO_DIR, T3_CONSUMER)));
-  ok('C: T3 validator does not exist', !fs.existsSync(path.join(repoRoot, T3_VALIDATOR)));
+  ok('C: T3 consumer admitted exactly once', refs.filter((r) => r === T3_CONSUMER).length === 1);
+  ok('C: T3 consumer loads after both mirrors', consumerIdx === adapterIdx + 1);
+  ok('C: T3 consumer exists', fs.existsSync(path.join(STUDIO_DIR, T3_CONSUMER)));
+  ok('C: T3 validator exists', fs.existsSync(path.join(repoRoot, T3_VALIDATOR)));
 }
 
 /* ══ D. Pack parity ════════════════════════════════════════════════════ */
@@ -225,20 +227,24 @@ for (const pair of PAIRS) {
   ok('D: contracts packed before the adapter',
     ARCHIVE_WORKBENCH_SOURCE_FILES.indexOf(PAIRS[0].packPath)
     < ARCHIVE_WORKBENCH_SOURCE_FILES.indexOf(PAIRS[1].packPath));
-  const expectedKnowledgePaths = PAIRS.map((pair) => pair.packPath);
+  const expectedKnowledgePaths = PAIRS.map((pair) => pair.packPath).concat(T3_CONSUMER);
   assert.deepEqual(
     ARCHIVE_WORKBENCH_SOURCE_FILES.filter((name) => name.startsWith('knowledge/')),
     expectedKnowledgePaths,
-    'D: source inventory contains exactly the two T2 mirrors',
+    'D: source inventory contains exactly the two mirrors and T3 consumer',
   );
   assert.deepEqual(
     ARCHIVE_WORKBENCH_OUT_FILES.filter((name) => name.startsWith('knowledge/')),
     expectedKnowledgePaths,
-    'D: output inventory contains exactly the two T2 mirrors',
+    'D: output inventory contains exactly the two mirrors and T3 consumer',
   );
-  ok('D: no T3 consumer is packed',
-    !ARCHIVE_WORKBENCH_SOURCE_FILES.includes(T3_CONSUMER)
-    && !ARCHIVE_WORKBENCH_OUT_FILES.includes(T3_CONSUMER));
+  ok('D: T3 consumer packed exactly once in source',
+    ARCHIVE_WORKBENCH_SOURCE_FILES.filter((name) => name === T3_CONSUMER).length === 1);
+  ok('D: T3 consumer packed exactly once in output',
+    ARCHIVE_WORKBENCH_OUT_FILES.filter((name) => name === T3_CONSUMER).length === 1);
+  ok('D: T3 consumer source/output indices correspond',
+    ARCHIVE_WORKBENCH_SOURCE_FILES.indexOf(T3_CONSUMER)
+    === ARCHIVE_WORKBENCH_OUT_FILES.indexOf(T3_CONSUMER));
 }
 
 /* ══ E. Studio-reference coverage (the repo's own drift guard) ═════════ */
@@ -363,10 +369,11 @@ for (const pair of PAIRS) {
   // ships unreviewed. Stated against the pack list rather than a hardcoded
   // inventory so it stays true as the Lane adds admitted modules.
   const mirrorNames = PAIRS.map((p) => path.basename(p.mirror)).sort();
+  const expectedRuntimeNames = mirrorNames.concat(path.basename(T3_CONSUMER)).sort();
   ok('F: both mirrors present in the Studio knowledge dir',
     mirrorNames.every((n) => studioFiles.includes(n)));
-  assert.deepEqual(studioFiles, mirrorNames,
-    'F: T2 Studio knowledge directory contains only the two authorized mirrors');
+  assert.deepEqual(studioFiles, expectedRuntimeNames,
+    'F: Studio knowledge directory contains exactly the two mirrors and T3 consumer');
   const unpacked = studioFiles.filter((n) => !ARCHIVE_WORKBENCH_SOURCE_FILES.includes(`knowledge/${n}`));
   assert.deepEqual(unpacked, [], 'F: every file in the Studio knowledge dir is packed');
 
