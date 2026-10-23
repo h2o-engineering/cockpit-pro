@@ -7,11 +7,11 @@
 //
 // REAL vs HARNESSED — stated plainly so the evidence is not overread:
 //   REAL      the T2 Studio mirrors (contracts + captured-chat adapter), the
-//             T3 consumer, and the incumbent plain-text anchor resolver.
-//   HARNESSED the four owner APIs, because the real Reader consumer needs a
-//             live DOM and the real coverage API needs Tauri + SQLite. The
-//             resolution harness does NOT invent verdicts: it delegates each
-//             one to the REAL incumbent resolver and shapes the row exactly as
+//             T3 consumer, the incumbent anchor resolvers, and one actual
+//             Reader consumer composition probe over a bounded root fixture.
+//   HARNESSED the other owner APIs, because coverage needs Tauri + SQLite.
+//             The general resolution harness delegates each verdict to the
+//             REAL incumbent resolver and shapes the row exactly as
 //             highlight-resolution-consumer.studio.js does, taking
 //             `text = plain.slice(span.start, span.end)` — which the DOM
 //             wrapper guarantees equals `range.toString()` (it refuses to
@@ -42,10 +42,13 @@ const CONTRACTS = 'src-surfaces-base/studio/knowledge/contracts-v0.studio.js';
 const ADAPTER = 'src-surfaces-base/studio/knowledge/captured-chat-highlight-adapter-v0.studio.js';
 const CONSUMER = 'src-surfaces-base/studio/knowledge/exact-reference-consumer.studio.js';
 const RESOLVER = 'src-surfaces-base/studio/reader-notes/anchor-resolver.studio.js';
+const DOM_RESOLVER = 'src-surfaces-base/studio/reader-notes/anchor-resolver-dom.studio.js';
+const READER_CONSUMER = 'src-surfaces-base/studio/reader-notes/highlight-resolution-consumer.studio.js';
 
 const CONSUMER_PACK = 'knowledge/exact-reference-consumer.studio.js';
 const CONSUMER_FLAG = 'studio.knowledge.exactReferences.enabled';
 const RESOLVER_FLAG = 'studio.readerNotes.anchorResolver.enabled';
+const READER_FLAG = 'studio.readerNotes.highlightResolutionConsumer.enabled';
 
 let checks = 0;
 function ok(label, condition) {
@@ -264,7 +267,7 @@ function makeRealm(opts = {}) {
         }
       }
       return {
-        schemaVersion: 1, itemId, status: 'ok', resolved, unresolved,
+        schemaVersion: 1, itemId, resolved, unresolved,
         diagnostics: { reason: 'ok', considered: annotations.length },
       };
     },
@@ -293,6 +296,16 @@ function makeRealm(opts = {}) {
     describe: (itemId = CHAT_ID, root = { opaque: 'reader-root' }, options = { policyToken: OPAQUE_TOKEN }) =>
       sandbox.H2O.Studio.knowledge.exactReferences.describeForItemV1(itemId, root, options),
   };
+}
+
+function readerEnvelope(overrides = {}) {
+  return Object.assign({
+    schemaVersion: 1,
+    itemId: CHAT_ID,
+    resolved: [],
+    unresolved: [],
+    diagnostics: { reason: 'ok', considered: 0 },
+  }, overrides);
 }
 
 /* ══ A. Admission ══════════════════════════════════════════════════════ */
@@ -382,6 +395,8 @@ function makeRealm(opts = {}) {
     'querySelector', 'getReaderSemanticIndex', 'projectionKey']) {
     ok(`B: consumer never references ${token}`, new RegExp(`\\b${token}\\b`).test(code) === false);
   }
+  ok('B: consumer has no whole-envelope resolved.status dependency',
+    !/\bresolved\.status\b/.test(code));
 }
 
 /* ══ C. Owner identity ═════════════════════════════════════════════════ */
@@ -697,11 +712,160 @@ const ANCHORS_A = {
   ok('I: junk resolution result fails closed',
     (await makeRealm({ resolveResult: 'nope', annotations: [annotation] }).describe()).reason === 'resolution-invalid');
   ok('I: unavailable Reader result fails closed',
-    (await makeRealm({ resolveResult: { status: 'disabled', itemId: CHAT_ID, resolved: [], unresolved: [] }, annotations: [annotation] }).describe()).reason === 'resolution-unavailable');
+    (await makeRealm({ resolveResult: readerEnvelope({ diagnostics: { reason: 'disabled' } }), annotations: [annotation] }).describe()).reason === 'resolution-unavailable');
   ok('I: wrong-item Reader result fails closed',
-    (await makeRealm({ resolveResult: { status: 'ok', itemId: 'other-chat', resolved: [], unresolved: [] }, annotations: [annotation] }).describe()).reason === 'resolution-invalid');
+    (await makeRealm({ resolveResult: readerEnvelope({ itemId: 'other-chat' }), annotations: [annotation] }).describe()).reason === 'resolution-invalid');
   ok('I: malformed Reader rows fail closed',
-    (await makeRealm({ resolveResult: { status: 'ok', itemId: CHAT_ID, resolved: null, unresolved: [] }, annotations: [annotation] }).describe()).reason === 'resolution-invalid');
+    (await makeRealm({ resolveResult: readerEnvelope({ resolved: null }), annotations: [annotation] }).describe()).reason === 'resolution-invalid');
+}
+
+/* ══ I2. Reader envelope contract regressions ════════════════════════════ */
+
+{
+  const anchored = highlightAnnotation(ANCHORS_A);
+  const good = makeRealm({ annotations: [anchored], plainText: PLAIN_A });
+  const readerResult = good.sandbox.H2O.Studio.readerNotes.highlightResolutionConsumer
+    .resolveForItem(CHAT_ID, { opaque: 'reader-root' }, {});
+  ok('I2: real-shaped fixture has no top-level status',
+    !Object.prototype.hasOwnProperty.call(readerResult, 'status'));
+  ok('I2: real-shaped fixture uses diagnostics.reason ok',
+    readerResult.diagnostics.reason === 'ok');
+  const goodOut = await makeRealm({ annotations: [anchored], plainText: PLAIN_A }).describe();
+  ok('I2: no top-level status is required for anchored composition',
+    goodOut.ok === true && goodOut.references[0].result.status === 'anchored');
+
+  const orphan = highlightAnnotation({ textQuote: { exact: 'not in the message' } }, {
+    id: `${ANNOTATION_ID}:orphan`,
+    source: { store: 'highlights', chatId: CHAT_ID, answerId: ANSWER_ID,
+      nativeId: 'hl_orphan', convoId: null },
+  });
+  const orphanOut = await makeRealm({ annotations: [orphan], plainText: PLAIN_A }).describe();
+  ok('I2: ok Reader envelope composes an all-unresolved result',
+    orphanOut.ok === true && orphanOut.references.length === 1);
+  ok('I2: unresolved row stays orphaned with no Excerpt',
+    orphanOut.references[0].result.status === 'orphaned'
+    && orphanOut.references[0].excerpt === null
+    && orphanOut.references[0].result.versionScope === 'same_version');
+
+  const mixed = await makeRealm({ annotations: [anchored, orphan], plainText: PLAIN_A }).describe();
+  ok('I2: ok Reader envelope composes mixed resolved and unresolved rows',
+    mixed.ok === true && mixed.references.length === 2);
+  ok('I2: mixed rows retain resolved Excerpt and orphan no-Excerpt',
+    mixed.references.filter((ref) => ref.result.status === 'anchored' && !!ref.excerpt).length === 1
+    && mixed.references.filter((ref) => ref.result.status === 'orphaned' && ref.excerpt === null).length === 1
+    && mixed.diagnostics.excerpted === 1 && mixed.diagnostics.orphaned === 1);
+
+  for (const reason of ['disabled', 'missing-root', 'deps-unavailable', 'no-highlights', 'not-eligible']) {
+    const result = readerEnvelope({
+      resolved: [{ annotationId: ANNOTATION_ID }],
+      diagnostics: { reason },
+    });
+    const out = await makeRealm({ annotations: [anchored], resolveResult: result }).describe();
+    ok(`I2: Reader ${reason} fails closed regardless of row count`,
+      out.ok === false && out.reason === 'resolution-unavailable'
+      && out.references.length === 0);
+  }
+
+  const invalid = [
+    ['missing diagnostics', readerEnvelope({ diagnostics: undefined })],
+    ['malformed diagnostics', readerEnvelope({ diagnostics: [] })],
+    ['missing diagnostics.reason', readerEnvelope({ diagnostics: {} })],
+    ['non-string diagnostics.reason', readerEnvelope({ diagnostics: { reason: 1 } })],
+    ['empty diagnostics.reason', readerEnvelope({ diagnostics: { reason: '' } })],
+    ['wrong item id', readerEnvelope({ itemId: 'other-chat' })],
+    ['malformed resolved array', readerEnvelope({ resolved: {} })],
+    ['malformed unresolved array', readerEnvelope({ unresolved: null })],
+  ];
+  for (const [label, result] of invalid) {
+    const out = await makeRealm({ annotations: [anchored], resolveResult: result }).describe();
+    ok(`I2: ${label} -> resolution-invalid`,
+      out.ok === false && out.reason === 'resolution-invalid'
+      && out.references.length === 0);
+  }
+}
+
+/* ══ I3. Actual Reader implementation composition probe ════════════════ */
+
+{
+  const sandbox = { console };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  for (const rel of [CONTRACTS, ADAPTER, RESOLVER, DOM_RESOLVER, READER_CONSUMER, CONSUMER]) {
+    vm.runInContext(read(rel), sandbox, { filename: rel });
+  }
+  sandbox.H2O.flags = {
+    get(key, fallback) {
+      return [RESOLVER_FLAG, READER_FLAG, CONSUMER_FLAG].includes(key) ? true : fallback;
+    },
+  };
+  const annotation = highlightAnnotation(ANCHORS_A);
+  sandbox.H2O.Studio.readerNotes.libraryItems = {
+    isEnabled: () => true,
+    get: () => capturedChatItem(),
+  };
+  sandbox.H2O.Studio.readerNotes.annotations = {
+    isEnabled: () => true,
+    listForItem: () => [annotation],
+  };
+  sandbox.H2O.Studio.ingestion = {
+    describeSavedChatCoverageV1: () => Promise.resolve(coverageResult()),
+  };
+
+  // Bounded root and Semantic Index are dependencies. The Reader consumer,
+  // DOM resolver, and Knowledge consumer above are the actual source files.
+  const textNode = { nodeType: 3, nodeValue: PLAIN_A, childNodes: [] };
+  let rootQueryCount = 0;
+  const root = {
+    nodeType: 1,
+    querySelectorAll() { rootQueryCount += 1; return []; },
+    childNodes: [],
+  };
+  const message = {
+    nodeType: 1, parentNode: root, childNodes: [textNode],
+    ownerDocument: {
+      createRange() {
+        let startNode; let endNode; let start; let end;
+        return {
+          setStart(node, offset) { startNode = node; start = offset; },
+          setEnd(node, offset) { endNode = node; end = offset; },
+          toString() {
+            return startNode === endNode ? startNode.nodeValue.slice(start, end) : '';
+          },
+        };
+      },
+    },
+  };
+  root.childNodes.push(message);
+  const semanticIndex = {
+    schema: 'h2o.renderer.semantic-index',
+    getConversation: () => ({ target: root }),
+    messages: () => [{ kind: 'message', sourceRef: { messageId: ANSWER_ID }, target: message }],
+  };
+  const options = { semanticIndex };
+  const actualReader = sandbox.H2O.Studio.readerNotes.highlightResolutionConsumer;
+  ok('I3: Reader namespace is the actual source implementation',
+    actualReader.__installed === true && typeof actualReader.resolveForItem === 'function');
+  const result = actualReader.resolveForItem(CHAT_ID, root, options);
+  ok('I3: actual Reader has no top-level status',
+    !Object.prototype.hasOwnProperty.call(result, 'status'));
+  ok('I3: actual Reader normal envelope uses diagnostics.reason ok',
+    result.diagnostics.reason === 'ok');
+  ok('I3: actual Reader resolved via bounded Semantic Index target',
+    result.resolved.length === 1 && result.unresolved.length === 0
+    && result.diagnostics.messageRootLookup.bySemanticIndex === 1);
+  const out = await sandbox.H2O.Studio.knowledge.exactReferences.describeForItemV1(
+    CHAT_ID, root, { policyToken: OPAQUE_TOKEN, resolutionOptions: options });
+  ok('I3: Knowledge accepts the actual Reader envelope',
+    out.ok === true && out.references.length === 1);
+  ok('I3: Reader row identity and verdict are consumed unchanged',
+    out.references[0].annotationId === result.resolved[0].annotationId
+    && out.references[0].answerId === result.resolved[0].answerId
+    && out.references[0].result.status === result.resolved[0].status);
+  ok('I3: Excerpt comes from actual Reader row text',
+    out.references[0].excerpt.text === result.resolved[0].text
+    && out.references[0].excerpt.text === EXACT_A);
+  ok('I3: Knowledge performs no DOM lookup or independent matching',
+    rootQueryCount === 0);
 }
 
 /* ══ J. Immutability ═══════════════════════════════════════════════════ */

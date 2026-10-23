@@ -412,10 +412,12 @@
         return fail('resolution-failed', covDiag);
       }
       if (!isPlainObject(resolved)) return fail('resolution-invalid', covDiag);
-      if (resolved.status !== 'ok') return fail('resolution-unavailable', covDiag);
       if (resolved.itemId !== id
         || !Array.isArray(resolved.resolved)
         || !Array.isArray(resolved.unresolved)) return fail('resolution-invalid', covDiag);
+      if (!isPlainObject(resolved.diagnostics)
+        || !isCleanString(resolved.diagnostics.reason)) return fail('resolution-invalid', covDiag);
+      if (resolved.diagnostics.reason !== 'ok') return fail('resolution-unavailable', covDiag);
 
       var rows = resolved.resolved.concat(resolved.unresolved);
 
