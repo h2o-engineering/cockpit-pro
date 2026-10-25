@@ -612,6 +612,12 @@ ${S_MINIMAP}{
   mask-repeat: no-repeat;
 }
 
+/* Desktop Reader positions the stack root below its chrome. Its shared top
+   offset must not move the in-flow scroll column away from the counter. */
+body[data-route="reader"] ${S_ROOT} > ${S_MINIMAP}{
+  top: auto !important;
+}
+
 /* Scrollbar styling (invisible, but scrolling still works) */ /* 👈👈👈 */
 ${S_MINIMAP}{
   scrollbar-width: none;        /* Firefox */
@@ -1432,7 +1438,7 @@ html [data-cgxui-chat-page-no-answer="1"] [data-cgxui="atns-answer-title"][data-
   align-items:center;
   justify-content:center;
   gap:${CHAT_PAGE_DIVIDER_LAYOUT.ROW_GAP_PX}px;
-  margin: ${CHAT_PAGE_DIVIDER_LAYOUT.MARGIN_TOP_PX}px 0 ${CHAT_PAGE_DIVIDER_LAYOUT.MARGIN_BOTTOM_PX}px;
+  margin: ${CHAT_PAGE_DIVIDER_LAYOUT.MARGIN_TOP_PX}px auto ${CHAT_PAGE_DIVIDER_LAYOUT.MARGIN_BOTTOM_PX}px;
   box-sizing: border-box;
   position: relative;
   z-index: 0;

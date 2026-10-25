@@ -629,6 +629,79 @@ function UM_PUBLIC() {
     return q('[data-cgxui="mnmp-root"][data-cgxui-owner="mnmp"], [data-h2o-owner="minimap-v10"]');
   }
 
+  // Studio's top controls are Shell-owned. Measure their visible bounds, then
+  // position only our MiniMap root. Desktop view zoom scales CSS top values,
+  // so convert the viewport measurement back to the root's CSS coordinates.
+  let readerChromeClearanceRaf = 0;
+  function syncReaderMiniMapChromeClearance() {
+    const root = getMiniMapRootEl();
+    if (!root) return;
+    if (document.documentElement?.dataset?.h2oRuntime !== 'tauri' || document.body?.dataset?.route !== 'reader') {
+      root.style.removeProperty('top');
+      return;
+    }
+
+    const topSurfaces = [
+      document.getElementById('studioDesktopChrome'),
+      document.querySelector('.wbRibbon'),
+      document.querySelector('.wbTop'),
+    ];
+    let visibleBottom = 0;
+    for (const el of topSurfaces) {
+      if (!(el instanceof Element)) continue;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' || rect.height <= 0) continue;
+      visibleBottom = Math.max(visibleBottom, rect.bottom);
+      for (const popup of el.querySelectorAll('.wbRibbonPopover, .wbRibbonMetadataPopover')) {
+        const popupRect = popup.getBoundingClientRect();
+        const popupStyle = getComputedStyle(popup);
+        if (popupStyle.display !== 'none' && popupStyle.visibility !== 'hidden' && popupRect.height > 0) {
+          visibleBottom = Math.max(visibleBottom, popupRect.bottom);
+        }
+      }
+    }
+    const main = document.querySelector('.wbMain');
+    if (main instanceof Element) visibleBottom = Math.max(visibleBottom, main.getBoundingClientRect().top);
+    if (visibleBottom <= 0) return;
+
+    const stage = document.querySelector('.wbStage');
+    const scale = stage instanceof Element && stage.offsetWidth > 0
+      ? stage.getBoundingClientRect().width / stage.offsetWidth
+      : 1;
+    const cssTop = Math.ceil((visibleBottom + 12) / (Number.isFinite(scale) && scale > 0 ? scale : 1));
+    root.style.setProperty('top', `${cssTop}px`, 'important');
+  }
+
+  function scheduleReaderMiniMapChromeClearance() {
+    if (readerChromeClearanceRaf) cancelAnimationFrame(readerChromeClearanceRaf);
+    readerChromeClearanceRaf = requestAnimationFrame(() => {
+      readerChromeClearanceRaf = 0;
+      try { syncReaderMiniMapChromeClearance(); } catch {}
+    });
+  }
+
+  function bindReaderMiniMapChromeClearance() {
+    if (!document.body) return;
+    const observer = new MutationObserver(scheduleReaderMiniMapChromeClearance);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['style', 'data-h2o-runtime', 'data-h2o-desktop-view-zoom'] });
+    observer.observe(document.body, { attributes: true, attributeFilter: ['data-route', 'style'] });
+    const topSurfaces = [document.getElementById('studioDesktopChrome'), document.querySelector('.wbRibbon'), document.querySelector('.wbTop')].filter(Boolean);
+    for (const el of topSurfaces) observer.observe(el, { attributes: true, childList: true, subtree: true, attributeFilter: ['class', 'style', 'hidden', 'data-collapsed', 'data-ribbon-expanded'] });
+    if (typeof ResizeObserver === 'function') {
+      const resizeObserver = new ResizeObserver(scheduleReaderMiniMapChromeClearance);
+      for (const el of [...topSurfaces, document.querySelector('.wbMain'), document.querySelector('.wbStage')].filter(Boolean)) resizeObserver.observe(el);
+    }
+    window.addEventListener('resize', scheduleReaderMiniMapChromeClearance, { passive: true });
+    window.addEventListener('evt:h2o:minimap:shell-ready', scheduleReaderMiniMapChromeClearance, { passive: true });
+    for (const name of ['context-changed', 'tab-changed', 'collapsed-changed']) {
+      window.addEventListener(`evt:h2o:studio:ribbon:${name}`, scheduleReaderMiniMapChromeClearance, { passive: true });
+    }
+    scheduleReaderMiniMapChromeClearance();
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindReaderMiniMapChromeClearance, { once: true });
+  else bindReaderMiniMapChromeClearance();
+
   function qwashApi() {
     return TOPW?.H2O_QWASH_API || W?.H2O_QWASH_API || null;
   }
