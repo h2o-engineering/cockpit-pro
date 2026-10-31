@@ -129,6 +129,15 @@ export const P02_DESKTOP_RELATIONSHIP_PUBLICATION_ERROR = Object.freeze({
   BOOKKEEPING_BUSY: 'p02-t05-desktop-relationship-publication-bookkeeping-busy',
   PROJECTION_UNAVAILABLE: 'p02-t05-desktop-relationship-publication-projection-unavailable',
   FOREIGN_ROOT_PRESENT: 'foreign-root-present-receive-first',
+  TARGET_INVALID: 'target-invalid',
+  TARGET_MISSING: 'target-missing',
+  TARGET_INELIGIBLE: 'target-ineligible',
+  TARGET_AMBIGUOUS: 'target-ambiguous',
+  TARGET_STALE: 'target-stale',
+  TARGET_AUTHORITY_CHANGED: 'target-authority-changed',
+  TARGET_DEPENDENCY: 'target-dependency-unproved',
+  INTENT_RETAINED: 'publication-intent-recorded',
+  PUBLICATION_INDETERMINATE: 'publication-indeterminate',
   BUSY: 'busy'
 });
 
@@ -177,6 +186,15 @@ const clean = (value) => String(value == null ? '' : value).trim();
 const hex64 = (value) => typeof value === 'string' && HEX64.test(value);
 const isPlainObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
 const rows = (value) => (Array.isArray(value) ? value : []);
+const isExactTarget = (value) => {
+  if (!isPlainObject(value) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== 2 || !keys.includes('objectDomain') || !keys.includes('objectId')) return false;
+  if (typeof value.objectId !== 'string' || value.objectId !== clean(value.objectId)) return false;
+  return value.objectDomain === FOLDER_DOMAIN ? isFolderObjectId(value.objectId)
+    : value.objectDomain === BINDING_DOMAIN && isChatObjectId(value.objectId);
+};
 
 class P02DesktopRelationshipPublicationError extends Error {
   constructor(code, detail = null) {
@@ -276,17 +294,31 @@ export function createDesktopRelationshipPublication({
 
   /* Configured trusted peers, from the canonical Sync config owner. Read-only;
    * an absent or malformed roster means no foreign writer is known. */
-  async function configuredPeers(writer) {
-    if (configOwner === null) return [];
+  async function configuredPeers(writer, strict = false) {
+    if (configOwner === null) {
+      if (strict) fail(E.TARGET_AUTHORITY_CHANGED, 'config-owner-unavailable');
+      return [];
+    }
     let config = null;
-    try { config = await configOwner.getConfig(); } catch (_) { return []; }
-    if (!config || config.schemaVersion !== 1 || !Array.isArray(config.configuredPeers)) return [];
+    try { config = await configOwner.getConfig(); }
+    catch (_) {
+      if (strict) fail(E.TARGET_AUTHORITY_CHANGED, 'configured-peers-unreadable');
+      return [];
+    }
+    if (!config || config.schemaVersion !== 1 || !Array.isArray(config.configuredPeers)) {
+      if (strict) fail(E.TARGET_AUTHORITY_CHANGED, 'configured-peers-invalid');
+      return [];
+    }
     const peers = [];
     for (const peer of config.configuredPeers) {
       const syncPeerId = clean(peer?.syncPeerId);
       const writerKey = clean(peer?.writerKey);
-      if (!syncPeerId || syncPeerId === writer.syncPeerId || !hex64(writerKey)) continue;
-      if (writerKey !== await writerKeyHex(syncPeerId, cryptoImplementation)) continue;
+      if (!syncPeerId || syncPeerId === writer.syncPeerId || !hex64(writerKey) ||
+          writerKey !== await writerKeyHex(syncPeerId, cryptoImplementation) ||
+          peers.some((item) => item.syncPeerId === syncPeerId)) {
+        if (strict) fail(E.TARGET_AUTHORITY_CHANGED, 'configured-peer-invalid');
+        continue;
+      }
       peers.push(Object.freeze({ syncPeerId, writerKey }));
     }
     return peers;
@@ -497,6 +529,7 @@ export function createDesktopRelationshipPublication({
           pending, blockReason
         }),
         foreignRoots: Object.freeze(foreign),
+        sourceState: Object.freeze(state),
         projection
       }));
     }
@@ -572,7 +605,7 @@ export function createDesktopRelationshipPublication({
 
   /* ---------------- the steady chain over relationship ports ---------------- */
 
-  function buildSteadyPublication({ writer, peers, projectionFor }) {
+  function buildSteadyPublication({ writer, peers, projectionFor, guardSelected, intentAttempted, intentRecorded, batchAttempted, batchCompleted }) {
     return createP02SteadyPublication({
       onTrace,
       readWriterState: ({ writerSyncPeerId }) =>
@@ -587,6 +620,7 @@ export function createDesktopRelationshipPublication({
         };
       },
       readProtocolState: async (scope) => {
+        await guardSelected(scope);
         const row = await protocolRow(scope.writerSyncPeerId, scope.objectDomain, scope.objectId);
         const state = protocolStateOf(row);
         let blockReason = null;
@@ -661,22 +695,32 @@ export function createDesktopRelationshipPublication({
           }
         };
       },
-      recordIntent: (input) => recordIntentRow({
-        writerSyncPeerId: input.writerSyncPeerId, objectDomain: input.objectDomain,
-        objectId: input.objectId, objectKey: input.objectKey,
-        revisionId: input.intendedRevisionId, revisionBlobSha256: input.intendedRevisionBlobSha256,
-        payloadSha256: input.intendedPayloadSha256
-      }),
-      completePublication: (input) => completeRow({
-        writerSyncPeerId: input.writerSyncPeerId, objectDomain: input.objectDomain,
-        objectId: input.objectId, revisionId: input.revisionId,
-        revisionBlobSha256: input.revisionBlobSha256, payloadSha256: input.payloadSha256
-      }),
+      recordIntent: async (input) => {
+        await guardSelected(input);
+        intentAttempted();
+        const recorded = await recordIntentRow({
+          writerSyncPeerId: input.writerSyncPeerId, objectDomain: input.objectDomain,
+          objectId: input.objectId, objectKey: input.objectKey,
+          revisionId: input.intendedRevisionId, revisionBlobSha256: input.intendedRevisionBlobSha256,
+          payloadSha256: input.intendedPayloadSha256
+        });
+        intentRecorded();
+        return recorded;
+      },
+      completePublication: async (input) => {
+        await guardSelected(input);
+        return completeRow({
+          writerSyncPeerId: input.writerSyncPeerId, objectDomain: input.objectDomain,
+          objectId: input.objectId, revisionId: input.revisionId,
+          revisionBlobSha256: input.revisionBlobSha256, payloadSha256: input.payloadSha256
+        });
+      },
       abandonIntent: (input) => abandonRow({
         writerSyncPeerId: input.writerSyncPeerId, objectDomain: input.objectDomain,
         objectId: input.objectId, retain: input.retain === true, reason: input.reason
       }),
       beginSteadyLease: async (request) => {
+        await guardSelected(request);
         const session = await invoke(K.COMMAND.RUNTIME_SESSION, {});
         const bootId = clean(session?.bootId);
         if (!bootId) fail(E.RUNTIME_UNAVAILABLE);
@@ -715,48 +759,203 @@ export function createDesktopRelationshipPublication({
         });
         return Object.freeze({
           ...primitives,
-          publishBatch: (input) => primitives.publishBatch({
-            ...input, heads: rows(input?.heads).map(asContractHead)
-          })
+          publishBatch: async (input) => {
+            await guardSelected();
+            batchAttempted();
+            const result = await primitives.publishBatch({
+              ...input, heads: rows(input?.heads).map(asContractHead)
+            });
+            batchCompleted();
+            return result;
+          }
         });
       },
-      observeAuthority: () => observeAuthority(writer)
+      observeAuthority: async () => {
+        await guardSelected();
+        return observeAuthority(writer);
+      }
     });
   }
 
   /* ---------------- the operator entry point ---------------- */
 
-  async function publishOnce() {
+  async function publishOnce(selection) {
     if (inFlight) return fixed(E.BUSY);
+    const explicit = arguments.length !== 0;
+    const requestedDomain = typeof selection?.objectDomain === 'string' ? selection.objectDomain : null;
+    const requestedId = typeof selection?.objectId === 'string' ? selection.objectId : null;
+    let selected = null;
+    let summary = null;
+    let intentTried = false;
+    let intentStarted = false;
+    let batchStarted = false;
+    let batchFinished = false;
+    let guardFailure = null;
+    let report = null;
     inFlight = true;
     try {
+      if (explicit && (arguments.length !== 1 || !isExactTarget(selection))) fail(E.TARGET_INVALID);
       const writer = await writerIdentity();
-      const peers = await configuredPeers(writer);
+      const peers = await configuredPeers(writer, explicit);
       const snapshot = await enumerate({ writer, peers });
-      const summary = {
+      if (explicit) {
+        const matches = snapshot.descriptors.filter((item) =>
+          item.objectDomain === selection.objectDomain && item.objectId === selection.objectId);
+        const rejected = snapshot.ineligible.filter((item) =>
+          item.objectDomain === selection.objectDomain && item.objectId === selection.objectId);
+        if (matches.length + rejected.length > 1) fail(E.TARGET_AMBIGUOUS);
+        if (matches.length === 0) fail(rejected.length ? E.TARGET_INELIGIBLE : E.TARGET_MISSING);
+        selected = matches[0];
+        if (snapshot.eligible.filter((item) => item === selected).length !== 1) fail(E.TARGET_INELIGIBLE);
+      } else {
+        selected = snapshot.eligible[0] ?? null;
+      }
+      summary = {
         localWriterSyncPeerId: writer.syncPeerId,
         eligibleCount: snapshot.eligible.length,
-        deferredCandidates: snapshot.eligible.slice(1).map((item) => ({ objectDomain: item.objectDomain, objectId: item.objectId })),
+        deferredCandidates: snapshot.eligible.filter((item) => item !== selected)
+          .map((item) => ({ objectDomain: item.objectDomain, objectId: item.objectId })),
         ineligible: snapshot.ineligible,
         foreignRootBlocked: snapshot.descriptors.filter((item) => item.blockReason !== null)
           .map((item) => ({ objectDomain: item.objectDomain, objectId: item.objectId, foreignRoots: item.foreignRoots }))
       };
-      if (snapshot.eligible.length === 0) {
-        lastResult = fixed('no-eligible-local-change', { ...summary, selectedObjectDomain: null, selectedObjectId: null });
+      if (!selected) {
+        lastResult = fixed('no-eligible-local-change',
+          { ...summary, selectedObjectDomain: null, selectedObjectId: null });
         return lastResult;
       }
-      const selected = snapshot.eligible[0];
-      const projectionFor = async ({ objectDomain, objectId }) => {
-        const current = await enumerate({ writer, peers });
-        return current.descriptors.find((item) =>
-          item.objectDomain === objectDomain && item.objectId === objectId)?.projection ?? null;
+      /* A binding can bypass older folders only when its own referenced folder
+       * is already converged to a repository-verifiable revision. */
+      const referencedFolderId = explicit && selected.objectDomain === BINDING_DOMAIN
+        ? selected.projection.payload.folderId : null;
+      const proveReferencedFolder = async (current, currentWriter) => {
+        if (!referencedFolderId) return null;
+        const matches = current.descriptors.filter((item) =>
+          item.objectDomain === FOLDER_DOMAIN && item.objectId === referencedFolderId);
+        const rejected = current.ineligible.filter((item) =>
+          item.objectDomain === FOLDER_DOMAIN && item.objectId === referencedFolderId);
+        if (matches.length !== 1 || rejected.length) fail(E.TARGET_DEPENDENCY, 'referenced-folder-missing-or-ambiguous');
+        const folder = matches[0];
+        const state = folder.sourceState;
+        const direction = state.convergedDirection;
+        const anchor = direction === 'published' ? state.lastPublished
+          : direction === 'applied' ? state.lastApplied : null;
+        if (folder.pending || folder.blockReason || folder.integrityQuarantined ||
+            folder.dirty || !anchor || !hex64(anchor.revisionBlobSha256) ||
+            anchor.payloadSha256 !== folder.projection.payloadSha256Hex) {
+          fail(E.TARGET_DEPENDENCY, 'referenced-folder-not-converged');
+        }
+        let revision = null;
+        try {
+          revision = await readRevisionAt({
+            writerSyncPeerId: currentWriter.syncPeerId, objectDomain: FOLDER_DOMAIN,
+            objectId: referencedFolderId, objectKey: folder.objectKey,
+            revisionBlobSha256: anchor.revisionBlobSha256
+          });
+        } catch (_) { /* Fail closed below. */ }
+        if (!revision || clean(revision.revisionId) !== anchor.revisionId ||
+            canonicalJson(revision.payload) !== folder.projection.payloadText) {
+          fail(E.TARGET_DEPENDENCY, 'referenced-folder-revision-unproved');
+        }
+        if (direction === 'published') {
+          const pointer = await pointerProofFor({
+            writerSyncPeerId: currentWriter.syncPeerId, objectKey: folder.objectKey,
+            intended: anchor
+          });
+          if (pointer.status !== 'verified' ||
+              pointer.namesRevisionId !== anchor.revisionId ||
+              pointer.namesRevisionBlobSha256 !== anchor.revisionBlobSha256) {
+            fail(E.TARGET_DEPENDENCY, 'referenced-folder-head-unproved');
+          }
+        }
+        return canonicalJson({
+          objectId: referencedFolderId, objectKey: folder.objectKey,
+          payloadSha256Hex: folder.projection.payloadSha256Hex,
+          sourceUpdatedAtIso: folder.projection.sourceUpdatedAtIso,
+          direction, anchor
+        });
       };
-      const currentSelected = async () => {
-        const current = await enumerate({ writer, peers });
-        return current.eligible.find((item) => item.objectKey === selected.objectKey) ?? null;
+      const originalFolderProof = await proveReferencedFolder(snapshot, writer);
+      const stamp = (item, currentWriter, currentPeers, strict) => canonicalJson({
+        writer: currentWriter, peers: currentPeers,
+        objectDomain: item.objectDomain, objectId: item.objectId, objectKey: item.objectKey,
+        payloadText: item.projection.payloadText,
+        payloadSha256Hex: item.projection.payloadSha256Hex,
+        sourceUpdatedAtIso: item.projection.sourceUpdatedAtIso,
+        lastPublished: item.sourceState.lastPublished,
+        lastApplied: item.sourceState.lastApplied,
+        convergedDirection: item.sourceState.convergedDirection,
+        integrityQuarantined: item.sourceState.integrityQuarantined,
+        ...(strict ? {
+          sourceState: item.sourceState, pending: item.pending,
+          publishable: item.publishable, blockReason: item.blockReason,
+          foreignRoots: item.foreignRoots
+        } : {})
+      });
+      const originalStable = stamp(selected, writer, peers, false);
+      const originalStrict = stamp(selected, writer, peers, true);
+      const refuse = (code, detail) => {
+        guardFailure = { code, detail };
+        fail(code, detail);
       };
+      const guardSelected = async (scope = null) => {
+        if (scope && (scope.objectDomain !== selected.objectDomain ||
+            scope.objectId !== selected.objectId ||
+            (scope.objectKey && scope.objectKey !== selected.objectKey) ||
+            (scope.writerSyncPeerId && scope.writerSyncPeerId !== writer.syncPeerId))) {
+          refuse(E.TARGET_STALE, 'scope-changed');
+        }
+        let currentWriter;
+        let currentPeers;
+        let current;
+        try {
+          currentWriter = await writerIdentity();
+          currentPeers = await configuredPeers(currentWriter, explicit);
+          current = await enumerate({ writer: currentWriter, peers: currentPeers });
+        } catch (_) {
+          refuse(E.TARGET_AUTHORITY_CHANGED, 'writer-or-prestate-unreadable');
+        }
+        if (currentWriter.syncPeerId !== writer.syncPeerId ||
+            currentWriter.writerKey !== writer.writerKey ||
+            canonicalJson(currentPeers) !== canonicalJson(peers)) {
+          refuse(E.TARGET_AUTHORITY_CHANGED, 'writer-or-peer-roster-changed');
+        }
+        const same = current.descriptors.filter((item) =>
+          item.objectDomain === selected.objectDomain && item.objectId === selected.objectId);
+        const rejected = current.ineligible.filter((item) =>
+          item.objectDomain === selected.objectDomain && item.objectId === selected.objectId);
+        if (same.length !== 1 || rejected.length ||
+            stamp(same[0], currentWriter, currentPeers, false) !== originalStable) {
+          refuse(E.TARGET_STALE, 'identity-payload-or-anchor-changed');
+        }
+        if (!intentStarted &&
+            (current.eligible.filter((item) => item === same[0]).length !== 1 ||
+             stamp(same[0], currentWriter, currentPeers, true) !== originalStrict)) {
+          refuse(E.TARGET_STALE, 'eligibility-or-prestate-changed');
+        }
+        if (referencedFolderId) {
+          let currentFolderProof;
+          try { currentFolderProof = await proveReferencedFolder(current, currentWriter); }
+          catch (_) { refuse(E.TARGET_STALE, 'referenced-folder-proof-changed'); }
+          if (currentFolderProof !== originalFolderProof) {
+            refuse(E.TARGET_STALE, 'referenced-folder-proof-changed');
+          }
+        }
+        return same[0];
+      };
+      const projectionFor = async (scope) => {
+        await guardSelected(scope);
+        return selected.projection;
+      };
+      const currentSelected = async () => intentStarted ? null : guardSelected();
       const driver = createP02SteadyDriver({
-        steadyPublication: buildSteadyPublication({ writer, peers, projectionFor }),
+        steadyPublication: buildSteadyPublication({
+          writer, peers, projectionFor, guardSelected,
+          intentAttempted: () => { intentTried = true; },
+          intentRecorded: () => { intentStarted = true; },
+          batchAttempted: () => { batchStarted = true; },
+          batchCompleted: () => { batchFinished = true; }
+        }),
         enumerate: async () => {
           const current = await currentSelected();
           return Object.freeze(current ? [current] : []);
@@ -776,14 +975,26 @@ export function createDesktopRelationshipPublication({
         },
         onTrace
       });
-      const report = await driver.runtime.runPass({ maxSteps: 1, singlePass: true });
+      report = await driver.runtime.runPass({ maxSteps: 1, singlePass: true });
+      if (guardFailure) fail(guardFailure.code, guardFailure.detail);
       const steady = report?.dispatched?.[0]?.result?.steady ?? null;
-      const outcome = steady?.outcome === P02_STEADY_OUTCOME.COMMITTED ? 'published'
+      const baseOutcome = steady?.outcome === P02_STEADY_OUTCOME.COMMITTED ? 'published'
         : steady?.outcome === P02_STEADY_OUTCOME.RECOVERED ? 'recovered'
-          : steady?.outcome === P02_STEADY_OUTCOME.NOT_ELIGIBLE ? 'no-eligible-local-change'
+          : steady?.outcome === P02_STEADY_OUTCOME.NOT_ELIGIBLE
+            ? (explicit ? E.TARGET_INELIGIBLE : 'no-eligible-local-change')
             : clean(steady?.reason) || clean(report?.status) || 'publication-failed';
+      const outcome = batchStarted && baseOutcome !== 'published'
+        ? E.PUBLICATION_INDETERMINATE : baseOutcome;
       lastResult = fixed(outcome, {
         ...summary,
+        repositoryMutated: outcome === E.PUBLICATION_INDETERMINATE ? null : outcome === 'published',
+        publicationStatus: outcome === E.PUBLICATION_INDETERMINATE ? 'unknown'
+          : outcome === 'published' ? 'committed'
+            : intentTried ? 'intent-recorded-or-retained' : 'not-started',
+        intentAttempted: intentTried, intentRecorded: intentStarted,
+        publishBatchStarted: batchStarted, publishBatchCompleted: batchFinished,
+        recoveryRequired: outcome === E.PUBLICATION_INDETERMINATE ||
+          (intentTried && outcome !== 'published' && outcome !== 'recovered'),
         selectedObjectDomain: selected.objectDomain,
         selectedObjectId: selected.objectId,
         mintedRevisionId: steady?.revisionId ?? null,
@@ -794,8 +1005,35 @@ export function createDesktopRelationshipPublication({
       });
       return lastResult;
     } catch (error) {
-      lastResult = fixed(clean(error?.code || error?.message) || 'publication-failed',
-        { detail: clean(error?.detail) || null });
+      /* Once publishBatch begins, its CAS may have committed even if the
+       * completion guard or acknowledgement fails. Keep the driver evidence. */
+      const outcome = batchStarted ? E.PUBLICATION_INDETERMINATE
+        : intentTried ? E.INTENT_RETAINED
+          : clean(error?.code || error?.message) || 'publication-failed';
+      let retainedIntent = null;
+      if (selected && intentTried) {
+        try {
+          const row = await protocolRow(summary.localWriterSyncPeerId,
+            selected.objectDomain, selected.objectId);
+          retainedIntent = clean(row.pending_operation) === 'publish';
+        } catch (_) { /* Read-only evidence unavailable. */ }
+      }
+      lastResult = fixed(outcome, {
+        ...(summary || {}),
+        repositoryMutated: batchStarted ? null : false,
+        publicationStatus: batchStarted ? 'unknown'
+          : intentTried ? 'intent-recorded-or-retained' : 'not-started',
+        intentAttempted: intentTried, intentRecorded: intentStarted,
+        publishBatchStarted: batchStarted, publishBatchCompleted: batchFinished,
+        recoveryRequired: intentTried || batchStarted,
+        retainedIntent,
+        guardFailure: guardFailure?.code ?? null,
+        selectedObjectDomain: selected?.objectDomain ?? requestedDomain,
+        selectedObjectId: selected?.objectId ?? requestedId,
+        steady: report?.dispatched?.[0]?.result?.steady ?? null,
+        report,
+        detail: clean(error?.detail) || null
+      });
       return lastResult;
     } finally {
       inFlight = false;
@@ -822,6 +1060,7 @@ export function createDesktopRelationshipPublication({
   return Object.freeze({
     schema: K.SCHEMA,
     publishOnce,
+    isValidTarget: isExactTarget,
     diagnose,
     __test: Object.freeze({ enumerate, protocolStateOf, projectFolderRow, projectBindingRow })
   });
@@ -873,7 +1112,8 @@ export function installDesktopRelationshipPublication(globalScope = globalThis) 
   }
   const api = Object.freeze({
     schema: P02_DESKTOP_RELATIONSHIP_PUBLICATION.SCHEMA,
-    publishOnce: () => current().publishOnce(),
+    publishOnce: (...args) => current().publishOnce(...args),
+    isValidTarget: isExactTarget,
     diagnose: () => runtime ? runtime.diagnose() : Object.freeze({
       schema: P02_DESKTOP_RELATIONSHIP_PUBLICATION.SCHEMA, installed: true, initialized: false,
       automaticPublication: 'none', webdavReachable: false

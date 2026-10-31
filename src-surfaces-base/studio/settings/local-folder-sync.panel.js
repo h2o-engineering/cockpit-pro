@@ -423,7 +423,12 @@
     return Object.freeze([
       ["Result", result?.ok === true ? "Completed" : "Blocked"],
       ["Outcome", V.valueText(result?.outcome, "unavailable")],
-      ["Published", result?.repositoryMutated === true ? "Yes" : "No"],
+      ["Published", result?.repositoryMutated === true ? "Yes" : result?.repositoryMutated === false ? "No" : "Unknown"],
+      ["Publication status", V.valueText(result?.publicationStatus, "not started")],
+      ["Recovery required", result?.recoveryRequired === true ? "Yes" : "No"],
+      ["Retained intent", result?.recoveryRequired === true
+        ? (result?.retainedIntent === true ? "Yes" : result?.retainedIntent === false ? "No" : "Unknown")
+        : "n/a"],
       ["Published as", V.valueText(result?.publishedAs, "n/a")],
       ["Selected", selected],
       ["Eligible objects", String(Number(result?.eligibleCount) || 0)],
@@ -624,6 +629,8 @@
       let desktopP02ApplyBusy = false;
       let desktopRelationshipPublication = null;
       let desktopRelationshipPublicationBusy = false;
+      let relationshipObjectDomain = "studio.folder.v1";
+      let relationshipObjectId = "";
       let trustedPeerId = "";
       let trustedWriterKey = "";
       let trustedPeerBusy = false;
@@ -655,6 +662,16 @@
         const actions = chromeFolder
           ? `<div style="display:flex;gap:8px;flex-wrap:wrap">${V.action("connect", folderName ? "Change Folder" : "Connect Folder")}${V.action("authorize-publishing", "Authorize Chrome publishing", { disabled: !folderName })}${V.action("disconnect", "Disconnect Folder", { disabled: !folderName, danger: true })}${V.action("refresh", "Refresh live permission")}${V.action("observe-repository", "Observe repository")}${V.action("stand-down-p01-writer", "Stand Down Chrome P01 Writer", { disabled: standdownBusy || manualApplyBusy || p02PublicationBusy })}${V.action("receive-admit", "Receive / Admit", { disabled: standdownBusy || manualApplyBusy || p02PublicationBusy })}${V.action("apply-admitted-revision", "Apply admitted revision", { disabled: standdownBusy || manualApplyBusy || p02PublicationBusy })}${V.action("publish-local-revision", "Publish local revision", { disabled: standdownBusy || manualApplyBusy || p02PublicationBusy })}</div>`
           : `<div style="display:flex;gap:8px;flex-wrap:wrap">${V.action("select", config?.folderPath ? "Change Folder" : "Select Folder")}${V.action("refresh", "Refresh")}${V.action("desktop-p02-receive", "Receive from Chrome (P02 v2)", { disabled: desktopP02ReceiveBusy || desktopP02ApplyBusy || desktopRelationshipPublicationBusy })}${V.action("desktop-p02-apply", "Apply admitted Chrome revision (P02 v2)", { disabled: desktopP02ReceiveBusy || desktopP02ApplyBusy || desktopRelationshipPublicationBusy })}${V.action("desktop-relationship-publish", "Publish folder relationship to Chrome (P02 T05)", { disabled: desktopP02ReceiveBusy || desktopP02ApplyBusy || desktopRelationshipPublicationBusy })}</div>`;
+        const relationshipTarget = chromeFolder ? "" :
+          '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end">' +
+          '<label style="display:grid;gap:5px;font-size:12px">Relationship domain' +
+          '<select data-relationship-target-field="objectDomain">' +
+          '<option value="studio.folder.v1"' + (relationshipObjectDomain === "studio.folder.v1" ? ' selected' : '') + '>Folder</option>' +
+          '<option value="studio.chat-folder-binding.v1"' + (relationshipObjectDomain === "studio.chat-folder-binding.v1" ? ' selected' : '') + '>Chat-folder binding</option>' +
+          '</select></label>' +
+          '<label style="display:grid;gap:5px;font-size:12px">Exact object ID' +
+          '<input type="text" data-relationship-target-field="objectId" autocomplete="off" spellcheck="false" value="' +
+          escapeAuthorityInput(relationshipObjectId) + '"></label></div>';
         const trustedPeerCard = chromeFolder
           ? V.card("Trusted Desktop peer",
               `<label style="display:grid;gap:5px;font-size:12px">Desktop Sync Peer ID<input type="text" data-trusted-peer-field="syncPeerId" autocomplete="off" spellcheck="false" value="${escapeAuthorityInput(trustedPeerId)}"></label>` +
@@ -710,7 +727,7 @@
                 `<p style="margin:0;opacity:.68;font-size:12px">Fixed-purpose retirement of Chrome-local P01 mutation authority. It does not Receive, Apply, or publish.</p>`)
             : "") +
           trustedPeerCard +
-          V.card("Routine actions", `${actions}<p data-domain-message="1" style="margin:0;opacity:.72;font-size:12px">${V.escapeHtml(message || (chromeFolder ? "Permission is queried live; it is not persisted as durable truth." : "Selection writes through the existing Item 11 authorization and Sync config APIs."))}</p>`)
+          V.card("Routine actions", relationshipTarget + `${actions}<p data-domain-message="1" style="margin:0;opacity:.72;font-size:12px">${V.escapeHtml(message || (chromeFolder ? "Permission is queried live; it is not persisted as durable truth." : "Selection writes through the existing Item 11 authorization and Sync config APIs."))}</p>`)
         );
       }
 
@@ -718,6 +735,14 @@
         const field = event.target?.dataset?.trustedPeerField;
         if (field === "syncPeerId") trustedPeerId = String(event.target.value ?? "");
         else if (field === "writerKey") trustedWriterKey = String(event.target.value ?? "");
+        if (event.target?.dataset?.relationshipTargetField === "objectId") {
+          relationshipObjectId = String(event.target.value ?? "");
+        }
+      });
+      const removeChange = V.listen(root, "change", (event) => {
+        if (event.target?.dataset?.relationshipTargetField === "objectDomain") {
+          relationshipObjectDomain = String(event.target.value ?? "");
+        }
       });
 
       const removeClick = V.listen(root, "click", async (event) => {
@@ -866,22 +891,40 @@
             await render();
             return;
           }
+          const selection = Object.freeze({
+            objectDomain: relationshipObjectDomain, objectId: relationshipObjectId
+          });
           button.disabled = true;
           desktopRelationshipPublicationBusy = true;
           try {
             const runtime = await desktopRelationshipPublicationRuntime();
-            const result = await runtime.publishOnce();
-            desktopRelationshipPublication = result;
-            message = result?.ok === true
-              ? `Relationship publication completed once: ${V.valueText(result?.outcome, "unavailable")}.`
-              : `Relationship publication blocked: ${V.valueText(result?.outcome, "unavailable")}`;
+            desktopRelationshipPublication = runtime.isValidTarget(selection)
+              ? await runtime.publishOnce(selection)
+              : Object.freeze({
+                  schema: P02_DESKTOP_RELATIONSHIP_PUBLICATION_RESULT_SCHEMA,
+                  ok: false, outcome: "target-invalid",
+                  selectedObjectDomain: selection.objectDomain,
+                  selectedObjectId: selection.objectId,
+                  repositoryMutated: false
+                });
+            message = (desktopRelationshipPublication.ok === true
+              ? "Relationship publication completed once: "
+              : "Relationship publication blocked: ") +
+              V.valueText(desktopRelationshipPublication.outcome, "unavailable") +
+              " (" + selection.objectDomain + " " + selection.objectId + ").";
           } catch (error) {
             desktopRelationshipPublication = Object.freeze({
               schema: P02_DESKTOP_RELATIONSHIP_PUBLICATION_RESULT_SCHEMA,
               ok: false,
               outcome: V.clean(error?.code || error?.message) || "runtime-unavailable",
+              selectedObjectDomain: selection.objectDomain,
+              selectedObjectId: selection.objectId,
+              repositoryMutated: null,
+              publicationStatus: "unknown"
             });
-            message = `Relationship publication blocked: ${desktopRelationshipPublication.outcome}`;
+            message = "Relationship publication blocked: " +
+              desktopRelationshipPublication.outcome + " (" +
+              selection.objectDomain + " " + selection.objectId + ").";
           } finally {
             desktopRelationshipPublicationBusy = false;
             await render();
@@ -1043,7 +1086,7 @@
         await render();
       });
       await render();
-      return () => { disposed = true; removeInput(); removeClick(); };
+      return () => { disposed = true; removeInput(); removeChange(); removeClick(); };
     },
   });
 })();

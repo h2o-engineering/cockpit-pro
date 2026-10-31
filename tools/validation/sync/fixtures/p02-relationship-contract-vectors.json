@@ -969,5 +969,116 @@
         "expected": "p02-rel-binding-payload-shape-invalid"
       }
     ]
+  },
+  "unicodeParity": {
+    "chatIds": [
+      {
+        "id": "chat-feff-leading-trims",
+        "input": "\uFEFFchat-a",
+        "expectedTrimmed": "chat-a",
+        "expectedValid": false
+      },
+      {
+        "id": "chat-feff-trailing-trims",
+        "input": "chat-a\uFEFF",
+        "expectedTrimmed": "chat-a",
+        "expectedValid": false
+      },
+      {
+        "id": "chat-feff-internal-preserved",
+        "input": "chat\uFEFFa",
+        "expectedTrimmed": "chat\uFEFFa",
+        "expectedValid": true
+      },
+      {
+        "id": "chat-u0085-not-js-whitespace",
+        "input": "\u0085chat-a",
+        "expectedTrimmed": "\u0085chat-a",
+        "expectedValid": false
+      },
+      {
+        "id": "chat-c0-control-rejected",
+        "input": "chat\u0001a",
+        "expectedTrimmed": "chat\u0001a",
+        "expectedValid": false
+      },
+      {
+        "id": "chat-supplementary-511-code-points",
+        "prefix": "c",
+        "repeatCharacter": "😀",
+        "repeatCount": 510,
+        "expectedValid": true
+      },
+      {
+        "id": "chat-supplementary-512-code-points",
+        "prefix": "c",
+        "repeatCharacter": "😀",
+        "repeatCount": 511,
+        "expectedValid": true
+      },
+      {
+        "id": "chat-supplementary-513-code-points",
+        "prefix": "c",
+        "repeatCharacter": "😀",
+        "repeatCount": 512,
+        "expectedValid": false
+      }
+    ],
+    "folderNames": [
+      {
+        "id": "folder-feff-leading-trims",
+        "input": "\uFEFFStudy",
+        "expectedCanonical": "Study",
+        "expectedValid": false
+      },
+      {
+        "id": "folder-feff-trailing-trims",
+        "input": "Study\uFEFF",
+        "expectedCanonical": "Study",
+        "expectedValid": false
+      },
+      {
+        "id": "folder-feff-internal-collapses",
+        "input": "Stu\uFEFFdy",
+        "expectedCanonical": "Stu dy",
+        "expectedValid": false
+      },
+      {
+        "id": "folder-feff-only-empties",
+        "input": "\uFEFF",
+        "expectedCanonical": "",
+        "expectedValid": false
+      },
+      {
+        "id": "folder-u0085-is-control-not-whitespace",
+        "input": "A\u0085B",
+        "expectedCanonical": "A\u0085B",
+        "expectedValid": false
+      },
+      {
+        "id": "folder-c0-control-rejected",
+        "input": "A\u0001B",
+        "expectedCanonical": "A\u0001B",
+        "expectedValid": false
+      },
+      {
+        "id": "folder-mixed-js-whitespace-normalizes",
+        "input": " \uFEFFA\t \uFEFFB\uFEFF ",
+        "expectedCanonical": "A B",
+        "expectedValid": false
+      },
+      {
+        "id": "folder-canonical-space-accepted",
+        "input": "A B",
+        "expectedCanonical": "A B",
+        "expectedValid": true
+      },
+      {
+        "id": "folder-decomposed-unicode-preserved",
+        "input": "Café",
+        "expectedCanonical": "Café",
+        "expectedValid": true
+      }
+    ]
   }
 }

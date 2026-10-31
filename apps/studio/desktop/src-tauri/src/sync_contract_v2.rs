@@ -1138,6 +1138,61 @@ mod tests {
     }
 
     #[test]
+    fn relationship_unicode_parity_vectors_match_shared_expectations() {
+        let vectors = relationship_vectors();
+        let chat_ids = vectors["unicodeParity"]["chatIds"].as_array().unwrap();
+        let folder_names = vectors["unicodeParity"]["folderNames"].as_array().unwrap();
+        assert!(chat_ids.len() >= 8 && folder_names.len() >= 9);
+
+        for vector in chat_ids {
+            let id = vector["id"].as_str().unwrap();
+            let value = match vector["input"].as_str() {
+                Some(input) => input.to_string(),
+                None => format!(
+                    "{}{}",
+                    vector["prefix"].as_str().unwrap(),
+                    vector["repeatCharacter"]
+                        .as_str()
+                        .unwrap()
+                        .repeat(vector["repeatCount"].as_u64().unwrap() as usize)
+                ),
+            };
+            if let Some(trimmed) = vector["expectedTrimmed"].as_str() {
+                assert_eq!(value.trim_matches(is_js_whitespace), trimmed, "chat {id}: JS trim");
+            }
+            let expected_valid = vector["expectedValid"].as_bool().unwrap();
+            assert_eq!(is_chat_object_id(&value), expected_valid, "chat {id}: identifier");
+            let payload = serde_json::json!({
+                "schema": CHAT_FOLDER_BINDING_PAYLOAD_SCHEMA_V1,
+                "chatId": value,
+                "folderId": null
+            });
+            let result = validate_chat_folder_binding_payload(&payload, &value).map(|_| ());
+            let expected = if expected_valid { "ok" } else { REL_ERR_BINDING_CHAT_ID_INVALID };
+            assert_eq!(observed(result), expected, "chat {id}: binding payload");
+        }
+
+        for vector in folder_names {
+            let id = vector["id"].as_str().unwrap();
+            let value = vector["input"].as_str().unwrap();
+            let expected_valid = vector["expectedValid"].as_bool().unwrap();
+            assert_eq!(canonical_folder_name(value), vector["expectedCanonical"],
+                "folder {id}: canonical name");
+            assert_eq!(is_canonical_folder_name(value), expected_valid,
+                "folder {id}: canonical predicate");
+            let payload = serde_json::json!({
+                "schema": FOLDER_PAYLOAD_SCHEMA_V1,
+                "folderId": "f_unicode",
+                "name": value
+            });
+            let result = validate_folder_catalog_state_payload(&payload, "f_unicode")
+                .map(|_| ());
+            let expected = if expected_valid { "ok" } else { REL_ERR_FOLDER_NAME_INVALID };
+            assert_eq!(observed(result), expected, "folder {id}: folder payload");
+        }
+    }
+
+    #[test]
     fn relationship_dispatch_refuses_unregistered_and_chat_domains() {
         let payload = serde_json::json!({
             "schema": CHAT_FOLDER_BINDING_PAYLOAD_SCHEMA_V1,

@@ -590,7 +590,7 @@ const scratch = fs.mkdtempSync(path.join(fs.realpathSync(process.env.TMPDIR || o
 const STORAGE_SCHEMA = 'h2o.studio.syncWriterStorageLocal.p02.v1';
 const packedGraph = distGraph.stagePackedGraph();
 
-async function makeDesktopWorld({ fsa, peers = [], generationState = 'p02', standdown = true } = {}) {
+async function makeDesktopWorld({ fsa, peers = [], generationState = 'p02', standdown = true, beforeSelect = null } = {}) {
   const db = new DatabaseSync(path.join(scratch, `desktop-${crypto.randomUUID()}.db`));
   let identity = '';
   db.function('h2o_writer_identity', () => identity);
@@ -607,7 +607,9 @@ async function makeDesktopWorld({ fsa, peers = [], generationState = 'p02', stan
   const invoke = async (name, args = {}) => {
     commands.push(name);
     switch (name) {
-      case 'plugin:sql|select': return db.prepare(args.query).all(...(args.values || []));
+      case 'plugin:sql|select':
+        if (beforeSelect) await beforeSelect(args.query, db);
+        return db.prepare(args.query).all(...(args.values || []));
       case 'plugin:sql|execute': {
         sqlWrites.push(args.query);
         const result = db.prepare(args.query).run(...(args.values || []));
@@ -762,6 +764,178 @@ await section('E D2 Desktop relationship publication: ROOT / DESCENDANT / second
   check(desktopSource.includes('produceRelationshipRevisionV2(') && desktopSource.includes('createP02SteadyPublication(') && desktopSource.includes('createDesktopLocalWriterStorage(') && desktopSource.includes('createDesktopP01MutationGate('),
     'Desktop publication reuses the relationship revision adapter, the steady core, the writer storage and the P01 gate');
   w.db.close(); withPeer.db.close(); noStanddown.db.close();
+});
+
+/* ====================================================================== */
+await section('E2 exact manual target, stale state and no fallback', async () => {
+  const target = (objectDomain, objectId) => ({ objectDomain, objectId });
+  const fsa = createMemoryFsa();
+  const w = await makeDesktopWorld({ fsa });
+  await w.desktop.publish({ objectDomain: CHAT_DOMAIN, objectId: 'chat-seed',
+    payload: chatPayloadFor('chat-seed', 'snap-seed', 'seed'), mint: 'seed' });
+  w.insertFolder('f_older', 'Older');
+  w.insertFolder('f_target', 'Target');
+  const d1 = await w.publication.publishOnce(target(FOLDER_DOMAIN, 'f_target'));
+  check(d1.outcome === 'published' && d1.selectedObjectId === 'f_target' &&
+    d1.publishedAs === 'root' && d1.eligibleCount === 2 &&
+    w.state(FOLDER_DOMAIN, 'f_older') === null,
+    'D1 exact folder ROOT; unrelated eligible folder untouched');
+  w.insertFolder('f_next', 'Next');
+  w.insertChat('chat-d4');
+  w.bind('chat-d4', 'f_target');
+  const appliedRoot = await makeDesktopWriter(fsa, LOCAL).publish({
+    objectDomain: BINDING_DOMAIN, objectId: 'chat-d4',
+    payload: bindingPayload('chat-d4', 'f_target'), mint: 'binding-root'
+  });
+  w.anchorApplied(BINDING_DOMAIN, 'chat-d4', appliedRoot);
+  w.bind('chat-d4', 'f_next');
+  const writesBeforeDependency = w.sqlWrites.length;
+  const unproved = await w.publication.publishOnce(target(BINDING_DOMAIN, 'chat-d4'));
+  check(unproved.outcome === 'target-dependency-unproved' &&
+    unproved.repositoryMutated === false && w.sqlWrites.length === writesBeforeDependency &&
+    w.state(FOLDER_DOMAIN, 'f_next') === null &&
+    w.state(FOLDER_DOMAIN, 'f_older') === null,
+    'exact binding refuses an unpublished referenced folder without publishing it or another folder');
+  const folderNext = await w.publication.publishOnce(target(FOLDER_DOMAIN, 'f_next'));
+  check(folderNext.outcome === 'published' && folderNext.selectedObjectId === 'f_next',
+    'only the exact referenced folder is published before D4');
+  const d4 = await w.publication.publishOnce(target(BINDING_DOMAIN, 'chat-d4'));
+  const reader = readerTransport.createLocalReaderTransportPrimitives({
+    storage: desktopStorageOver(fsa), cryptoImplementation: webcrypto
+  });
+  const heads = (await reader.readWriterState({ writerSyncPeerId: REMOTE })).snapshot.heads;
+  const bindingHead = heads.find((head) =>
+    head.objectDomain === BINDING_DOMAIN && head.objectId === 'chat-d4');
+  check(d4.outcome === 'published' && d4.publishedAs === 'descendant' &&
+    bindingHead?.previousRevisionId === appliedRoot.revisionId &&
+    bindingHead?.previousRevisionBlobSha256 === appliedRoot.revisionBlobSha256 &&
+    w.state(FOLDER_DOMAIN, 'f_older') === null,
+    'D4 exact binding descends from applied anchor; no unrelated write or second root');
+  const writesBefore = w.sqlWrites.length;
+  const missing = await w.publication.publishOnce(target(FOLDER_DOMAIN, 'f_absent'));
+  w.insertFolder('f_native_exact', 'Native', 'chatgpt');
+  const ineligible = await w.publication.publishOnce(target(FOLDER_DOMAIN, 'f_native_exact'));
+  const malformed = await w.publication.publishOnce({
+    objectDomain: FOLDER_DOMAIN, objectId: 'f_older', writerSyncPeerId: REMOTE
+  });
+  check(missing.outcome === 'target-missing' && ineligible.outcome === 'target-ineligible' &&
+    malformed.outcome === 'target-invalid' && w.sqlWrites.length === writesBefore &&
+    w.state(FOLDER_DOMAIN, 'f_older') === null,
+    'missing, ineligible and extra-authority target refuse without fallback');
+  w.db.close();
+
+  let reads = 0;
+  const stale = await makeDesktopWorld({ fsa: createMemoryFsa(),
+    beforeSelect: (query, db) => {
+      if (query.startsWith('SELECT id, name, source, created_at, updated_at FROM folders') &&
+          ++reads === 2) db.prepare('UPDATE folders SET name = ? WHERE id = ?').run('Changed', 'f_stale');
+    }
+  });
+  await stale.desktop.publish({ objectDomain: CHAT_DOMAIN, objectId: 'chat-seed',
+    payload: chatPayloadFor('chat-seed', 'snap-seed', 'seed'), mint: 'seed' });
+  stale.insertFolder('f_stale', 'Original');
+  stale.insertFolder('f_other', 'Other');
+  const changed = await stale.publication.publishOnce(target(FOLDER_DOMAIN, 'f_stale'));
+  check(changed.outcome === 'target-stale' && stale.sqlWrites.length === 0 &&
+    stale.state(FOLDER_DOMAIN, 'f_other') === null,
+    'changed payload after selection aborts before intent, with no fallback');
+  stale.db.close();
+
+  const postFsa = createMemoryFsa();
+  const postReader = readerTransport.createLocalReaderTransportPrimitives({
+    storage: desktopStorageOver(postFsa), cryptoImplementation: webcrypto
+  });
+  let changedAfterBatch = false;
+  const post = await makeDesktopWorld({ fsa: postFsa,
+    beforeSelect: async (query, db) => {
+      if (changedAfterBatch ||
+          !query.startsWith('SELECT id, name, source, created_at, updated_at FROM folders')) return;
+      const observed = await postReader.readWriterState({ writerSyncPeerId: REMOTE });
+      if (observed?.status === 'verified' &&
+          observed.snapshot.heads.some((head) =>
+            head.objectDomain === FOLDER_DOMAIN && head.objectId === 'f_post')) {
+        changedAfterBatch = true;
+        db.prepare('UPDATE folders SET name = ? WHERE id = ?').run('Changed After Batch', 'f_post');
+      }
+    }
+  });
+  await post.desktop.publish({ objectDomain: CHAT_DOMAIN, objectId: 'chat-seed',
+    payload: chatPayloadFor('chat-seed', 'snap-seed', 'seed'), mint: 'seed' });
+  post.insertFolder('f_post', 'Before Batch');
+  post.insertFolder('f_other', 'Other');
+  const indeterminate = await post.publication.publishOnce(target(FOLDER_DOMAIN, 'f_post'));
+  const postHeads = (await postReader.readWriterState({ writerSyncPeerId: REMOTE })).snapshot.heads;
+  check(changedAfterBatch && postHeads.some((head) =>
+      head.objectDomain === FOLDER_DOMAIN && head.objectId === 'f_post') &&
+    indeterminate.outcome === 'publication-indeterminate' &&
+    indeterminate.repositoryMutated === null &&
+    indeterminate.publicationStatus === 'unknown' &&
+    indeterminate.intentRecorded === true &&
+    indeterminate.publishBatchStarted === true &&
+    indeterminate.publishBatchCompleted === true &&
+    indeterminate.recoveryRequired === true &&
+    typeof indeterminate.retainedIntent === 'boolean' &&
+    indeterminate.guardFailure === 'target-stale' &&
+    indeterminate.report !== null &&
+    post.state(FOLDER_DOMAIN, 'f_other') === null,
+    'post-batch completion guard failure preserves unknown outcome, intent evidence and no fallback');
+  post.db.close();
+
+  let anchorReads = 0;
+  const anchorFsa = createMemoryFsa();
+  const anchored = await makeDesktopWorld({ fsa: anchorFsa,
+    beforeSelect: (query, db) => {
+      if (query.startsWith('SELECT id, name, source, created_at, updated_at FROM folders') &&
+          ++anchorReads === 2) {
+        db.prepare('UPDATE sync_object_state SET last_applied_payload_sha256 = ? WHERE sync_peer_id = ? AND object_domain = ? AND object_id = ?')
+          .run('a'.repeat(64), REMOTE, FOLDER_DOMAIN, 'f_anchor');
+      }
+    }
+  });
+  await anchored.desktop.publish({ objectDomain: CHAT_DOMAIN, objectId: 'chat-seed',
+    payload: chatPayloadFor('chat-seed', 'snap-seed', 'seed'), mint: 'seed' });
+  const root = await makeDesktopWriter(anchorFsa, LOCAL).publish({
+    objectDomain: FOLDER_DOMAIN, objectId: 'f_anchor',
+    payload: folderPayload('f_anchor', 'Before'), mint: 'anchor-root'
+  });
+  anchored.insertFolder('f_anchor', 'After');
+  anchored.insertFolder('f_other', 'Other');
+  anchored.anchorApplied(FOLDER_DOMAIN, 'f_anchor', root);
+  const changedAnchor = await anchored.publication.publishOnce(target(FOLDER_DOMAIN, 'f_anchor'));
+  check(changedAnchor.outcome === 'target-stale' && anchored.sqlWrites.length === 0 &&
+    anchored.state(FOLDER_DOMAIN, 'f_other') === null,
+    'changed applied anchor aborts before intent, with no fallback');
+  anchored.db.close();
+
+  const denied = await makeDesktopWorld({ fsa: createMemoryFsa(), generationState: 'p01' });
+  await denied.desktop.publish({ objectDomain: CHAT_DOMAIN, objectId: 'chat-seed',
+    payload: chatPayloadFor('chat-seed', 'snap-seed', 'seed'), mint: 'seed' });
+  denied.insertFolder('f_denied', 'Denied');
+  denied.insertFolder('f_other', 'Other');
+  const noAuthority = await denied.publication.publishOnce(target(FOLDER_DOMAIN, 'f_denied'));
+  check(noAuthority.ok === false && noAuthority.repositoryMutated === false &&
+    denied.state(FOLDER_DOMAIN, 'f_denied') === null &&
+    denied.state(FOLDER_DOMAIN, 'f_other') === null,
+    'failed P02 generation authority writes neither selected nor unrelated object');
+  denied.db.close();
+
+  const foreignFsa = createMemoryFsa();
+  const foreign = await makeDesktopWorld({ fsa: foreignFsa,
+    peers: [{ syncPeerId: LOCAL, writerKey: await writerKeyHex(LOCAL, webcrypto) }] });
+  await foreign.desktop.publish({ objectDomain: CHAT_DOMAIN, objectId: 'chat-seed',
+    payload: chatPayloadFor('chat-seed', 'snap-seed', 'seed'), mint: 'seed' });
+  await makeDesktopWriter(foreignFsa, LOCAL).publish({
+    objectDomain: FOLDER_DOMAIN, objectId: 'f_foreign_exact',
+    payload: folderPayload('f_foreign_exact', 'Peer'), mint: 'peer-root'
+  });
+  foreign.insertFolder('f_foreign_exact', 'Local');
+  foreign.insertFolder('f_other', 'Other');
+  const refused = await foreign.publication.publishOnce(target(FOLDER_DOMAIN, 'f_foreign_exact'));
+  check(refused.outcome === 'target-ineligible' && foreign.sqlWrites.length === 0 &&
+    foreign.state(FOLDER_DOMAIN, 'f_foreign_exact') === null &&
+    foreign.state(FOLDER_DOMAIN, 'f_other') === null,
+    'foreign-rooted exact target cannot mint second root or fall back');
+  foreign.db.close();
 });
 
 /* ====================================================================== */

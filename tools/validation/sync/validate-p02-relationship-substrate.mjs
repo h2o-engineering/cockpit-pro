@@ -32,8 +32,8 @@
  *   K  pack / dist inventory carries the new modules and the packed layout
  *      resolves their imports;
  *   L  writer identity: the generic allowlist does not name
- *      p02.relationship-apply, the command module is its single home, and
- *      the F17 ceiling is 23.
+ *      p02.relationship-apply; the dedicated command installs it in production,
+ *      the F16 in-memory proof installs it separately, and F17 remains at 23.
  */
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -202,6 +202,10 @@ async function runVectors(family, validate) {
   return { positive: positive.length, negative: negative.length };
 }
 
+function unicodeVectorInput(vector) {
+  return vector.input ?? `${vector.prefix}${vector.repeatCharacter.repeat(vector.repeatCount)}`;
+}
+
 await section('B folder strict contract vectors', async () => {
   const counts = await runVectors('folder', domains.validateFolderCatalogStatePayload);
   check(counts.positive >= 8 && counts.negative >= 40, `folder vector coverage ${JSON.stringify(counts)}`);
@@ -245,6 +249,36 @@ await section('C binding strict contract vectors', async () => {
   /* The binding chatId rule IS the v2 envelope objectId rule. */
   for (const sample of ['chat-a', ' chat', '', 'a'.repeat(512), 'a'.repeat(513), 'chat' + String.fromCharCode(1), 'chat', 'chat x']) {
     check(domains.isChatObjectId(sample) === contract.strictSyncIdentifier(sample), `binding chatId rule matches the envelope strict identifier for ${JSON.stringify(sample)}`);
+  }
+});
+
+await section('C1 shared Unicode parity vectors', async () => {
+  const chatIds = vectors.unicodeParity.chatIds;
+  const folderNames = vectors.unicodeParity.folderNames;
+  check(chatIds.length >= 8 && folderNames.length >= 9, 'shared Unicode parity vector coverage');
+  for (const vector of chatIds) {
+    const value = unicodeVectorInput(vector);
+    if (vector.expectedTrimmed !== undefined) {
+      check(value.trim() === vector.expectedTrimmed, `chat ${vector.id}: JS trim`);
+    }
+    check(domains.isChatObjectId(value) === vector.expectedValid, `chat ${vector.id}: identifier`);
+    const code = await codeOf(() => domains.validateChatFolderBindingPayload({
+      schema: 'h2o.studio.chatFolderBinding.v1', chatId: value, folderId: null
+    }, value));
+    check(code === (vector.expectedValid ? 'ok' : 'p02-rel-binding-chat-id-invalid'),
+      `chat ${vector.id}: binding payload ${code}`);
+  }
+  for (const vector of folderNames) {
+    const value = unicodeVectorInput(vector);
+    check(domains.canonicalFolderName(value) === vector.expectedCanonical,
+      `folder ${vector.id}: canonical name`);
+    check(domains.isCanonicalFolderName(value) === vector.expectedValid,
+      `folder ${vector.id}: canonical predicate`);
+    const code = await codeOf(() => domains.validateFolderCatalogStatePayload({
+      schema: 'h2o.studio.folderCatalogState.v1', folderId: 'f_unicode', name: value
+    }, 'f_unicode'));
+    check(code === (vector.expectedValid ? 'ok' : 'p02-rel-folder-name-invalid'),
+      `folder ${vector.id}: folder payload ${code}`);
   }
 });
 
@@ -416,6 +450,115 @@ await section('F migration v23 on a disposable fixture', async () => {
 
 /* ---------------------------------------------------------------------- */
 await section('H static audit: domain-qualified sync_object_state access', async () => {
+  /* Read only source string literals. This keeps comments, nearby variables,
+   * and unrelated SQL statements out of the qualification decision. */
+  function sourceLiterals(source, rust) {
+    const literals = [];
+    for (let i = 0; i < source.length;) {
+      if (source.startsWith('//', i)) { i = source.indexOf('\n', i + 2); if (i < 0) break; continue; }
+      if (source.startsWith('/*', i)) {
+        const end = source.indexOf('*/', i + 2);
+        if (end < 0) throw new Error('unterminated source comment');
+        i = end + 2; continue;
+      }
+      let quote = source[i];
+      let rawEnd = null;
+      if (rust && source[i] === 'r') {
+        const raw = /^r(#{0,8})"/.exec(source.slice(i));
+        if (raw) { quote = '"'; rawEnd = '"' + raw[1]; i += raw[0].length; }
+      }
+      if (!rawEnd && !(quote === '"' || (!rust && (quote === "'" || quote === '`')))) { i++; continue; }
+      const start = rawEnd ? i - (rawEnd.length + 1) : i++;
+      const contentStart = i;
+      if (rawEnd) {
+        const end = source.indexOf(rawEnd, i);
+        if (end < 0) throw new Error('unterminated Rust raw string');
+        literals.push({ start, end: end + rawEnd.length, value: source.slice(i, end), dynamic: false });
+        i = end + rawEnd.length;
+      } else {
+        while (i < source.length && source[i] !== quote) {
+          if (source[i] === '\\') i++;
+          i++;
+        }
+        if (i >= source.length) throw new Error('unterminated source string');
+        let value = source.slice(contentStart, i);
+        const dynamic = quote === '`' && value.includes('${');
+        value = value.replace(/\\\r?\n\s*/g, ' ').replace(/\\(['"`\\])/g, '$1');
+        literals.push({ start, end: i + 1, value, dynamic });
+        i++;
+      }
+    }
+    return literals;
+  }
+  function sqlCode(sql) {
+    let code = '';
+    for (let i = 0; i < sql.length;) {
+      if (sql.startsWith('--', i)) {
+        const end = sql.indexOf('\n', i + 2);
+        const stop = end < 0 ? sql.length : end;
+        code += ' '.repeat(stop - i); i = stop; continue;
+      }
+      if (sql.startsWith('/*', i)) {
+        const end = sql.indexOf('*/', i + 2);
+        if (end < 0) throw new Error('unterminated SQL comment');
+        code += ' '.repeat(end + 2 - i); i = end + 2; continue;
+      }
+      if (sql[i] === "'") {
+        const start = i++;
+        while (i < sql.length) {
+          if (sql[i] === "'" && sql[i + 1] === "'") { i += 2; continue; }
+          if (sql[i++] === "'") break;
+        }
+        if (sql[i - 1] !== "'") throw new Error('unterminated SQL value');
+        code += ' '.repeat(i - start); continue;
+      }
+      code += sql[i++];
+    }
+    return code;
+  }
+  function auditSource(source, rust) {
+    const groups = [];
+    for (const literal of sourceLiterals(source, rust)) {
+      const prior = groups[groups.length - 1];
+      const gap = prior && source.slice(prior.end, literal.start)
+        .replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, ' ');
+      const joined = !rust && prior && /^\s*\+\s*(?:[\w$]+\s*\+\s*)?$/.test(gap);
+      if (joined) {
+        prior.value += (/[\w$]/.test(gap) ? ' __DYNAMIC__ ' : ' ') + literal.value;
+        prior.dynamic ||= literal.dynamic || /[\w$]/.test(gap);
+        prior.end = literal.end;
+      } else groups.push({ ...literal });
+    }
+    const found = [];
+    for (const group of groups) {
+      if (!/\bsync_object_state\b/i.test(group.value)) continue;
+      /* A text label or prose quote is not an SQL command. A SQL-looking
+       * fragment in an unsupported construction is ambiguous and fails. */
+      const sql = group.value.trimStart();
+      if (!/^(?:SELECT|INSERT|UPDATE|DELETE|REPLACE|WITH|CREATE|ALTER|DROP)\b/i.test(sql)) {
+        if (/^(?:FROM|INTO|JOIN|TABLE)\s+sync_object_state\b/i.test(sql))
+          throw new Error('SQL table fragment was not joined to its statement');
+        continue;
+      }
+      if (group.dynamic && group.value.includes('${')) throw new Error('dynamic SQL template contains sync_object_state');
+      const code = sqlCode(group.value);
+      const trailing = !rust && /^\s*\+\s*[\w$]/.test(source.slice(group.end, group.end + 80));
+      for (const statement of code.split(';')) {
+        const table = /\b(?:FROM|INTO|UPDATE|JOIN|TABLE)\s+sync_object_state\b/gi;
+        let match;
+        while ((match = table.exec(statement))) {
+          const dynamic = group.dynamic || trailing;
+          const resolvesIdentity = /\bobject_id\b/i.test(statement) || dynamic;
+          const insert = /\b(?:INSERT|REPLACE)\s+INTO\s+sync_object_state\b/i.test(statement);
+          const qualified = insert
+            ? /\bINTO\s+sync_object_state\s*\([^)]*\bobject_domain\b/i.test(statement)
+            : /\b(?:WHERE|ON)\b[\s\S]*\bobject_domain\s*(?:=|\bIN\b|\bIS\b)/i.test(statement);
+          found.push({ offset: group.start, resolvesIdentity, qualified });
+        }
+      }
+    }
+    return found;
+  }
   const scopes = [
     'src-surfaces-base/studio/sync', 'src-surfaces-base/studio/platform', 'src-surfaces-base/studio/store',
     'packages/core', 'packages/browser-adapters/chrome', 'apps/studio/desktop/src-tauri/src'
@@ -449,24 +592,14 @@ await section('H static audit: domain-qualified sync_object_state access', async
        * statements; cargo test proves them. */
       text = text.slice(0, text.indexOf('#[cfg(test)]'));
     }
-    /* Only occurrences in SQL statement position count as statements: a
-     * table name after FROM / INTO / UPDATE / JOIN / TABLE. Prose mentions in
-     * comments and string constants used as labels are not statements. */
-    const re = /\b(FROM|INTO|UPDATE|JOIN|TABLE)\s+sync_object_state\b/g;
-    const hits = [];
-    let match;
-    while ((match = re.exec(text))) hits.push(match.index + match[0].indexOf('sync_object_state'));
-    for (const [index, hit] of hits.entries()) {
-      const previous = index > 0 ? hits[index - 1] : -Infinity;
-      const next = index + 1 < hits.length ? hits[index + 1] : Infinity;
-      const from = Math.max(0, hit - 400, Math.ceil((previous + hit) / 2));
-      const to = Math.min(text.length, hit + 700, Math.floor((hit + next) / 2));
-      const window = text.slice(from, to);
-      const resolvesIdentity = /\bobject_id\b/.test(window);
-      const qualified = /\bobject_domain\b/.test(window);
+    let hits;
+    try { hits = auditSource(text, file.endsWith('.rs')); }
+    catch (error) { check(false, `ambiguous sync_object_state extraction at ${path.relative(repo, file)}: ${error.message}`); continue; }
+    for (const { offset, resolvesIdentity, qualified } of hits) {
+      const line = text.slice(0, offset).split('\n').length;
       audited += 1;
-      statements.push({ file: path.relative(repo, file), line: text.slice(0, hit).split('\n').length, resolvesIdentity, qualified });
-      if (resolvesIdentity) check(qualified, `unqualified sync_object_state access at ${path.relative(repo, file)}:${text.slice(0, hit).split('\n').length}`);
+      statements.push({ file: path.relative(repo, file), line, resolvesIdentity, qualified });
+      if (resolvesIdentity) check(qualified, `unqualified sync_object_state access at ${path.relative(repo, file)}:${line}`);
     }
   }
   /* At the T01 baseline the production scope holds 18 statements: 17 resolve
@@ -485,9 +618,31 @@ await section('H static audit: domain-qualified sync_object_state access', async
     'apps/studio/desktop/src-tauri/src/item11_delivery_destination.rs',
     'apps/studio/desktop/src-tauri/src/round2a_identity_recovery.rs'
   ]) check(identityResolving.some((s) => s.file === required), `audit reached ${required}`);
-  /* Negative control: an unqualified statement is caught by the same rule. */
-  const probe = "sqlSelect('SELECT * FROM sync_object_state WHERE sync_peer_id = ? AND object_id = ?', [peer, id])";
-  check(/\bobject_id\b/.test(probe) && !/\bobject_domain\b/.test(probe), 'negative control: the rule flags an unqualified statement');
+  const probe = (source, rust = false) => auditSource(source, rust);
+  check(probe("// object_domain\nsqlSelect('SELECT * FROM sync_object_state WHERE object_id = ?')")[0]?.qualified === false,
+    'negative control: source comment cannot qualify SQL');
+  check(probe("sqlSelect('SELECT * FROM sync_object_state WHERE object_id = ?; SELECT object_domain FROM other_table')")[0]?.qualified === false,
+    'negative control: another SQL statement cannot qualify access');
+  check(probe("sqlSelect(\"SELECT * FROM sync_object_state WHERE object_id = ? AND note = 'object_domain'\")")[0]?.qualified === false,
+    'negative control: SQL value cannot qualify access');
+  check(probe("const note = 'prose FROM sync_object_state object_id'; // SELECT * FROM sync_object_state WHERE object_id\n").length === 0,
+    'negative control: prose and source comments are ignored');
+  check(probe("sqlSelect('SELECT * FROM sync_object_state WHERE object_id = ? ' + 'AND object_domain = ?')")[0]?.qualified === true,
+    'positive control: concatenated JS SQL is statement-local');
+  check(probe("sqlSelect('SELECT * FROM sync_object_state ' + /* SQL assembly */ 'WHERE object_domain = ? AND object_id = ?')")[0]?.qualified === true,
+    'positive control: source comment between SQL fragments is ignored');
+  check(probe('const QUERY = `SELECT * FROM sync_object_state WHERE object_domain = ? AND object_id = ?`')[0]?.qualified === true,
+    'positive control: JS template SQL is recognized');
+  check(probe('sqlx::query("SELECT * FROM sync_object_state \\\n      WHERE object_domain = ? AND object_id = ?")', true)[0]?.qualified === true,
+    'positive control: continued Rust SQL is recognized');
+  check(probe('sqlx::query(r#"SELECT * FROM sync_object_state WHERE object_domain = ? AND object_id = ?"#)', true)[0]?.qualified === true,
+    'positive control: raw Rust SQL is recognized');
+  check(probe("sqlSelect('SELECT * FROM sync_object_state WHERE object_id = ? ' + predicate)")[0]?.qualified === false,
+    'negative control: dynamic qualification cannot hide an unqualified access');
+  let ambiguousRefused = false;
+  try { probe("sqlSelect('SELECT * ' + build() + 'FROM sync_object_state WHERE object_id = ?')"); }
+  catch (error) { ambiguousRefused = /not joined/.test(error.message); }
+  check(ambiguousRefused, 'negative control: unsupported SQL construction fails closed');
 });
 
 /* ---------------------------------------------------------------------- */
@@ -740,13 +895,24 @@ await section('L writer identity, command home and F17 ceiling', async () => {
   check(writer.includes("'p02.relationship-apply'") && writer.includes('p02_relationship_apply_identity_bind_passed'), 'F16 installer/proof carry the successor allowlist assertions');
   const command = read('apps/studio/desktop/src-tauri/src/p02_relationship_apply.rs');
   check(command.includes('pub(crate) const P02_RELATIONSHIP_APPLY_IDENTITY: &str = "p02.relationship-apply";'), 'the identity constant lives in the command module');
-  check((command.match(/install_writer_identity_function\(conn, P02_RELATIONSHIP_APPLY_IDENTITY\)/g) || []).length === 1, 'exactly one identity installation site');
+  const identityInstall = /install_writer_identity_function\s*\(\s*[^,()]+,\s*(?:crate::p02_relationship_apply::)?P02_RELATIONSHIP_APPLY_IDENTITY\s*,?\s*\)/g;
+  const commandRun = command.slice(command.indexOf('pub async fn run_relationship_apply('), command.indexOf('\n#[cfg(test)]'));
+  check((commandRun.match(identityInstall) || []).length === 1, 'exactly one production relationship identity installation in the dedicated command');
   check(command.includes('#[serde(deny_unknown_fields)]') && command.includes('BEGIN IMMEDIATE') && command.includes('ROLLBACK') && command.includes('COMMIT'), 'bounded DTO and the BEGIN IMMEDIATE / ROLLBACK / COMMIT model');
   const lib = read('apps/studio/desktop/src-tauri/src/lib.rs');
   check(lib.includes('pub mod p02_relationship_apply;') && (lib.match(/p02_relationship_apply::h2o_p02_relationship_apply,/g) || []).length === 2, 'one mod declaration, registered in both handler variants');
   const rustSources = fs.readdirSync(rel('apps/studio/desktop/src-tauri/src')).filter((f) => f.endsWith('.rs'));
-  const installers = rustSources.filter((f) => read('apps/studio/desktop/src-tauri/src', f).includes('P02_RELATIONSHIP_APPLY_IDENTITY)'));
-  check(installers.join(',') === 'p02_relationship_apply.rs', `identity installed only by the command module (${installers.join(',')})`);
+  const installers = rustSources.flatMap((f) => {
+    const source = read('apps/studio/desktop/src-tauri/src', f);
+    return [...source.matchAll(identityInstall)].map(() => f);
+  });
+  check(installers.sort().join(',') === 'p02_relationship_apply.rs,sqlite_writer_identity.rs',
+    `relationship identity installed by the dedicated command and accepted F16 proof only (${installers.join(',')})`);
+  const f16Start = writer.indexOf('pub async fn f16_prove_folder_bindings_trigger_protection()');
+  const f16Proof = writer.slice(f16Start, writer.indexOf('\n#[cfg(test)]', f16Start));
+  check(f16Start >= 0 && f16Proof.includes('SqliteConnection::connect("sqlite::memory:")') &&
+    (f16Proof.match(identityInstall) || []).length === 1,
+    'the second relationship identity installation is confined to the F16 in-memory proof');
   check(read('tools/validation/release/validate-f17-build-package.mjs').includes('const EXPECTED_STUDIO_MIGRATION_MAX = 23;') &&
     read('tools/validation/release/validate-f17-migration-rollback.mjs').includes('const EXPECTED_STUDIO_MIGRATION_MAX = 23;'), 'F17 ceilings are 23');
   check(!fs.existsSync(rel('apps/studio/desktop/src-tauri/capabilities')) || fs.readdirSync(rel('apps/studio/desktop/src-tauri/capabilities')).every((f) => !read('apps/studio/desktop/src-tauri/capabilities', f).includes('relationship')),

@@ -37,7 +37,8 @@ import { createP02ReceiveComposition }
   from '../core/sync-object-reconcile-v2.mjs';
 import { classifyObjectState }
   from '../core/sync-object-classifier-v2.mjs';
-import { createP02AnchorSet } from '../core/sync-p02-anchor-set-v2.mjs';
+import { createP02AnchorSet, matchAnchorPair, P02_ANCHOR_MATCH, P02_ANCHOR_SET_V2 }
+  from '../core/sync-p02-anchor-set-v2.mjs';
 import { P02_ADMISSION_DISPOSITION } from '../core/sync-branch-evidence-v2.mjs';
 import { evaluateFormatGate } from '../core/sync-format-gate-v2.mjs';
 import { createLocalReaderTransportPrimitives }
@@ -373,12 +374,9 @@ export function createDesktopP02ReverseRuntime({
 
   /*
    * The canonical local head, by domain. Chat: the accepted v1 projection
-   * anchor. Relationship families have no Desktop projection in this slice
-   * (direction coverage is Chrome -> Desktop only), so their canonical head IS
-   * the applied P02 anchor recorded in the domain-qualified protocol row: an
-   * object with no applied anchor is remote-first, an object whose admitted
-   * leaf equals its applied anchor is converged, and a proven descendant of
-   * the anchor is remote-ahead.
+   * anchor. For relationship families, the direction-qualified published or
+   * applied protocol pair names the local head. Its use as ancestry evidence
+   * below still requires verified immutable repository bytes and provenance.
    */
   async function canonicalLocalHeadFor(objectDomain, objectId) {
     if (objectDomain === CHAT_OBJECT_DOMAIN) {
@@ -397,12 +395,13 @@ export function createDesktopP02ReverseRuntime({
       return null;
     }
     const state = await protocolState(objectId, objectDomain);
-    const applied = state?.lastApplied;
-    if (applied && strictId(applied.revisionId) && HEX64.test(applied.revisionBlobSha256 || '')) {
+    const anchor = state?.convergedDirection === 'published' ? state.lastPublished
+      : state?.convergedDirection === 'applied' ? state.lastApplied : null;
+    if (anchor && strictId(anchor.revisionId) && HEX64.test(anchor.revisionBlobSha256 || '')) {
       return {
-        revisionId: applied.revisionId,
-        revisionBlobSha256: applied.revisionBlobSha256,
-        ...(HEX64.test(applied.payloadSha256 || '') ? { payloadSha256: applied.payloadSha256 } : {}),
+        revisionId: anchor.revisionId,
+        revisionBlobSha256: anchor.revisionBlobSha256,
+        ...(HEX64.test(anchor.payloadSha256 || '') ? { payloadSha256: anchor.payloadSha256 } : {}),
         deleted: false
       };
     }
@@ -465,6 +464,86 @@ export function createDesktopP02ReverseRuntime({
     return { status: 'evaluated', dependency, leaf: read.leaf, canonical: read.canonical };
   }
 
+  /* A protocol pair selects proof; it is never proof by itself. Walk the
+   * verified writer head through immutable repository revisions to the real
+   * root, then project only the anchor and its actual ancestors. */
+  async function verifiedRelationshipAnchors({ peer, objectDomain, objectId, objectKey, retained, anchorSet }) {
+    const local = await localPeerId();
+    if (objectKey !== await objectKeyHex(objectDomain, objectId, cryptoImplementation))
+      fail('p02-desktop-anchor-object-key-invalid');
+    const selected = anchorSet.pairs;
+    for (const record of retained) {
+      if (record.disposition === P02_ADMISSION_DISPOSITION.QUARANTINED) continue;
+      const parent = { revisionId: record.document?.previousRevisionId,
+        revisionBlobSha256: record.document?.previousRevisionBlobSha256 };
+      const match = matchAnchorPair(anchorSet, parent);
+      if (match === P02_ANCHOR_MATCH.IDENTITY_CONFLICT)
+        fail('p02-desktop-anchor-identity-conflict');
+    }
+    const projected = new Map();
+    const retainedById = new Map(retained.map((item) => [item.document.revisionId, item]));
+    for (const pair of selected) {
+      const writer = pair.origin === P02_ANCHOR_SET_V2.ORIGIN.PUBLISHED ? local
+        : pair.origin === P02_ANCHOR_SET_V2.ORIGIN.APPLIED ? peer.syncPeerId : null;
+      if (!writer) fail('p02-desktop-anchor-origin-invalid');
+      const state = await reader.readWriterState({ writerSyncPeerId: writer });
+      if (state?.status !== 'verified') fail('p02-desktop-anchor-head-unverified');
+      const heads = (state.snapshot?.heads || []).filter((head) =>
+        head.objectDomain === objectDomain && head.objectId === objectId &&
+        head.objectKey === objectKey && head.writerSyncPeerId === writer);
+      if (heads.length !== 1) fail('p02-desktop-anchor-head-ambiguous');
+      const path = [];
+      const seen = new Set();
+      let cursor = { revisionId: heads[0].revisionId,
+        revisionBlobSha256: heads[0].revisionBlobSha256 };
+      let anchorIndex = -1;
+      let rooted = false;
+      for (let depth = 0; depth < 256; depth += 1) {
+        if (!strictId(cursor.revisionId) || !HEX64.test(cursor.revisionBlobSha256 || '') ||
+            seen.has(cursor.revisionBlobSha256)) fail('p02-desktop-anchor-chain-invalid');
+        seen.add(cursor.revisionBlobSha256);
+        const read = await reader.readRevision({ objectDomain, objectId, objectKey,
+          revisionBlobSha256: cursor.revisionBlobSha256 });
+        const revision = read?.status === 'verified' ? read.value : null;
+        if (!revision || revision.objectDomain !== objectDomain ||
+            revision.objectId !== objectId || revision.revisionId !== cursor.revisionId ||
+            ![local, peer.syncPeerId].includes(revision.writerSyncPeerId) ||
+            (depth === 0 && revision.writerSyncPeerId !== writer))
+          fail('p02-desktop-anchor-revision-unverified');
+        validateRelationshipPayload(objectDomain, revision.payload, objectId);
+        if (revision.revisionId === pair.revisionId ||
+            cursor.revisionBlobSha256 === pair.revisionBlobSha256) {
+          if (revision.revisionId !== pair.revisionId ||
+              cursor.revisionBlobSha256 !== pair.revisionBlobSha256 ||
+              revision.writerSyncPeerId !== writer ||
+              (pair.payloadSha256 && revision.payloadSha256 !== pair.payloadSha256))
+            fail('p02-desktop-anchor-revision-mismatch');
+          anchorIndex = path.length;
+        }
+        path.push({ document: revision, revisionBlobSha256: cursor.revisionBlobSha256,
+          validated: true, anchorProjected: true });
+        const parentId = revision.previousRevisionId;
+        const parentBlob = revision.previousRevisionBlobSha256;
+        if (parentId === null && parentBlob === null) { rooted = true; break; }
+        if (!strictId(parentId) || !HEX64.test(parentBlob || ''))
+          fail('p02-desktop-anchor-chain-invalid');
+        cursor = { revisionId: parentId, revisionBlobSha256: parentBlob };
+      }
+      if (!rooted || anchorIndex < 0) fail('p02-desktop-anchor-ancestry-unverified');
+      for (const item of path.slice(anchorIndex)) {
+        const id = item.document.revisionId;
+        const existing = retainedById.get(id) || projected.get(id);
+        if (existing) {
+          if (existing.revisionBlobSha256 !== item.revisionBlobSha256 ||
+              existing.document.previousRevisionId !== item.document.previousRevisionId ||
+              existing.document.previousRevisionBlobSha256 !== item.document.previousRevisionBlobSha256)
+            fail('p02-desktop-anchor-evidence-conflict');
+        } else projected.set(id, item);
+      }
+    }
+    return [...projected.values()];
+  }
+
   /*
    * One classifier for every family. Graph semantics stay in the canonical
    * classifier; this adapter supplies the domain's evidence, the domain's
@@ -506,6 +585,19 @@ export function createDesktopP02ReverseRuntime({
       integrityQuarantined: retained.some((record) =>
         record.disposition === P02_ADMISSION_DISPOSITION.QUARANTINED)
     };
+    if (isRelationshipObjectDomain(objectDomain)) {
+      try {
+        descriptor.retainedEvidence.push(...await verifiedRelationshipAnchors({
+          peer, objectDomain, objectId, objectKey, retained, anchorSet: p02AnchorSet
+        }));
+      } catch (error) {
+        return Object.freeze({
+          ...classifyObjectState({ ...descriptor, blockReason: 'transport' }),
+          reason: clean(error?.code) || 'p02-desktop-anchor-proof-unverified',
+          objectDomain, objectId, dependency: null
+        });
+      }
+    }
     const verdict = classifyObjectState(descriptor);
     if (!isRelationshipObjectDomain(objectDomain) ||
         verdict.classification !== 'remote-ahead' ||
